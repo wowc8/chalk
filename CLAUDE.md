@@ -1,7 +1,7 @@
-# CLAUDE.md — AI Agent Guardrails for LPA
+# CLAUDE.md — AI Agent Guardrails for Chalk
 
 ## Project Overview
-Lesson Plan Architect (LPA) — a Tauri v2 desktop app for teachers to manage and generate lesson plans.
+Chalk — a Tauri v2 desktop app for teachers to manage and generate lesson plans.
 
 ## Tech Stack
 - **Shell**: Tauri v2 (Rust backend)

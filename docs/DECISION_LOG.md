@@ -1,4 +1,4 @@
-# DECISION_LOG.md — LPA
+# DECISION_LOG.md — Chalk
 
 Record of architectural and implementation decisions.
 

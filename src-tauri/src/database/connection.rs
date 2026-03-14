@@ -80,7 +80,7 @@ impl Database {
     /// Returns the default database path under the OS data directory.
     pub fn default_path() -> PathBuf {
         let base = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
-        base.join("com.madison.lpa").join("lpa.db")
+        base.join("com.madison.chalk").join("chalk.db")
     }
 
     /// Execute a closure with a reference to the underlying connection.
