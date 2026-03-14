@@ -1,7 +1,7 @@
 [package]
-name = "lpa"
+name = "chalk"
 version = "0.1.0"
-description = "A Tauri App"
+description = "Chalk — a desktop lesson plan assistant for teachers"
 authors = ["you"]
 edition = "2021"
 
@@ -11,7 +11,7 @@ edition = "2021"
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
-name = "lpa_lib"
+name = "chalk_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -26,5 +26,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 tracing-appender = "0.2"
 dirs = "6"
-chrono = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+sqlite-vec = "0.1"
+uuid = { version = "1", features = ["v4"] }
+thiserror = "2"
+zerocopy = "0.8"
 

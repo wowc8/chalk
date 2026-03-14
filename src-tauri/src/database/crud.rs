@@ -1,0 +1,472 @@
+use rusqlite::params;
+
+use super::connection::{Database, DatabaseError, Result};
+use super::models::*;
+
+impl Database {
+    // ── Subjects ──────────────────────────────────────────────
+
+    pub fn create_subject(&self, input: &NewSubject) -> Result<Subject> {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO subjects (id, name, grade_level, description) VALUES (?1, ?2, ?3, ?4)",
+                params![id, input.name, input.grade_level, input.description],
+            )?;
+            self.get_subject_inner(conn, &id)
+        })
+    }
+
+    pub fn get_subject(&self, id: &str) -> Result<Subject> {
+        self.with_conn(|conn| self.get_subject_inner(conn, id))
+    }
+
+    fn get_subject_inner(
+        &self,
+        conn: &rusqlite::Connection,
+        id: &str,
+    ) -> Result<Subject> {
+        conn.query_row(
+            "SELECT id, name, grade_level, description, created_at, updated_at FROM subjects WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(Subject {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    grade_level: row.get(2)?,
+                    description: row.get(3)?,
+                    created_at: row.get(4)?,
+                    updated_at: row.get(5)?,
+                })
+            },
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound,
+            other => DatabaseError::Sqlite(other),
+        })
+    }
+
+    pub fn list_subjects(&self) -> Result<Vec<Subject>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, name, grade_level, description, created_at, updated_at FROM subjects ORDER BY name",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(Subject {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    grade_level: row.get(2)?,
+                    description: row.get(3)?,
+                    created_at: row.get(4)?,
+                    updated_at: row.get(5)?,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    pub fn update_subject(&self, id: &str, input: &NewSubject) -> Result<Subject> {
+        self.with_conn(|conn| {
+            let updated = conn.execute(
+                "UPDATE subjects SET name = ?1, grade_level = ?2, description = ?3, updated_at = datetime('now') WHERE id = ?4",
+                params![input.name, input.grade_level, input.description, id],
+            )?;
+            if updated == 0 {
+                return Err(DatabaseError::NotFound);
+            }
+            self.get_subject_inner(conn, id)
+        })
+    }
+
+    pub fn delete_subject(&self, id: &str) -> Result<()> {
+        self.with_conn(|conn| {
+            let deleted = conn.execute("DELETE FROM subjects WHERE id = ?1", params![id])?;
+            if deleted == 0 {
+                return Err(DatabaseError::NotFound);
+            }
+            Ok(())
+        })
+    }
+
+    // ── Lesson Plans ──────────────────────────────────────────
+
+    pub fn create_lesson_plan(&self, input: &NewLessonPlan) -> Result<LessonPlan> {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO lesson_plans (id, subject_id, title, content, source_doc_id, source_table_index, learning_objectives)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    id,
+                    input.subject_id,
+                    input.title,
+                    input.content.as_deref().unwrap_or(""),
+                    input.source_doc_id,
+                    input.source_table_index,
+                    input.learning_objectives,
+                ],
+            )?;
+            self.get_lesson_plan_inner(conn, &id)
+        })
+    }
+
+    pub fn get_lesson_plan(&self, id: &str) -> Result<LessonPlan> {
+        self.with_conn(|conn| self.get_lesson_plan_inner(conn, id))
+    }
+
+    fn get_lesson_plan_inner(
+        &self,
+        conn: &rusqlite::Connection,
+        id: &str,
+    ) -> Result<LessonPlan> {
+        conn.query_row(
+            "SELECT id, subject_id, title, content, source_doc_id, source_table_index, learning_objectives, status, created_at, updated_at
+             FROM lesson_plans WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(LessonPlan {
+                    id: row.get(0)?,
+                    subject_id: row.get(1)?,
+                    title: row.get(2)?,
+                    content: row.get(3)?,
+                    source_doc_id: row.get(4)?,
+                    source_table_index: row.get(5)?,
+                    learning_objectives: row.get(6)?,
+                    status: row.get(7)?,
+                    created_at: row.get(8)?,
+                    updated_at: row.get(9)?,
+                })
+            },
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound,
+            other => DatabaseError::Sqlite(other),
+        })
+    }
+
+    pub fn list_lesson_plans_by_subject(&self, subject_id: &str) -> Result<Vec<LessonPlan>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, subject_id, title, content, source_doc_id, source_table_index, learning_objectives, status, created_at, updated_at
+                 FROM lesson_plans WHERE subject_id = ?1 ORDER BY updated_at DESC",
+            )?;
+            let rows = stmt.query_map(params![subject_id], |row| {
+                Ok(LessonPlan {
+                    id: row.get(0)?,
+                    subject_id: row.get(1)?,
+                    title: row.get(2)?,
+                    content: row.get(3)?,
+                    source_doc_id: row.get(4)?,
+                    source_table_index: row.get(5)?,
+                    learning_objectives: row.get(6)?,
+                    status: row.get(7)?,
+                    created_at: row.get(8)?,
+                    updated_at: row.get(9)?,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    pub fn update_lesson_plan_content(&self, id: &str, content: &str) -> Result<LessonPlan> {
+        self.with_conn(|conn| {
+            let updated = conn.execute(
+                "UPDATE lesson_plans SET content = ?1, updated_at = datetime('now') WHERE id = ?2",
+                params![content, id],
+            )?;
+            if updated == 0 {
+                return Err(DatabaseError::NotFound);
+            }
+            self.get_lesson_plan_inner(conn, id)
+        })
+    }
+
+    pub fn update_lesson_plan_status(&self, id: &str, status: &str) -> Result<LessonPlan> {
+        self.with_conn(|conn| {
+            let updated = conn.execute(
+                "UPDATE lesson_plans SET status = ?1, updated_at = datetime('now') WHERE id = ?2",
+                params![status, id],
+            )?;
+            if updated == 0 {
+                return Err(DatabaseError::NotFound);
+            }
+            self.get_lesson_plan_inner(conn, id)
+        })
+    }
+
+    pub fn delete_lesson_plan(&self, id: &str) -> Result<()> {
+        self.with_conn(|conn| {
+            let deleted =
+                conn.execute("DELETE FROM lesson_plans WHERE id = ?1", params![id])?;
+            if deleted == 0 {
+                return Err(DatabaseError::NotFound);
+            }
+            Ok(())
+        })
+    }
+
+    // ── Metadata ──────────────────────────────────────────────
+
+    pub fn set_metadata(&self, input: &NewMetadata) -> Result<Metadata> {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.with_conn(|conn| {
+            // Upsert: if (lesson_plan_id, key) exists, update value; otherwise insert.
+            conn.execute(
+                "INSERT INTO metadata (id, lesson_plan_id, key, value)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(lesson_plan_id, key) DO UPDATE SET value = excluded.value",
+                params![id, input.lesson_plan_id, input.key, input.value],
+            )?;
+            // Fetch the actual row (may have a different id if upserted).
+            conn.query_row(
+                "SELECT id, lesson_plan_id, key, value, created_at FROM metadata WHERE lesson_plan_id = ?1 AND key = ?2",
+                params![input.lesson_plan_id, input.key],
+                |row| {
+                    Ok(Metadata {
+                        id: row.get(0)?,
+                        lesson_plan_id: row.get(1)?,
+                        key: row.get(2)?,
+                        value: row.get(3)?,
+                        created_at: row.get(4)?,
+                    })
+                },
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound,
+                other => DatabaseError::Sqlite(other),
+            })
+        })
+    }
+
+    pub fn get_metadata_for_plan(&self, lesson_plan_id: &str) -> Result<Vec<Metadata>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, lesson_plan_id, key, value, created_at FROM metadata WHERE lesson_plan_id = ?1 ORDER BY key",
+            )?;
+            let rows = stmt.query_map(params![lesson_plan_id], |row| {
+                Ok(Metadata {
+                    id: row.get(0)?,
+                    lesson_plan_id: row.get(1)?,
+                    key: row.get(2)?,
+                    value: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    pub fn delete_metadata(&self, lesson_plan_id: &str, key: &str) -> Result<()> {
+        self.with_conn(|conn| {
+            let deleted = conn.execute(
+                "DELETE FROM metadata WHERE lesson_plan_id = ?1 AND key = ?2",
+                params![lesson_plan_id, key],
+            )?;
+            if deleted == 0 {
+                return Err(DatabaseError::NotFound);
+            }
+            Ok(())
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_db() -> Database {
+        Database::open_in_memory().unwrap()
+    }
+
+    #[test]
+    fn test_subject_crud() {
+        let db = test_db();
+
+        // Create
+        let subject = db
+            .create_subject(&NewSubject {
+                name: "Mathematics".into(),
+                grade_level: Some("9th".into()),
+                description: Some("Algebra and Geometry".into()),
+            })
+            .unwrap();
+        assert_eq!(subject.name, "Mathematics");
+
+        // Read
+        let fetched = db.get_subject(&subject.id).unwrap();
+        assert_eq!(fetched.name, "Mathematics");
+
+        // List
+        let all = db.list_subjects().unwrap();
+        assert_eq!(all.len(), 1);
+
+        // Update
+        let updated = db
+            .update_subject(
+                &subject.id,
+                &NewSubject {
+                    name: "Math".into(),
+                    grade_level: Some("10th".into()),
+                    description: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(updated.name, "Math");
+        assert_eq!(updated.grade_level.as_deref(), Some("10th"));
+
+        // Delete
+        db.delete_subject(&subject.id).unwrap();
+        assert!(matches!(
+            db.get_subject(&subject.id),
+            Err(DatabaseError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn test_lesson_plan_crud() {
+        let db = test_db();
+
+        let subject = db
+            .create_subject(&NewSubject {
+                name: "Science".into(),
+                grade_level: None,
+                description: None,
+            })
+            .unwrap();
+
+        // Create
+        let plan = db
+            .create_lesson_plan(&NewLessonPlan {
+                subject_id: subject.id.clone(),
+                title: "Photosynthesis".into(),
+                content: Some("Plants convert sunlight...".into()),
+                source_doc_id: None,
+                source_table_index: None,
+                learning_objectives: Some("Understand photosynthesis".into()),
+            })
+            .unwrap();
+        assert_eq!(plan.title, "Photosynthesis");
+        assert_eq!(plan.status, "draft");
+
+        // Read
+        let fetched = db.get_lesson_plan(&plan.id).unwrap();
+        assert_eq!(fetched.content, "Plants convert sunlight...");
+
+        // Update content
+        let updated = db
+            .update_lesson_plan_content(&plan.id, "Updated content")
+            .unwrap();
+        assert_eq!(updated.content, "Updated content");
+
+        // Update status
+        let published = db
+            .update_lesson_plan_status(&plan.id, "published")
+            .unwrap();
+        assert_eq!(published.status, "published");
+
+        // List by subject
+        let plans = db.list_lesson_plans_by_subject(&subject.id).unwrap();
+        assert_eq!(plans.len(), 1);
+
+        // Delete
+        db.delete_lesson_plan(&plan.id).unwrap();
+        assert!(matches!(
+            db.get_lesson_plan(&plan.id),
+            Err(DatabaseError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn test_metadata_crud() {
+        let db = test_db();
+
+        let subject = db
+            .create_subject(&NewSubject {
+                name: "History".into(),
+                grade_level: None,
+                description: None,
+            })
+            .unwrap();
+
+        let plan = db
+            .create_lesson_plan(&NewLessonPlan {
+                subject_id: subject.id.clone(),
+                title: "World War II".into(),
+                content: None,
+                source_doc_id: None,
+                source_table_index: None,
+                learning_objectives: None,
+            })
+            .unwrap();
+
+        // Set metadata
+        let meta = db
+            .set_metadata(&NewMetadata {
+                lesson_plan_id: plan.id.clone(),
+                key: "duration".into(),
+                value: "45 minutes".into(),
+            })
+            .unwrap();
+        assert_eq!(meta.key, "duration");
+        assert_eq!(meta.value, "45 minutes");
+
+        // Upsert same key
+        let updated = db
+            .set_metadata(&NewMetadata {
+                lesson_plan_id: plan.id.clone(),
+                key: "duration".into(),
+                value: "60 minutes".into(),
+            })
+            .unwrap();
+        assert_eq!(updated.value, "60 minutes");
+
+        // List metadata
+        let all = db.get_metadata_for_plan(&plan.id).unwrap();
+        assert_eq!(all.len(), 1);
+
+        // Delete metadata
+        db.delete_metadata(&plan.id, "duration").unwrap();
+        let all = db.get_metadata_for_plan(&plan.id).unwrap();
+        assert_eq!(all.len(), 0);
+    }
+
+    #[test]
+    fn test_cascade_delete() {
+        let db = test_db();
+
+        let subject = db
+            .create_subject(&NewSubject {
+                name: "Art".into(),
+                grade_level: None,
+                description: None,
+            })
+            .unwrap();
+
+        let plan = db
+            .create_lesson_plan(&NewLessonPlan {
+                subject_id: subject.id.clone(),
+                title: "Watercolors".into(),
+                content: None,
+                source_doc_id: None,
+                source_table_index: None,
+                learning_objectives: None,
+            })
+            .unwrap();
+
+        db.set_metadata(&NewMetadata {
+            lesson_plan_id: plan.id.clone(),
+            key: "medium".into(),
+            value: "watercolor".into(),
+        })
+        .unwrap();
+
+        // Deleting the subject should cascade-delete plans and their metadata.
+        db.delete_subject(&subject.id).unwrap();
+        assert!(matches!(
+            db.get_lesson_plan(&plan.id),
+            Err(DatabaseError::NotFound)
+        ));
+        let meta = db.get_metadata_for_plan(&plan.id).unwrap();
+        assert_eq!(meta.len(), 0);
+    }
+}

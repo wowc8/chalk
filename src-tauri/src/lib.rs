@@ -1,3 +1,4 @@
+pub mod database;
 mod logging;
 
 /// Tauri command: pipe frontend console errors to the backend structured log.

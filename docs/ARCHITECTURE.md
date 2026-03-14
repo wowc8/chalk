@@ -1,4 +1,4 @@
-# ARCHITECTURE.md — Lesson Plan Architect (LPA)
+# ARCHITECTURE.md — Chalk
 
 ## 1. System Philosophy
 
@@ -42,7 +42,7 @@ Remote-First check: Before any RAG operation, verify `last_modified` timestamp. 
 No writing to master doc without verified backup. Sequence: User Request → Copy File → Verify → Append. Failure at any step logs full stack trace.
 
 ### 4.2 Structured Logging
-JSON Structured Logging via the `tracing` crate. Logs are written to the OS-specific data directory (`~/Library/Application Support/com.madison.lpa/logs` on macOS). Frontend console errors are piped to the Rust backend for consolidated file-based logging.
+JSON Structured Logging via the `tracing` crate. Logs are written to the OS-specific data directory (`~/Library/Application Support/com.madison.chalk/logs` on macOS). Frontend console errors are piped to the Rust backend for consolidated file-based logging.
 
 ## 5. UI/UX Standards
 
