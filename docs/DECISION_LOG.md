@@ -47,3 +47,16 @@ Each entry follows:
 - `diesel`: Strong ORM but heavy macro usage and migration tooling doesn't integrate well with sqlite-vec virtual tables.
 - External vector DB (Qdrant, ChromaDB): Adds a separate process/service. Rejected to keep the app self-contained and offline-first.
 - INTEGER rowids directly: Would require changing the application ID scheme. TEXT UUIDs are more portable and collision-resistant for future sync scenarios.
+
+---
+
+## 2026-03-16 — AI Admin Agent & OAuth Integration
+
+**Decision**: Implement the admin module with file-based OAuth token/config/status persistence, async HTTP functions separated from MutexGuard-holding code, and a React conversational wizard for onboarding.
+
+**Rationale**: Tauri async commands require `Send` futures, but `std::sync::MutexGuard` is not `Send`. Extracting config/paths from the guarded state before `.await` points avoids holding the guard across async boundaries. File-based persistence (JSON) for tokens, config, and onboarding status keeps the admin state inspectable and debuggable without a database dependency. The conversational wizard UI hides OAuth/API complexity from teachers.
+
+**Alternatives considered**:
+- `tokio::sync::Mutex`: Would allow holding the guard across awaits but adds unnecessary async overhead for simple file operations.
+- Database-backed token storage: More complex than needed for single-user desktop app. JSON files are simpler and human-readable.
+- Single-page form instead of wizard: Rejected because the multi-step flow matches the spec's "conversational wizard" requirement and reduces cognitive load.

@@ -1,0 +1,15 @@
+@import "tailwindcss";
+
+@theme {
+  /* Retro-Future Batman palette */
+  --color-bat-dark: #0a0a0f;
+  --color-bat-charcoal: #1a1a2e;
+  --color-bat-navy: #16213e;
+  --color-bat-purple: #533483;
+  --color-bat-gold: #f0c040;
+  --color-bat-cyan: #00d4ff;
+  --color-bat-green: #39ff14;
+  --color-bat-red: #ff1744;
+  --color-bat-glass: rgba(26, 26, 46, 0.7);
+  --color-bat-glass-light: rgba(83, 52, 131, 0.3);
+}
