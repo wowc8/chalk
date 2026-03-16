@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { motion } from "framer-motion";
 
@@ -6,6 +6,11 @@ interface DriveFolder {
   id: string;
   name: string;
   mime_type: string;
+}
+
+interface BreadcrumbEntry {
+  id: string;
+  name: string;
 }
 
 interface Props {
@@ -19,22 +24,43 @@ export function StepFolderSelect({ onNext, onBack, setError }: Props) {
   const [loading, setLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [testing, setTesting] = useState(false);
+  const [breadcrumb, setBreadcrumb] = useState<BreadcrumbEntry[]>([
+    { id: "root", name: "My Drive" },
+  ]);
 
-  useEffect(() => {
-    loadFolders();
-  }, []);
+  const currentParentId = breadcrumb[breadcrumb.length - 1].id;
 
-  const loadFolders = async () => {
+  const loadFolders = useCallback(async (parentId: string) => {
     setLoading(true);
     setError(null);
+    setSelectedId(null);
     try {
-      const result = await invoke<DriveFolder[]>("list_drive_folders");
+      let result: DriveFolder[];
+      if (parentId === "root") {
+        result = await invoke<DriveFolder[]>("list_drive_folders");
+      } else {
+        result = await invoke<DriveFolder[]>("list_drive_subfolders", {
+          parentId,
+        });
+      }
       setFolders(result);
     } catch (e) {
       setError(`Failed to load folders: ${e}`);
     } finally {
       setLoading(false);
     }
+  }, [setError]);
+
+  useEffect(() => {
+    loadFolders(currentParentId);
+  }, [currentParentId, loadFolders]);
+
+  const handleDrillIn = (folder: DriveFolder) => {
+    setBreadcrumb((prev) => [...prev, { id: folder.id, name: folder.name }]);
+  };
+
+  const handleBreadcrumbNav = (index: number) => {
+    setBreadcrumb((prev) => prev.slice(0, index + 1));
   };
 
   const handleSelect = async () => {
@@ -72,10 +98,29 @@ export function StepFolderSelect({ onNext, onBack, setError }: Props) {
       <h2 className="text-2xl font-bold text-bat-cyan mb-2">
         Select Lesson Plan Folder
       </h2>
-      <p className="text-gray-400 text-sm mb-6">
+      <p className="text-gray-400 text-sm mb-4">
         Choose the Google Drive folder containing your lesson plans.
         Chalk will read and index documents from this folder.
       </p>
+
+      {/* Breadcrumb navigation */}
+      <nav className="flex items-center gap-1 text-sm mb-4 text-gray-400 overflow-x-auto">
+        {breadcrumb.map((entry, i) => (
+          <span key={entry.id} className="flex items-center gap-1 shrink-0">
+            {i > 0 && <span className="text-gray-600">/</span>}
+            {i < breadcrumb.length - 1 ? (
+              <button
+                onClick={() => handleBreadcrumbNav(i)}
+                className="hover:text-bat-cyan transition-colors"
+              >
+                {entry.name}
+              </button>
+            ) : (
+              <span className="text-white font-medium">{entry.name}</span>
+            )}
+          </span>
+        ))}
+      </nav>
 
       {loading ? (
         <div className="flex items-center justify-center py-12">
@@ -89,13 +134,14 @@ export function StepFolderSelect({ onNext, onBack, setError }: Props) {
       ) : folders.length === 0 ? (
         <div className="text-center py-8">
           <p className="text-gray-500 mb-4">
-            No folders found in your Drive. Create a folder with your
-            lesson plans and try again.
+            {breadcrumb.length > 1
+              ? "No subfolders in this folder."
+              : "No folders found in your Drive. Create a folder with your lesson plans and try again."}
           </p>
           <motion.button
             whileHover={{ scale: 1.05 }}
             whileTap={{ scale: 0.95 }}
-            onClick={loadFolders}
+            onClick={() => loadFolders(currentParentId)}
             className="px-4 py-2 border border-bat-cyan rounded-lg text-bat-cyan hover:bg-bat-cyan/10 transition-colors"
           >
             Refresh
@@ -108,6 +154,7 @@ export function StepFolderSelect({ onNext, onBack, setError }: Props) {
               key={folder.id}
               whileHover={{ x: 4 }}
               onClick={() => setSelectedId(folder.id)}
+              onDoubleClick={() => handleDrillIn(folder)}
               className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg text-left transition-colors ${
                 selectedId === folder.id
                   ? "bg-bat-purple/30 border border-bat-cyan/50"
@@ -133,6 +180,18 @@ export function StepFolderSelect({ onNext, onBack, setError }: Props) {
                   &#x2713;
                 </motion.span>
               )}
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleDrillIn(folder);
+                }}
+                className="ml-auto p-1 text-gray-500 hover:text-bat-cyan transition-colors"
+                title="Browse subfolders"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                </svg>
+              </button>
             </motion.button>
           ))}
         </div>

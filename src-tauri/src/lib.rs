@@ -51,6 +51,7 @@ pub fn run() {
             admin::oauth::test_folder_permissions_command,
             admin::oauth::check_onboarding_status,
             admin::oauth::list_drive_folders,
+            admin::oauth::list_drive_subfolders,
             admin::oauth::trigger_initial_shred,
         ])
         .run(tauri::generate_context!())
