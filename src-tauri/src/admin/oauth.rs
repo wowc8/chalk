@@ -1,6 +1,5 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::State;
@@ -22,6 +21,9 @@ pub enum OAuthError {
 
     #[error("Token refresh failed: {0}")]
     TokenRefresh(String),
+
+    #[error("Not configured: {0}")]
+    NotConfigured(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,8 +73,22 @@ pub struct OnboardingStatus {
     pub selected_folder_name: Option<String>,
 }
 
+impl Default for OnboardingStatus {
+    fn default() -> Self {
+        Self {
+            oauth_configured: false,
+            tokens_stored: false,
+            folder_selected: false,
+            folder_accessible: false,
+            initial_shred_complete: false,
+            selected_folder_id: None,
+            selected_folder_name: None,
+        }
+    }
+}
+
 pub struct OAuthClient {
-    config: OAuthConfig,
+    pub config: OAuthConfig,
     token_file: PathBuf,
     config_file: PathBuf,
     status_file: PathBuf,
@@ -116,114 +132,9 @@ impl OAuthClient {
         )
     }
 
-    pub async fn exchange_code(&self, code: &str) -> Result<TokenStorage, OAuthError> {
-        let client = reqwest::Client::new();
-
-        let params = [
-            ("client_id", self.config.client_id.as_str()),
-            ("client_secret", self.config.client_secret.as_str()),
-            ("code", code),
-            ("grant_type", "authorization_code"),
-            ("redirect_uri", self.config.redirect_uri.as_str()),
-        ];
-
-        let response = client
-            .post("https://oauth2.googleapis.com/token")
-            .form(&params)
-            .send()
-            .await?;
-
-        let token_response: HashMap<String, serde_json::Value> = response.json().await?;
-
-        let access_token = token_response
-            .get("access_token")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| OAuthError::TokenRefresh("Missing access_token".to_string()))?
-            .to_string();
-
-        let refresh_token = token_response
-            .get("refresh_token")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        let expires_in = token_response
-            .get("expires_in")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(3600);
-
-        let token_type = token_response
-            .get("token_type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Bearer")
-            .to_string();
-
-        let expires_at = Utc::now() + chrono::Duration::seconds(expires_in as i64);
-
-        let token_storage = TokenStorage {
-            access_token,
-            refresh_token,
-            expires_at,
-            token_type,
-        };
-
-        self.save_tokens(&token_storage)?;
-        info!("OAuth tokens exchanged and saved successfully");
-        Ok(token_storage)
-    }
-
-    pub async fn refresh_token(&self, refresh_token: &str) -> Result<TokenStorage, OAuthError> {
-        let client = reqwest::Client::new();
-
-        let params = [
-            ("client_id", self.config.client_id.as_str()),
-            ("client_secret", self.config.client_secret.as_str()),
-            ("refresh_token", refresh_token),
-            ("grant_type", "refresh_token"),
-        ];
-
-        let response = client
-            .post("https://oauth2.googleapis.com/token")
-            .form(&params)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            return Err(OAuthError::TokenRefresh(
-                "Failed to refresh token".to_string(),
-            ));
-        }
-
-        let token_response: HashMap<String, serde_json::Value> = response.json().await?;
-
-        let access_token = token_response
-            .get("access_token")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| OAuthError::TokenRefresh("Missing access_token".to_string()))?
-            .to_string();
-
-        let expires_in = token_response
-            .get("expires_in")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(3600);
-
-        let token_type = token_response
-            .get("token_type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Bearer")
-            .to_string();
-
-        let expires_at = Utc::now() + chrono::Duration::seconds(expires_in as i64);
-
-        let token_storage = TokenStorage {
-            access_token,
-            refresh_token: Some(refresh_token.to_string()),
-            expires_at,
-            token_type,
-        };
-
-        self.save_tokens(&token_storage)?;
-        info!("OAuth token refreshed successfully");
-        Ok(token_storage)
+    /// Extract config and token file path for use outside the MutexGuard.
+    pub fn exchange_params(&self) -> (OAuthConfig, PathBuf) {
+        (self.config.clone(), self.token_file.clone())
     }
 
     pub fn load_tokens(&self) -> Result<Option<TokenStorage>, OAuthError> {
@@ -241,25 +152,6 @@ impl OAuthClient {
         Ok(())
     }
 
-    pub async fn get_access_token(&self) -> Result<String, OAuthError> {
-        if let Some(tokens) = self.load_tokens()? {
-            if tokens.is_expired() {
-                if let Some(ref refresh) = tokens.refresh_token {
-                    let new_tokens = self.refresh_token(refresh).await?;
-                    return Ok(new_tokens.access_token);
-                }
-                return Err(OAuthError::TokenRefresh(
-                    "Token expired and no refresh token available".to_string(),
-                ));
-            }
-            Ok(tokens.access_token)
-        } else {
-            Err(OAuthError::TokenRefresh(
-                "No tokens available".to_string(),
-            ))
-        }
-    }
-
     pub fn load_onboarding_status(&self) -> OnboardingStatus {
         if self.status_file.exists() {
             if let Ok(content) = fs::read_to_string(&self.status_file) {
@@ -271,11 +163,7 @@ impl OAuthClient {
         OnboardingStatus {
             oauth_configured: self.config_file.exists(),
             tokens_stored: self.token_file.exists(),
-            folder_selected: false,
-            folder_accessible: false,
-            initial_shred_complete: false,
-            selected_folder_id: None,
-            selected_folder_name: None,
+            ..Default::default()
         }
     }
 
@@ -286,6 +174,152 @@ impl OAuthClient {
     }
 }
 
+/// Exchange an authorization code for tokens (async, no MutexGuard held).
+pub async fn exchange_code(
+    config: &OAuthConfig,
+    code: &str,
+    token_file: &Path,
+) -> Result<TokenStorage, OAuthError> {
+    let client = reqwest::Client::new();
+
+    let params = [
+        ("client_id", config.client_id.as_str()),
+        ("client_secret", config.client_secret.as_str()),
+        ("code", code),
+        ("grant_type", "authorization_code"),
+        ("redirect_uri", config.redirect_uri.as_str()),
+    ];
+
+    let response = client
+        .post("https://oauth2.googleapis.com/token")
+        .form(&params)
+        .send()
+        .await?;
+
+    let body: serde_json::Value = response.json().await?;
+
+    let access_token = body
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| OAuthError::TokenRefresh("Missing access_token in response".into()))?
+        .to_string();
+
+    let refresh_token = body
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let expires_in = body
+        .get("expires_in")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(3600);
+
+    let token_type = body
+        .get("token_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Bearer")
+        .to_string();
+
+    let expires_at = Utc::now() + chrono::Duration::seconds(expires_in as i64);
+
+    let tokens = TokenStorage {
+        access_token,
+        refresh_token,
+        expires_at,
+        token_type,
+    };
+
+    let content = serde_json::to_string_pretty(&tokens)?;
+    fs::write(token_file, content)?;
+    info!("OAuth tokens exchanged and saved");
+    Ok(tokens)
+}
+
+/// Refresh an expired access token (async, no MutexGuard held).
+pub async fn refresh_access_token(
+    config: &OAuthConfig,
+    refresh_token: &str,
+    token_file: &Path,
+) -> Result<TokenStorage, OAuthError> {
+    let client = reqwest::Client::new();
+
+    let params = [
+        ("client_id", config.client_id.as_str()),
+        ("client_secret", config.client_secret.as_str()),
+        ("refresh_token", refresh_token),
+        ("grant_type", "refresh_token"),
+    ];
+
+    let response = client
+        .post("https://oauth2.googleapis.com/token")
+        .form(&params)
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        return Err(OAuthError::TokenRefresh("Refresh request failed".into()));
+    }
+
+    let body: serde_json::Value = response.json().await?;
+
+    let access_token = body
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| OAuthError::TokenRefresh("Missing access_token in response".into()))?
+        .to_string();
+
+    let expires_in = body
+        .get("expires_in")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(3600);
+
+    let token_type = body
+        .get("token_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Bearer")
+        .to_string();
+
+    let expires_at = Utc::now() + chrono::Duration::seconds(expires_in as i64);
+
+    let tokens = TokenStorage {
+        access_token,
+        refresh_token: Some(refresh_token.to_string()),
+        expires_at,
+        token_type,
+    };
+
+    let content = serde_json::to_string_pretty(&tokens)?;
+    fs::write(token_file, content)?;
+    info!("OAuth token refreshed successfully");
+    Ok(tokens)
+}
+
+/// Get a valid access token, refreshing if needed (async, no MutexGuard held).
+pub async fn get_valid_access_token(
+    config: &OAuthConfig,
+    token_file: &Path,
+) -> Result<String, OAuthError> {
+    if !token_file.exists() {
+        return Err(OAuthError::NotConfigured("No tokens stored".into()));
+    }
+    let content = fs::read_to_string(token_file)?;
+    let tokens: TokenStorage = serde_json::from_str(&content)?;
+
+    if !tokens.is_expired() {
+        return Ok(tokens.access_token);
+    }
+
+    if let Some(ref refresh) = tokens.refresh_token {
+        let new_tokens = refresh_access_token(config, refresh, token_file).await?;
+        return Ok(new_tokens.access_token);
+    }
+
+    Err(OAuthError::TokenRefresh(
+        "Token expired and no refresh token available".into(),
+    ))
+}
+
+/// Test folder permissions via the Google Drive API.
 pub async fn test_folder_permissions(
     access_token: &str,
     folder_id: &str,
@@ -293,7 +327,7 @@ pub async fn test_folder_permissions(
     let client = reqwest::Client::new();
 
     let response = client
-        .get(&format!(
+        .get(format!(
             "https://www.googleapis.com/drive/v3/files/{}?fields=capabilities",
             folder_id
         ))
@@ -311,6 +345,7 @@ pub struct DriveFolder {
     pub mime_type: String,
 }
 
+/// List folders from Google Drive.
 pub async fn list_drive_folders_api(
     access_token: &str,
 ) -> Result<Vec<DriveFolder>, OAuthError> {
@@ -319,7 +354,10 @@ pub async fn list_drive_folders_api(
     let response = client
         .get("https://www.googleapis.com/drive/v3/files")
         .query(&[
-            ("q", "mimeType='application/vnd.google-apps.folder' and trashed=false"),
+            (
+                "q",
+                "mimeType='application/vnd.google-apps.folder' and trashed=false",
+            ),
             ("fields", "files(id,name,mimeType)"),
             ("pageSize", "100"),
             ("orderBy", "name"),
@@ -349,24 +387,7 @@ pub async fn list_drive_folders_api(
     Ok(folders)
 }
 
-/// Synchronously get the access token from storage (no refresh attempt).
-/// Used by Tauri commands to extract the token before releasing the mutex.
-fn get_valid_access_token(client: &OAuthClient) -> Result<String, OAuthError> {
-    if let Some(tokens) = client.load_tokens()? {
-        if tokens.is_expired() {
-            return Err(OAuthError::TokenRefresh(
-                "Token expired — re-authenticate".to_string(),
-            ));
-        }
-        Ok(tokens.access_token)
-    } else {
-        Err(OAuthError::TokenRefresh(
-            "No tokens available".to_string(),
-        ))
-    }
-}
-
-// --- Tauri Commands ---
+// ── Tauri Commands ──────────────────────────────────────────────
 
 #[tauri::command]
 pub async fn initialize_oauth(state: State<'_, AppState>) -> Result<String, String> {
@@ -374,11 +395,11 @@ pub async fn initialize_oauth(state: State<'_, AppState>) -> Result<String, Stri
     match client.load_config() {
         Ok(true) => {
             info!("OAuth client initialized with saved config");
-            Ok("OAuth initialized with existing config".to_string())
+            Ok("OAuth initialized with existing config".into())
         }
         Ok(false) => {
             info!("OAuth client initialized (no config yet)");
-            Ok("OAuth initialized — needs configuration".to_string())
+            Ok("OAuth initialized — needs configuration".into())
         }
         Err(e) => Err(format!("Failed to initialize OAuth: {}", e)),
     }
@@ -399,7 +420,7 @@ pub async fn save_oauth_config(
     client.save_config(&config).map_err(|e| e.to_string())?;
     client.config = config;
     info!("OAuth config saved");
-    Ok("OAuth configuration saved".to_string())
+    Ok("OAuth configuration saved".into())
 }
 
 #[tauri::command]
@@ -407,7 +428,7 @@ pub async fn get_authorization_url(state: State<'_, AppState>) -> Result<String,
     let mut client = state.oauth_client.lock().map_err(|e| e.to_string())?;
     client.load_config().map_err(|e| e.to_string())?;
     if client.config.client_id.is_empty() {
-        return Err("OAuth not configured — set client_id and client_secret first".to_string());
+        return Err("OAuth not configured — set client_id and client_secret first".into());
     }
     Ok(client.get_authorization_url())
 }
@@ -417,69 +438,29 @@ pub async fn handle_oauth_callback(
     state: State<'_, AppState>,
     code: String,
 ) -> Result<String, String> {
-    // Extract config before async work to avoid holding MutexGuard across await
-    let config = {
+    // Extract what we need, then drop the MutexGuard before awaiting.
+    let (config, token_file) = {
         let client = state.oauth_client.lock().map_err(|e| e.to_string())?;
-        client.config.clone()
+        client.exchange_params()
     };
 
-    // Build a temporary OAuthClient-like exchange using the extracted config
-    let http = reqwest::Client::new();
-    let params = [
-        ("client_id", config.client_id.as_str()),
-        ("client_secret", config.client_secret.as_str()),
-        ("code", code.as_str()),
-        ("grant_type", "authorization_code"),
-        ("redirect_uri", config.redirect_uri.as_str()),
-    ];
-    let response = http
-        .post("https://oauth2.googleapis.com/token")
-        .form(&params)
-        .send()
+    exchange_code(&config, &code, &token_file)
         .await
         .map_err(|e| e.to_string())?;
 
-    let token_response: HashMap<String, serde_json::Value> =
-        response.json().await.map_err(|e| e.to_string())?;
-
-    let access_token = token_response
-        .get("access_token")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing access_token")?
-        .to_string();
-    let refresh_token = token_response
-        .get("refresh_token")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let expires_in = token_response
-        .get("expires_in")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(3600);
-    let token_type = token_response
-        .get("token_type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("Bearer")
-        .to_string();
-
-    let tokens = TokenStorage {
-        access_token,
-        refresh_token,
-        expires_at: Utc::now() + chrono::Duration::seconds(expires_in as i64),
-        token_type,
-    };
-
-    // Re-acquire lock for synchronous file writes
-    let client = state.oauth_client.lock().map_err(|e| e.to_string())?;
-    client.save_tokens(&tokens).map_err(|e| e.to_string())?;
-    let mut status = client.load_onboarding_status();
-    status.oauth_configured = true;
-    status.tokens_stored = true;
-    client
-        .save_onboarding_status(&status)
-        .map_err(|e| e.to_string())?;
+    // Update onboarding status.
+    {
+        let client = state.oauth_client.lock().map_err(|e| e.to_string())?;
+        let mut status = client.load_onboarding_status();
+        status.oauth_configured = true;
+        status.tokens_stored = true;
+        client
+            .save_onboarding_status(&status)
+            .map_err(|e| e.to_string())?;
+    }
 
     info!("OAuth callback handled, tokens stored");
-    Ok("Authentication successful".to_string())
+    Ok("Authentication successful".into())
 }
 
 #[tauri::command]
@@ -488,15 +469,20 @@ pub async fn test_folder_permissions_command(
     folder_id: String,
     folder_name: String,
 ) -> Result<bool, String> {
-    let access_token = {
+    let (config, token_file) = {
         let client = state.oauth_client.lock().map_err(|e| e.to_string())?;
-        get_valid_access_token(&client).map_err(|e| e.to_string())?
+        client.exchange_params()
     };
+
+    let access_token = get_valid_access_token(&config, &token_file)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let accessible = test_folder_permissions(&access_token, &folder_id)
         .await
         .map_err(|e| e.to_string())?;
 
+    // Update onboarding status.
     {
         let client = state.oauth_client.lock().map_err(|e| e.to_string())?;
         let mut status = client.load_onboarding_status();
@@ -524,10 +510,15 @@ pub async fn check_onboarding_status(
 pub async fn list_drive_folders(
     state: State<'_, AppState>,
 ) -> Result<Vec<DriveFolder>, String> {
-    let access_token = {
+    let (config, token_file) = {
         let client = state.oauth_client.lock().map_err(|e| e.to_string())?;
-        get_valid_access_token(&client).map_err(|e| e.to_string())?
+        client.exchange_params()
     };
+
+    let access_token = get_valid_access_token(&config, &token_file)
+        .await
+        .map_err(|e| e.to_string())?;
+
     list_drive_folders_api(&access_token)
         .await
         .map_err(|e| e.to_string())
@@ -537,23 +528,28 @@ pub async fn list_drive_folders(
 pub async fn trigger_initial_shred(
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let (access_token, folder_id) = {
+    let (config, token_file, folder_id) = {
         let client = state.oauth_client.lock().map_err(|e| e.to_string())?;
         let status = client.load_onboarding_status();
         if !status.tokens_stored {
-            return Err("Not authenticated — complete OAuth first".to_string());
+            return Err("Not authenticated — complete OAuth first".into());
         }
         if !status.folder_selected {
-            return Err("No folder selected — choose a folder first".to_string());
+            return Err("No folder selected — choose a folder first".into());
         }
         let folder_id = status
             .selected_folder_id
+            .clone()
             .ok_or("No folder ID stored")?;
-        let token = get_valid_access_token(&client).map_err(|e| e.to_string())?;
-        (token, folder_id)
+        let (cfg, tf) = client.exchange_params();
+        (cfg, tf, folder_id)
     };
 
-    // Fetch file list from the selected folder
+    let access_token = get_valid_access_token(&config, &token_file)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Fetch file list from the selected folder.
     let reqwest_client = reqwest::Client::new();
     let query = format!(
         "'{}' in parents and trashed=false and mimeType='application/vnd.google-apps.document'",
@@ -585,7 +581,7 @@ pub async fn trigger_initial_shred(
         "Initial shred: discovered documents in folder"
     );
 
-    // Mark shred as complete
+    // Mark shred as complete.
     {
         let client = state.oauth_client.lock().map_err(|e| e.to_string())?;
         let mut updated_status = client.load_onboarding_status();
@@ -604,16 +600,15 @@ pub async fn trigger_initial_shred(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
     use tempfile::TempDir;
 
     #[test]
     fn test_token_storage_expired() {
         let token = TokenStorage {
-            access_token: "test".to_string(),
-            refresh_token: Some("refresh".to_string()),
+            access_token: "test".into(),
+            refresh_token: Some("refresh".into()),
             expires_at: Utc::now() - chrono::Duration::seconds(10),
-            token_type: "Bearer".to_string(),
+            token_type: "Bearer".into(),
         };
         assert!(token.is_expired());
     }
@@ -621,10 +616,10 @@ mod tests {
     #[test]
     fn test_token_storage_not_expired() {
         let token = TokenStorage {
-            access_token: "test".to_string(),
-            refresh_token: Some("refresh".to_string()),
+            access_token: "test".into(),
+            refresh_token: Some("refresh".into()),
             expires_at: Utc::now() + chrono::Duration::seconds(3600),
-            token_type: "Bearer".to_string(),
+            token_type: "Bearer".into(),
         };
         assert!(!token.is_expired());
     }
@@ -635,6 +630,8 @@ mod tests {
         assert_eq!(config.redirect_uri, "http://localhost:1420/oauth/callback");
         assert_eq!(config.scopes.len(), 2);
         assert!(config.client_id.is_empty());
+        assert!(config.scopes[0].contains("drive.readonly"));
+        assert!(config.scopes[1].contains("documents.readonly"));
     }
 
     #[test]
@@ -643,6 +640,7 @@ mod tests {
         let client = OAuthClient::new(dir.path());
         assert!(client.token_file.to_str().unwrap().contains("oauth_tokens"));
         assert!(client.config_file.to_str().unwrap().contains("oauth_config"));
+        assert!(client.status_file.to_str().unwrap().contains("onboarding_status"));
     }
 
     #[test]
@@ -650,13 +648,21 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut client = OAuthClient::new(dir.path());
         let config = OAuthConfig {
-            client_id: "test_id".to_string(),
-            client_secret: "test_secret".to_string(),
+            client_id: "test_id".into(),
+            client_secret: "test_secret".into(),
             ..OAuthConfig::default()
         };
         client.save_config(&config).unwrap();
         assert!(client.load_config().unwrap());
         assert_eq!(client.config.client_id, "test_id");
+        assert_eq!(client.config.client_secret, "test_secret");
+    }
+
+    #[test]
+    fn test_load_config_no_file() {
+        let dir = TempDir::new().unwrap();
+        let mut client = OAuthClient::new(dir.path());
+        assert!(!client.load_config().unwrap());
     }
 
     #[test]
@@ -665,16 +671,17 @@ mod tests {
         let client = OAuthClient::new(dir.path());
 
         let tokens = TokenStorage {
-            access_token: "access_123".to_string(),
-            refresh_token: Some("refresh_456".to_string()),
+            access_token: "access_123".into(),
+            refresh_token: Some("refresh_456".into()),
             expires_at: Utc::now() + chrono::Duration::seconds(3600),
-            token_type: "Bearer".to_string(),
+            token_type: "Bearer".into(),
         };
 
         client.save_tokens(&tokens).unwrap();
         let loaded = client.load_tokens().unwrap().unwrap();
         assert_eq!(loaded.access_token, "access_123");
-        assert_eq!(loaded.refresh_token, Some("refresh_456".to_string()));
+        assert_eq!(loaded.refresh_token, Some("refresh_456".into()));
+        assert_eq!(loaded.token_type, "Bearer");
     }
 
     #[test]
@@ -690,8 +697,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut client = OAuthClient::new(dir.path());
         client.config = OAuthConfig {
-            client_id: "my_client_id".to_string(),
-            client_secret: "secret".to_string(),
+            client_id: "my_client_id".into(),
+            client_secret: "secret".into(),
             ..OAuthConfig::default()
         };
         let url = client.get_authorization_url();
@@ -699,6 +706,15 @@ mod tests {
         assert!(url.contains("access_type=offline"));
         assert!(url.contains("prompt=consent"));
         assert!(url.contains("drive.readonly"));
+        assert!(url.contains("response_type=code"));
+    }
+
+    #[test]
+    fn test_authorization_url_empty_client_id() {
+        let dir = TempDir::new().unwrap();
+        let client = OAuthClient::new(dir.path());
+        let url = client.get_authorization_url();
+        assert!(url.contains("client_id=&"));
     }
 
     #[test]
@@ -709,7 +725,10 @@ mod tests {
         assert!(!status.oauth_configured);
         assert!(!status.tokens_stored);
         assert!(!status.folder_selected);
+        assert!(!status.folder_accessible);
         assert!(!status.initial_shred_complete);
+        assert!(status.selected_folder_id.is_none());
+        assert!(status.selected_folder_name.is_none());
     }
 
     #[test]
@@ -723,8 +742,8 @@ mod tests {
             folder_selected: true,
             folder_accessible: true,
             initial_shred_complete: false,
-            selected_folder_id: Some("folder_abc".to_string()),
-            selected_folder_name: Some("My Lessons".to_string()),
+            selected_folder_id: Some("folder_abc".into()),
+            selected_folder_name: Some("My Lessons".into()),
         };
         client.save_onboarding_status(&status).unwrap();
 
@@ -732,16 +751,54 @@ mod tests {
         assert!(loaded.oauth_configured);
         assert!(loaded.tokens_stored);
         assert!(loaded.folder_selected);
-        assert_eq!(loaded.selected_folder_id, Some("folder_abc".to_string()));
+        assert!(loaded.folder_accessible);
+        assert!(!loaded.initial_shred_complete);
+        assert_eq!(loaded.selected_folder_id, Some("folder_abc".into()));
+        assert_eq!(loaded.selected_folder_name, Some("My Lessons".into()));
+    }
+
+    #[test]
+    fn test_onboarding_status_detects_existing_files() {
+        let dir = TempDir::new().unwrap();
+        let chalk_dir = dir.path().join("com.madison.chalk");
+        fs::create_dir_all(&chalk_dir).unwrap();
+
+        let config = OAuthConfig {
+            client_id: "id".into(),
+            client_secret: "secret".into(),
+            ..OAuthConfig::default()
+        };
+        fs::write(
+            chalk_dir.join("oauth_config.json"),
+            serde_json::to_string(&config).unwrap(),
+        )
+        .unwrap();
+
+        let tokens = TokenStorage {
+            access_token: "tok".into(),
+            refresh_token: None,
+            expires_at: Utc::now() + chrono::Duration::seconds(3600),
+            token_type: "Bearer".into(),
+        };
+        fs::write(
+            chalk_dir.join("oauth_tokens.json"),
+            serde_json::to_string(&tokens).unwrap(),
+        )
+        .unwrap();
+
+        let client = OAuthClient::new(dir.path());
+        let status = client.load_onboarding_status();
+        assert!(status.oauth_configured);
+        assert!(status.tokens_stored);
     }
 
     #[test]
     fn test_token_serialization_roundtrip() {
         let token = TokenStorage {
-            access_token: "abc".to_string(),
+            access_token: "abc".into(),
             refresh_token: None,
             expires_at: Utc::now(),
-            token_type: "Bearer".to_string(),
+            token_type: "Bearer".into(),
         };
         let json = serde_json::to_string(&token).unwrap();
         let deserialized: TokenStorage = serde_json::from_str(&json).unwrap();
@@ -751,20 +808,203 @@ mod tests {
 
     #[test]
     fn test_oauth_error_display() {
-        let err = OAuthError::TokenRefresh("test error".to_string());
+        let err = OAuthError::TokenRefresh("test error".into());
         assert_eq!(err.to_string(), "Token refresh failed: test error");
+
+        let err2 = OAuthError::NotConfigured("no config".into());
+        assert_eq!(err2.to_string(), "Not configured: no config");
     }
 
     #[test]
     fn test_drive_folder_serialization() {
         let folder = DriveFolder {
-            id: "id_1".to_string(),
-            name: "My Folder".to_string(),
-            mime_type: "application/vnd.google-apps.folder".to_string(),
+            id: "id_1".into(),
+            name: "My Folder".into(),
+            mime_type: "application/vnd.google-apps.folder".into(),
         };
         let json = serde_json::to_string(&folder).unwrap();
         let deserialized: DriveFolder = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.id, "id_1");
         assert_eq!(deserialized.name, "My Folder");
+        assert_eq!(deserialized.mime_type, "application/vnd.google-apps.folder");
+    }
+
+    #[test]
+    fn test_exchange_params() {
+        let dir = TempDir::new().unwrap();
+        let mut client = OAuthClient::new(dir.path());
+        client.config = OAuthConfig {
+            client_id: "ex_id".into(),
+            client_secret: "ex_secret".into(),
+            ..OAuthConfig::default()
+        };
+        let (cfg, tf) = client.exchange_params();
+        assert_eq!(cfg.client_id, "ex_id");
+        assert!(tf.to_str().unwrap().contains("oauth_tokens"));
+    }
+
+    #[test]
+    fn test_onboarding_status_complete_flow() {
+        let dir = TempDir::new().unwrap();
+        let client = OAuthClient::new(dir.path());
+
+        let mut status = client.load_onboarding_status();
+
+        status.oauth_configured = true;
+        client.save_onboarding_status(&status).unwrap();
+
+        status.tokens_stored = true;
+        client.save_onboarding_status(&status).unwrap();
+
+        status.folder_selected = true;
+        status.folder_accessible = true;
+        status.selected_folder_id = Some("folder_xyz".into());
+        status.selected_folder_name = Some("Lesson Plans".into());
+        client.save_onboarding_status(&status).unwrap();
+
+        status.initial_shred_complete = true;
+        client.save_onboarding_status(&status).unwrap();
+
+        let final_status = client.load_onboarding_status();
+        assert!(final_status.oauth_configured);
+        assert!(final_status.tokens_stored);
+        assert!(final_status.folder_selected);
+        assert!(final_status.folder_accessible);
+        assert!(final_status.initial_shred_complete);
+        assert_eq!(final_status.selected_folder_id, Some("folder_xyz".into()));
+    }
+
+    #[test]
+    fn test_config_scopes_roundtrip() {
+        let config = OAuthConfig {
+            client_id: "cid".into(),
+            client_secret: "cs".into(),
+            redirect_uri: "http://localhost/cb".into(),
+            scopes: vec!["scope1".into(), "scope2".into()],
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let restored: OAuthConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.scopes.len(), 2);
+        assert_eq!(restored.scopes[0], "scope1");
+    }
+
+    #[test]
+    fn test_onboarding_status_default_trait() {
+        let status = OnboardingStatus::default();
+        assert!(!status.oauth_configured);
+        assert!(!status.tokens_stored);
+        assert!(!status.folder_selected);
+        assert!(!status.folder_accessible);
+        assert!(!status.initial_shred_complete);
+        assert!(status.selected_folder_id.is_none());
+        assert!(status.selected_folder_name.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_valid_access_token_no_file() {
+        let dir = TempDir::new().unwrap();
+        let token_file = dir.path().join("nonexistent.json");
+        let config = OAuthConfig::default();
+        let result = get_valid_access_token(&config, &token_file).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_valid_access_token_valid_token() {
+        let dir = TempDir::new().unwrap();
+        let token_file = dir.path().join("tokens.json");
+
+        let tokens = TokenStorage {
+            access_token: "valid_token".into(),
+            refresh_token: None,
+            expires_at: Utc::now() + chrono::Duration::seconds(3600),
+            token_type: "Bearer".into(),
+        };
+        fs::write(&token_file, serde_json::to_string(&tokens).unwrap()).unwrap();
+
+        let config = OAuthConfig::default();
+        let result = get_valid_access_token(&config, &token_file).await.unwrap();
+        assert_eq!(result, "valid_token");
+    }
+
+    #[tokio::test]
+    async fn test_get_valid_access_token_expired_no_refresh() {
+        let dir = TempDir::new().unwrap();
+        let token_file = dir.path().join("tokens.json");
+
+        let tokens = TokenStorage {
+            access_token: "expired_token".into(),
+            refresh_token: None,
+            expires_at: Utc::now() - chrono::Duration::seconds(10),
+            token_type: "Bearer".into(),
+        };
+        fs::write(&token_file, serde_json::to_string(&tokens).unwrap()).unwrap();
+
+        let config = OAuthConfig::default();
+        let result = get_valid_access_token(&config, &token_file).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("expired"));
+    }
+
+    #[test]
+    fn test_overwrite_onboarding_status() {
+        let dir = TempDir::new().unwrap();
+        let client = OAuthClient::new(dir.path());
+
+        let status1 = OnboardingStatus {
+            oauth_configured: true,
+            ..Default::default()
+        };
+        client.save_onboarding_status(&status1).unwrap();
+
+        let status2 = OnboardingStatus {
+            oauth_configured: true,
+            tokens_stored: true,
+            ..Default::default()
+        };
+        client.save_onboarding_status(&status2).unwrap();
+
+        let loaded = client.load_onboarding_status();
+        assert!(loaded.oauth_configured);
+        assert!(loaded.tokens_stored);
+    }
+
+    #[test]
+    fn test_save_config_creates_directory() {
+        let dir = TempDir::new().unwrap();
+        let client = OAuthClient::new(dir.path());
+        let config = OAuthConfig {
+            client_id: "cid".into(),
+            client_secret: "cs".into(),
+            ..OAuthConfig::default()
+        };
+        client.save_config(&config).unwrap();
+        assert!(client.config_file.exists());
+    }
+
+    #[test]
+    fn test_multiple_token_saves() {
+        let dir = TempDir::new().unwrap();
+        let client = OAuthClient::new(dir.path());
+
+        let tokens1 = TokenStorage {
+            access_token: "first".into(),
+            refresh_token: Some("r1".into()),
+            expires_at: Utc::now() + chrono::Duration::seconds(100),
+            token_type: "Bearer".into(),
+        };
+        client.save_tokens(&tokens1).unwrap();
+
+        let tokens2 = TokenStorage {
+            access_token: "second".into(),
+            refresh_token: Some("r2".into()),
+            expires_at: Utc::now() + chrono::Duration::seconds(200),
+            token_type: "Bearer".into(),
+        };
+        client.save_tokens(&tokens2).unwrap();
+
+        let loaded = client.load_tokens().unwrap().unwrap();
+        assert_eq!(loaded.access_token, "second");
+        assert_eq!(loaded.refresh_token, Some("r2".into()));
     }
 }
