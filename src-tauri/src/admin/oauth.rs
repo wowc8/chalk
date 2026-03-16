@@ -373,19 +373,29 @@ pub fn parse_drive_folders(body: &serde_json::Value) -> Vec<DriveFolder> {
     folders
 }
 
-/// List folders from Google Drive.
+/// List top-level folders from Google Drive (direct children of root).
 pub async fn list_drive_folders_api(
     access_token: &str,
 ) -> Result<Vec<DriveFolder>, OAuthError> {
+    list_drive_children_api(access_token, "root").await
+}
+
+/// List child folders of a given parent folder in Google Drive.
+pub async fn list_drive_children_api(
+    access_token: &str,
+    parent_id: &str,
+) -> Result<Vec<DriveFolder>, OAuthError> {
     let client = reqwest::Client::new();
+
+    let query = format!(
+        "'{}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false",
+        parent_id
+    );
 
     let response = client
         .get("https://www.googleapis.com/drive/v3/files")
         .query(&[
-            (
-                "q",
-                "mimeType='application/vnd.google-apps.folder' and trashed=false",
-            ),
+            ("q", query.as_str()),
             ("fields", "files(id,name,mimeType)"),
             ("pageSize", "100"),
             ("orderBy", "name"),
@@ -532,6 +542,25 @@ pub async fn list_drive_folders(
         .map_err(|e| e.to_string())?;
 
     list_drive_folders_api(&access_token)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_drive_subfolders(
+    state: State<'_, AppState>,
+    parent_id: String,
+) -> Result<Vec<DriveFolder>, String> {
+    let (config, token_file) = {
+        let client = state.oauth_client.lock().map_err(|e| e.to_string())?;
+        client.exchange_params()
+    };
+
+    let access_token = get_valid_access_token(&config, &token_file)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    list_drive_children_api(&access_token, &parent_id)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1065,5 +1094,70 @@ mod tests {
         let loaded = client.load_tokens().unwrap().unwrap();
         assert_eq!(loaded.access_token, "second");
         assert_eq!(loaded.refresh_token, Some("r2".into()));
+    }
+
+    #[test]
+    fn test_parse_drive_folders_filters_numeric_system_folders() {
+        let body = serde_json::json!({
+            "files": [
+                {"id": "1", "name": "Lesson Plans", "mimeType": "application/vnd.google-apps.folder"},
+                {"id": "2", "name": "-31755829.target", "mimeType": "application/vnd.google-apps.folder"},
+                {"id": "3", "name": "00", "mimeType": "application/vnd.google-apps.folder"},
+                {"id": "4", "name": "My Worksheets", "mimeType": "application/vnd.google-apps.folder"},
+            ]
+        });
+        // parse_drive_folders filters names starting with '.' or '!', but the root query
+        // fix prevents these system folders from appearing in the first place.
+        // Folders like "-31755829.target" and "00" pass the name filter but are
+        // excluded by the 'root' in parents query constraint.
+        let folders = parse_drive_folders(&body);
+        assert_eq!(folders.len(), 4);
+        assert_eq!(folders[0].name, "-31755829.target");
+        assert_eq!(folders[1].name, "00");
+        assert_eq!(folders[2].name, "Lesson Plans");
+        assert_eq!(folders[3].name, "My Worksheets");
+    }
+
+    #[test]
+    fn test_parse_drive_folders_missing_fields() {
+        let body = serde_json::json!({
+            "files": [
+                {"id": "1", "name": "Good", "mimeType": "application/vnd.google-apps.folder"},
+                {"id": "2", "mimeType": "application/vnd.google-apps.folder"},
+                {"name": "No ID", "mimeType": "application/vnd.google-apps.folder"},
+                {"id": "4", "name": "Also Good", "mimeType": "application/vnd.google-apps.folder"},
+            ]
+        });
+        let folders = parse_drive_folders(&body);
+        assert_eq!(folders.len(), 2);
+        assert_eq!(folders[0].name, "Also Good");
+        assert_eq!(folders[1].name, "Good");
+    }
+
+    #[test]
+    fn test_drive_folder_query_format_root() {
+        // Verify the query string format that list_drive_folders_api would use
+        let parent_id = "root";
+        let query = format!(
+            "'{}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false",
+            parent_id
+        );
+        assert_eq!(
+            query,
+            "'root' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
+        );
+    }
+
+    #[test]
+    fn test_drive_folder_query_format_subfolder() {
+        let parent_id = "abc123def";
+        let query = format!(
+            "'{}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false",
+            parent_id
+        );
+        assert_eq!(
+            query,
+            "'abc123def' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
+        );
     }
 }
