@@ -345,6 +345,34 @@ pub struct DriveFolder {
     pub mime_type: String,
 }
 
+/// Parse Drive API response JSON into filtered, sorted folders.
+/// Filters out hidden/system folders (names starting with '.' or '!') and
+/// sorts alphabetically by name (case-insensitive).
+pub fn parse_drive_folders(body: &serde_json::Value) -> Vec<DriveFolder> {
+    let mut folders: Vec<DriveFolder> = body
+        .get("files")
+        .and_then(|f| f.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| {
+                    let name = item.get("name")?.as_str()?;
+                    if name.starts_with('.') || name.starts_with('!') {
+                        return None;
+                    }
+                    Some(DriveFolder {
+                        id: item.get("id")?.as_str()?.to_string(),
+                        name: name.to_string(),
+                        mime_type: item.get("mimeType")?.as_str()?.to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    folders.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    folders
+}
+
 /// List folders from Google Drive.
 pub async fn list_drive_folders_api(
     access_token: &str,
@@ -368,23 +396,7 @@ pub async fn list_drive_folders_api(
 
     let body: serde_json::Value = response.json().await?;
 
-    let folders = body
-        .get("files")
-        .and_then(|f| f.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|item| {
-                    Some(DriveFolder {
-                        id: item.get("id")?.as_str()?.to_string(),
-                        name: item.get("name")?.as_str()?.to_string(),
-                        mime_type: item.get("mimeType")?.as_str()?.to_string(),
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    Ok(folders)
+    Ok(parse_drive_folders(&body))
 }
 
 // ── Tauri Commands ──────────────────────────────────────────────
@@ -813,6 +825,53 @@ mod tests {
 
         let err2 = OAuthError::NotConfigured("no config".into());
         assert_eq!(err2.to_string(), "Not configured: no config");
+    }
+
+    #[test]
+    fn test_parse_drive_folders_filters_hidden() {
+        let body = serde_json::json!({
+            "files": [
+                {"id": "1", "name": "Lesson Plans", "mimeType": "application/vnd.google-apps.folder"},
+                {"id": "2", "name": ".cache", "mimeType": "application/vnd.google-apps.folder"},
+                {"id": "3", "name": ".cp", "mimeType": "application/vnd.google-apps.folder"},
+                {"id": "4", "name": "!internal", "mimeType": "application/vnd.google-apps.folder"},
+                {"id": "5", "name": "Worksheets", "mimeType": "application/vnd.google-apps.folder"},
+            ]
+        });
+        let folders = parse_drive_folders(&body);
+        assert_eq!(folders.len(), 2);
+        assert_eq!(folders[0].name, "Lesson Plans");
+        assert_eq!(folders[1].name, "Worksheets");
+    }
+
+    #[test]
+    fn test_parse_drive_folders_sorts_alphabetically() {
+        let body = serde_json::json!({
+            "files": [
+                {"id": "1", "name": "Zebra", "mimeType": "application/vnd.google-apps.folder"},
+                {"id": "2", "name": "alpha", "mimeType": "application/vnd.google-apps.folder"},
+                {"id": "3", "name": "Beta", "mimeType": "application/vnd.google-apps.folder"},
+            ]
+        });
+        let folders = parse_drive_folders(&body);
+        assert_eq!(folders.len(), 3);
+        assert_eq!(folders[0].name, "alpha");
+        assert_eq!(folders[1].name, "Beta");
+        assert_eq!(folders[2].name, "Zebra");
+    }
+
+    #[test]
+    fn test_parse_drive_folders_empty() {
+        let body = serde_json::json!({"files": []});
+        let folders = parse_drive_folders(&body);
+        assert!(folders.is_empty());
+    }
+
+    #[test]
+    fn test_parse_drive_folders_no_files_key() {
+        let body = serde_json::json!({});
+        let folders = parse_drive_folders(&body);
+        assert!(folders.is_empty());
     }
 
     #[test]
