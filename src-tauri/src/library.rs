@@ -1,4 +1,4 @@
-use crate::database::{LibraryPlanCard, LibraryQuery, NewLessonPlan, NewTag, Tag};
+use crate::database::{LessonPlan, LibraryPlanCard, LibraryQuery, NewLessonPlan, NewTag, Tag};
 use crate::AppState;
 
 // ── Tag commands ─────────────────────────────────────────────
@@ -139,6 +139,64 @@ pub fn create_plan(
         created_at: plan.created_at,
         updated_at: plan.updated_at,
     })
+}
+
+#[tauri::command]
+pub fn get_plan(state: tauri::State<'_, AppState>, id: String) -> Result<LessonPlan, String> {
+    state
+        .db
+        .get_lesson_plan(&id)
+        .map_err(|e| format!("{}", e))
+}
+
+#[tauri::command]
+pub fn update_plan_content(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    content: String,
+) -> Result<LessonPlan, String> {
+    state
+        .db
+        .update_lesson_plan_content(&id, &content)
+        .map_err(|e| format!("{}", e))
+}
+
+#[tauri::command]
+pub fn update_plan_title(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    title: String,
+) -> Result<LessonPlan, String> {
+    state.db.with_conn(|conn| {
+        let updated = conn.execute(
+            "UPDATE lesson_plans SET title = ?1, updated_at = datetime('now') WHERE id = ?2",
+            rusqlite::params![title, id],
+        )?;
+        if updated == 0 {
+            return Err(crate::database::DatabaseError::NotFound);
+        }
+        conn.query_row(
+            "SELECT id, subject_id, title, content, source_doc_id, source_table_index, learning_objectives, status, created_at, updated_at
+             FROM lesson_plans WHERE id = ?1",
+            rusqlite::params![id],
+            |row| {
+                Ok(LessonPlan {
+                    id: row.get(0)?,
+                    subject_id: row.get(1)?,
+                    title: row.get(2)?,
+                    content: row.get(3)?,
+                    source_doc_id: row.get(4)?,
+                    source_table_index: row.get(5)?,
+                    learning_objectives: row.get(6)?,
+                    status: row.get(7)?,
+                    created_at: row.get(8)?,
+                    updated_at: row.get(9)?,
+                })
+            },
+        )
+        .map_err(|e| e.into())
+    })
+    .map_err(|e| format!("{}", e))
 }
 
 #[tauri::command]

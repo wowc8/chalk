@@ -1,43 +1,390 @@
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useParams } from "react-router-dom";
+import { invoke } from "@tauri-apps/api/core";
 import { motion } from "framer-motion";
+import { TipTapEditor } from "./editor/TipTapEditor";
+import { ChatPane, ChatMessage } from "./editor/ChatPane";
+import "./editor/EditorStyles.css";
+
+interface LessonPlan {
+  id: string;
+  subject_id: string;
+  title: string;
+  content: string;
+  source_doc_id: string | null;
+  source_table_index: number | null;
+  learning_objectives: string | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+const WELCOME_MESSAGE: ChatMessage = {
+  id: "welcome",
+  role: "assistant",
+  content:
+    "Tell me about the lesson you want to create. I can help you draft objectives, activities, assessments, and more.",
+  timestamp: new Date(),
+};
+
+function SplitResizer({
+  onDrag,
+}: {
+  onDrag: (deltaY: number) => void;
+}) {
+  const dragging = useRef(false);
+  const lastY = useRef(0);
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    dragging.current = true;
+    lastY.current = e.clientY;
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!dragging.current) return;
+      const delta = e.clientY - lastY.current;
+      lastY.current = e.clientY;
+      onDrag(delta);
+    };
+
+    const handleMouseUp = () => {
+      dragging.current = false;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      document.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("mouseup", handleMouseUp);
+    };
+
+    document.addEventListener("mousemove", handleMouseMove);
+    document.addEventListener("mouseup", handleMouseUp);
+  };
+
+  return (
+    <div
+      onMouseDown={handleMouseDown}
+      className="h-1.5 cursor-row-resize bg-chalk-white/5 hover:bg-chalk-blue/20 transition-colors flex items-center justify-center group flex-shrink-0"
+    >
+      <div className="w-8 h-0.5 rounded-full bg-chalk-muted/30 group-hover:bg-chalk-blue/40 transition-colors" />
+    </div>
+  );
+}
 
 export function PlanDetail() {
   const { planId } = useParams<{ planId: string }>();
+  const [plan, setPlan] = useState<LessonPlan | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [saveStatus, setSaveStatus] = useState<"saved" | "saving" | "error">("saved");
+  const [messages, setMessages] = useState<ChatMessage[]>([WELCOME_MESSAGE]);
+  const [chatLoading, setChatLoading] = useState(false);
+  const [editorRatio, setEditorRatio] = useState(0.667); // 2/3 by default
+  const containerRef = useRef<HTMLDivElement>(null);
 
-  return (
-    <div className="flex-1 px-6 py-8">
-      <div className="max-w-6xl mx-auto">
+  const isNewPlan = planId === "new";
+
+  useEffect(() => {
+    async function load() {
+      if (isNewPlan) {
+        // Create a new plan
+        try {
+          const newPlan = await invoke<{
+            id: string;
+            title: string;
+            status: string;
+            source_type: string;
+            version: number;
+            tags: { id: string; name: string; color: string | null; created_at: string }[];
+            created_at: string;
+            updated_at: string;
+          }>("create_plan", {
+            title: "Untitled Plan",
+            subjectId: "default",
+            content: "",
+            sourceType: "created",
+          });
+          // Now fetch the full plan
+          const fullPlan = await invoke<LessonPlan>("get_plan", {
+            id: newPlan.id,
+          });
+          setPlan(fullPlan);
+          // Update the URL without adding history entry
+          window.history.replaceState(null, "", `/plan/${fullPlan.id}`);
+        } catch (e) {
+          setError(`Failed to create plan: ${e}`);
+        } finally {
+          setLoading(false);
+        }
+        return;
+      }
+
+      try {
+        const fetched = await invoke<LessonPlan>("get_plan", { id: planId });
+        setPlan(fetched);
+      } catch (e) {
+        setError(`Failed to load plan: ${e}`);
+      } finally {
+        setLoading(false);
+      }
+    }
+    load();
+  }, [planId]);
+
+  const handleEditorUpdate = useCallback(
+    async (content: string) => {
+      if (!plan) return;
+      setSaveStatus("saving");
+      try {
+        const updated = await invoke<LessonPlan>("update_plan_content", {
+          id: plan.id,
+          content,
+        });
+        setPlan(updated);
+        setSaveStatus("saved");
+      } catch {
+        setSaveStatus("error");
+      }
+    },
+    [plan]
+  );
+
+  const handleSendMessage = useCallback(
+    (content: string) => {
+      const userMsg: ChatMessage = {
+        id: `user-${Date.now()}`,
+        role: "user",
+        content,
+        timestamp: new Date(),
+      };
+      setMessages((prev) => [...prev, userMsg]);
+      setChatLoading(true);
+
+      // Simulate AI response (backend AI integration will come in a future phase)
+      setTimeout(() => {
+        const aiMsg: ChatMessage = {
+          id: `ai-${Date.now()}`,
+          role: "assistant",
+          content:
+            "I'm getting ready to help you create lesson plans! The AI backend is being set up. For now, you can start writing in the editor above, and I'll be ready to assist soon.",
+          timestamp: new Date(),
+        };
+        setMessages((prev) => [...prev, aiMsg]);
+        setChatLoading(false);
+      }, 1500);
+    },
+    [plan]
+  );
+
+  const handleResize = useCallback(
+    (deltaY: number) => {
+      if (!containerRef.current) return;
+      const containerHeight = containerRef.current.getBoundingClientRect().height;
+      const newRatio = editorRatio + deltaY / containerHeight;
+      // Clamp between 30% and 85%
+      setEditorRatio(Math.max(0.3, Math.min(0.85, newRatio)));
+    },
+    [editorRatio]
+  );
+
+  if (loading) {
+    return (
+      <div className="flex-1 flex items-center justify-center">
         <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="text-center py-20"
-        >
-          <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-chalk-board-dark border-2 border-chalk-white/10 flex items-center justify-center">
-            <svg
-              className="w-10 h-10 text-chalk-blue/50"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={1.5}
-                d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
-              />
+          animate={{ rotate: 360 }}
+          transition={{ duration: 1.5, repeat: Infinity, ease: "linear" }}
+          className="w-8 h-8 border-2 border-chalk-blue border-t-transparent rounded-full"
+        />
+        <span className="ml-3 text-chalk-muted text-sm">
+          {isNewPlan ? "Creating plan..." : "Loading plan..."}
+        </span>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex-1 flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-chalk-red/10 border border-chalk-red/20 flex items-center justify-center">
+            <svg className="w-8 h-8 text-chalk-red" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
             </svg>
           </div>
-          <h3 className="chalk-heading text-xl text-chalk-white mb-2">
-            Plan Editor
-          </h3>
-          <p className="text-chalk-muted text-sm mb-2">
-            Plan ID: <code className="text-chalk-blue/80 bg-chalk-board-dark px-2 py-0.5 rounded text-xs">{planId}</code>
-          </p>
-          <p className="text-chalk-muted/60 text-xs">
-            The split-view editor with AI chat pane will be available in the next update.
-          </p>
-        </motion.div>
+          <p className="text-chalk-red text-sm mb-2">{error}</p>
+          <button
+            onClick={() => window.history.back()}
+            className="text-chalk-muted text-sm hover:text-chalk-white transition-colors"
+          >
+            Go back to Library
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!plan) return null;
+
+  return (
+    <div ref={containerRef} className="flex-1 flex flex-col min-h-0">
+      {/* Plan header bar */}
+      <div className="flex items-center justify-between px-4 py-2 border-b border-chalk-white/5 flex-shrink-0">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="w-7 h-7 rounded-lg bg-chalk-blue/10 flex items-center justify-center flex-shrink-0">
+            <svg className="w-3.5 h-3.5 text-chalk-blue" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+          </div>
+          <PlanTitle
+            title={plan.title}
+            planId={plan.id}
+            onTitleChange={(newTitle) => setPlan((p) => p ? { ...p, title: newTitle } : p)}
+          />
+        </div>
+        <div className="flex items-center gap-3">
+          <SaveIndicator status={saveStatus} />
+          <span
+            className={`text-xs px-2 py-0.5 rounded capitalize ${
+              plan.status === "published"
+                ? "bg-chalk-green/10 text-chalk-green border border-chalk-green/20"
+                : "bg-chalk-ghost text-chalk-muted border border-chalk-white/8"
+            }`}
+          >
+            {plan.status}
+          </span>
+        </div>
+      </div>
+
+      {/* Split pane: editor top, chat bottom */}
+      <div className="flex-1 flex flex-col min-h-0">
+        {/* Editor pane */}
+        <div
+          className="min-h-0 overflow-hidden bg-chalk-board/50"
+          style={{ flex: `0 0 ${editorRatio * 100}%` }}
+        >
+          <TipTapEditor
+            content={plan.content}
+            onUpdate={handleEditorUpdate}
+          />
+        </div>
+
+        {/* Resizer */}
+        <SplitResizer onDrag={handleResize} />
+
+        {/* Chat pane */}
+        <div className="flex-1 min-h-0 overflow-hidden bg-chalk-board-dark/30">
+          <ChatPane
+            messages={messages}
+            onSendMessage={handleSendMessage}
+            isLoading={chatLoading}
+          />
+        </div>
       </div>
     </div>
+  );
+}
+
+function PlanTitle({
+  title,
+  planId,
+  onTitleChange,
+}: {
+  title: string;
+  planId: string;
+  onTitleChange: (title: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(title);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    setValue(title);
+  }, [title]);
+
+  useEffect(() => {
+    if (editing && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+    }
+  }, [editing]);
+
+  const save = async () => {
+    setEditing(false);
+    const trimmed = value.trim();
+    if (!trimmed || trimmed === title) {
+      setValue(title);
+      return;
+    }
+    try {
+      const updated = await invoke<LessonPlan>("update_plan_title", {
+        id: planId,
+        title: trimmed,
+      });
+      onTitleChange(updated.title);
+    } catch {
+      setValue(title);
+    }
+  };
+
+  if (editing) {
+    return (
+      <input
+        ref={inputRef}
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onBlur={save}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") save();
+          if (e.key === "Escape") {
+            setValue(title);
+            setEditing(false);
+          }
+        }}
+        className="text-sm font-medium text-chalk-white bg-transparent border-b border-chalk-blue/40 focus:outline-none px-0 py-0.5 min-w-0"
+      />
+    );
+  }
+
+  return (
+    <button
+      onClick={() => setEditing(true)}
+      className="text-sm font-medium text-chalk-white hover:text-chalk-blue truncate max-w-xs transition-colors"
+      title="Click to rename"
+    >
+      {title}
+    </button>
+  );
+}
+
+function SaveIndicator({ status }: { status: "saved" | "saving" | "error" }) {
+  return (
+    <span
+      className={`flex items-center gap-1.5 text-[11px] ${
+        status === "saved"
+          ? "text-chalk-muted/50"
+          : status === "saving"
+          ? "text-chalk-blue/60"
+          : "text-chalk-red/60"
+      }`}
+    >
+      {status === "saving" && (
+        <motion.div
+          animate={{ rotate: 360 }}
+          transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
+          className="w-3 h-3 border border-chalk-blue/40 border-t-transparent rounded-full"
+        />
+      )}
+      {status === "saved" && (
+        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+        </svg>
+      )}
+      {status === "error" && (
+        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01" />
+        </svg>
+      )}
+      {status === "saved" ? "Saved" : status === "saving" ? "Saving..." : "Save failed"}
+    </span>
   );
 }
