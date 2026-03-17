@@ -50,9 +50,9 @@ export function UpdateBanner() {
   };
 
   return (
-    <div className="fixed top-0 left-0 right-0 z-50 bg-bat-cyan/10 border-b border-bat-cyan/30 backdrop-blur-sm px-4 py-2 flex items-center justify-between text-sm">
+    <div className="fixed top-0 left-0 right-0 z-50 bg-chalk-blue/10 border-b border-chalk-blue/20 backdrop-blur-sm px-4 py-2 flex items-center justify-between text-sm">
       <div className="flex items-center gap-2">
-        <span className="font-medium text-bat-cyan">
+        <span className="font-medium text-chalk-blue">
           Update available: v{update.latest_version}
         </span>
         {update.body && (
@@ -68,7 +68,7 @@ export function UpdateBanner() {
           <>
             <button
               onClick={handleInstall}
-              className="px-3 py-1 bg-bat-cyan/20 hover:bg-bat-cyan/30 text-bat-cyan rounded-md transition-colors cursor-pointer"
+              className="px-3 py-1 bg-chalk-blue/20 hover:bg-chalk-blue/30 text-chalk-blue rounded-md transition-colors cursor-pointer"
             >
               Install & Restart
             </button>

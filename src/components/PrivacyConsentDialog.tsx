@@ -19,18 +19,18 @@ export function PrivacyConsentDialog({ onConsent }: PrivacyConsentDialogProps) {
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+        className="fixed inset-0 z-50 flex items-center justify-center settings-backdrop"
       >
         <motion.div
           initial={{ opacity: 0, scale: 0.9, y: 20 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}
           exit={{ opacity: 0, scale: 0.9, y: 20 }}
           transition={{ type: "spring", stiffness: 300, damping: 30 }}
-          className="bg-bat-charcoal border border-bat-purple/30 rounded-2xl p-8 max-w-md mx-4 shadow-2xl"
+          className="bg-chalk-board border border-chalk-white/10 rounded-2xl p-8 max-w-md mx-4 shadow-2xl"
         >
-          <div className="w-14 h-14 mx-auto mb-5 rounded-full bg-bat-navy border-2 border-bat-cyan/40 flex items-center justify-center">
+          <div className="w-14 h-14 mx-auto mb-5 rounded-full bg-chalk-board-dark border-2 border-chalk-blue/30 flex items-center justify-center">
             <svg
-              className="w-7 h-7 text-bat-cyan"
+              className="w-7 h-7 text-chalk-blue"
               fill="none"
               stroke="currentColor"
               viewBox="0 0 24 24"
@@ -48,14 +48,14 @@ export function PrivacyConsentDialog({ onConsent }: PrivacyConsentDialogProps) {
             Help Improve Chalk
           </h2>
 
-          <p className="text-gray-400 text-sm text-center mb-6 leading-relaxed">
+          <p className="text-chalk-muted text-sm text-center mb-6 leading-relaxed">
             Chalk can automatically send anonymous crash reports to help us fix
             bugs and improve the app. No student data, document content, or
             personal information is ever included.
           </p>
 
-          <div className="text-xs text-gray-500 bg-bat-dark/50 rounded-lg p-3 mb-6">
-            <p className="font-medium text-gray-400 mb-1">What we collect:</p>
+          <div className="text-xs text-chalk-muted bg-chalk-board-dark/50 rounded-lg p-3 mb-6">
+            <p className="font-medium text-chalk-dust mb-1">What we collect:</p>
             <ul className="space-y-1 list-disc list-inside">
               <li>OS version and app version</li>
               <li>Error stack traces</li>
@@ -69,7 +69,7 @@ export function PrivacyConsentDialog({ onConsent }: PrivacyConsentDialogProps) {
               whileTap={{ scale: 0.98 }}
               disabled={submitting}
               onClick={() => handleChoice(false)}
-              className="flex-1 px-4 py-2.5 border border-gray-600 rounded-lg text-gray-400 hover:text-white hover:border-gray-400 transition-colors text-sm disabled:opacity-50"
+              className="flex-1 px-4 py-2.5 border border-chalk-white/10 rounded-lg text-chalk-muted hover:text-chalk-white hover:border-chalk-white/20 transition-colors text-sm disabled:opacity-50"
             >
               No Thanks
             </motion.button>
@@ -78,13 +78,13 @@ export function PrivacyConsentDialog({ onConsent }: PrivacyConsentDialogProps) {
               whileTap={{ scale: 0.98 }}
               disabled={submitting}
               onClick={() => handleChoice(true)}
-              className="flex-1 px-4 py-2.5 bg-bat-cyan text-bat-dark font-semibold rounded-lg hover:bg-bat-cyan/90 transition-colors text-sm disabled:opacity-50"
+              className="flex-1 px-4 py-2.5 bg-chalk-blue text-chalk-board-dark font-semibold rounded-lg hover:bg-chalk-blue/90 transition-colors text-sm disabled:opacity-50"
             >
               Enable Reports
             </motion.button>
           </div>
 
-          <p className="text-xs text-gray-600 text-center mt-4">
+          <p className="text-xs text-chalk-muted/60 text-center mt-4">
             You can change this anytime in Settings.
           </p>
         </motion.div>

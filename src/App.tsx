@@ -1,16 +1,17 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { useErrorPipe } from "./hooks/useErrorPipe";
 import { OnboardingWizard } from "./components/onboarding/OnboardingWizard";
-import { Dashboard } from "./components/Dashboard";
-import { Settings } from "./components/Settings";
+import { AppLayout } from "./components/AppLayout";
+import { Library } from "./components/Library";
+import { PlanDetail } from "./components/PlanDetail";
 import { ToastProvider } from "./components/Toast";
-import { UpdateBanner } from "./components/UpdateBanner";
 import { PrivacyConsentDialog } from "./components/PrivacyConsentDialog";
 import { initSentry } from "./sentry";
 import "./App.css";
 
-type AppView = "loading" | "onboarding" | "dashboard" | "settings";
+type AppView = "loading" | "onboarding" | "app";
 
 function App() {
   useErrorPipe();
@@ -37,22 +38,46 @@ function App() {
         // Consent commands may not be available in dev mode; continue
       }
 
-      // Check onboarding status
+      // Check if onboarding was already completed
+      // First check connector auth status — if tokens are valid, skip onboarding
       try {
         const status = (await invoke("check_onboarding_status")) as {
           initial_shred_complete: boolean;
           tokens_stored: boolean;
           folder_selected: boolean;
         };
+
         if (
           status.initial_shred_complete &&
           status.tokens_stored &&
           status.folder_selected
         ) {
-          setView("dashboard");
-        } else {
-          setView("onboarding");
+          // Already authenticated and onboarding completed — go straight to app
+          setView("app");
+          return;
         }
+
+        // Also check if we have valid auth via connector status
+        // This handles the case where tokens exist but the onboarding
+        // status check is overly strict
+        try {
+          const connections = await invoke<
+            Array<{ auth_status: string }>
+          >("get_connection_details");
+          const hasValidAuth = connections.some(
+            (c) => c.auth_status === "connected"
+          );
+
+          if (hasValidAuth && status.folder_selected) {
+            // We have valid OAuth tokens and a folder selected — skip onboarding
+            setView("app");
+            return;
+          }
+        } catch {
+          // get_connection_details not available, fall through
+        }
+
+        setView("onboarding");
       } catch {
         setView("onboarding");
       }
@@ -74,8 +99,8 @@ function App() {
 
   if (view === "loading") {
     return (
-      <div className="min-h-screen bg-bat-dark flex items-center justify-center">
-        <div className="w-8 h-8 border-2 border-bat-cyan border-t-transparent rounded-full animate-spin" />
+      <div className="min-h-screen chalk-bg flex items-center justify-center">
+        <div className="w-8 h-8 border-2 border-chalk-blue border-t-transparent rounded-full animate-spin" />
       </div>
     );
   }
@@ -87,22 +112,22 @@ function App() {
       )}
 
       {view === "onboarding" && (
-        <OnboardingWizard onComplete={() => setView("dashboard")} />
+        <OnboardingWizard onComplete={() => setView("app")} />
       )}
-      {view === "dashboard" && (
-        <>
-          <UpdateBanner />
-          <Dashboard
-            onResetOnboarding={() => setView("onboarding")}
-            onOpenSettings={() => setView("settings")}
-          />
-        </>
-      )}
-      {view === "settings" && (
-        <Settings
-          onBack={() => setView("dashboard")}
-          onReconnect={() => setView("onboarding")}
-        />
+
+      {view === "app" && (
+        <BrowserRouter>
+          <Routes>
+            <Route
+              element={
+                <AppLayout onReconnect={() => setView("onboarding")} />
+              }
+            >
+              <Route path="/" element={<Library />} />
+              <Route path="/plan/:planId" element={<PlanDetail />} />
+            </Route>
+          </Routes>
+        </BrowserRouter>
       )}
     </ToastProvider>
   );
