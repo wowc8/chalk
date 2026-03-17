@@ -3,9 +3,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { useErrorPipe } from "./hooks/useErrorPipe";
 import { OnboardingWizard } from "./components/onboarding/OnboardingWizard";
 import { Dashboard } from "./components/Dashboard";
+import { Settings } from "./components/Settings";
+import { ToastProvider } from "./components/Toast";
 import "./App.css";
 
-type AppView = "loading" | "onboarding" | "dashboard";
+type AppView = "loading" | "onboarding" | "dashboard" | "settings";
 
 function App() {
   useErrorPipe();
@@ -38,11 +40,25 @@ function App() {
     );
   }
 
-  if (view === "onboarding") {
-    return <OnboardingWizard onComplete={() => setView("dashboard")} />;
-  }
-
-  return <Dashboard onResetOnboarding={() => setView("onboarding")} />;
+  return (
+    <ToastProvider>
+      {view === "onboarding" && (
+        <OnboardingWizard onComplete={() => setView("dashboard")} />
+      )}
+      {view === "dashboard" && (
+        <Dashboard
+          onResetOnboarding={() => setView("onboarding")}
+          onOpenSettings={() => setView("settings")}
+        />
+      )}
+      {view === "settings" && (
+        <Settings
+          onBack={() => setView("dashboard")}
+          onReconnect={() => setView("onboarding")}
+        />
+      )}
+    </ToastProvider>
+  );
 }
 
 export default App;
