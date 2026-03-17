@@ -1,5 +1,3 @@
-import { motion } from "framer-motion";
-
 interface AppHeaderProps {
   onOpenSettings: () => void;
   breadcrumb?: { label: string; onClick: () => void };
@@ -8,14 +6,14 @@ interface AppHeaderProps {
 
 export function AppHeader({ onOpenSettings, breadcrumb, title }: AppHeaderProps) {
   return (
-    <header className="sticky top-0 z-30 bg-chalk-board-dark/90 backdrop-blur-sm border-b border-chalk-white/5">
-      <div className="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
+    <header className="app-header">
+      <div className="app-header-inner">
         {/* Left side: breadcrumb or app name */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 min-w-0">
           {breadcrumb ? (
             <button
               onClick={breadcrumb.onClick}
-              className="flex items-center gap-1.5 text-sm text-chalk-muted hover:text-chalk-white transition-colors group"
+              className="app-header-back"
             >
               <svg
                 className="w-4 h-4 transition-transform group-hover:-translate-x-0.5"
@@ -28,9 +26,7 @@ export function AppHeader({ onOpenSettings, breadcrumb, title }: AppHeaderProps)
               <span>{breadcrumb.label}</span>
             </button>
           ) : (
-            <h1 className="chalk-heading text-xl tracking-wide text-chalk-white">
-              Chalk
-            </h1>
+            <span className="app-header-brand">Chalk</span>
           )}
           {title && (
             <>
@@ -43,16 +39,13 @@ export function AppHeader({ onOpenSettings, breadcrumb, title }: AppHeaderProps)
         </div>
 
         {/* Right side: settings cog */}
-        <motion.button
-          whileHover={{ scale: 1.1, rotate: 90 }}
-          whileTap={{ scale: 0.9 }}
-          transition={{ type: "spring", stiffness: 300, damping: 20 }}
+        <button
           onClick={onOpenSettings}
-          className="p-2 rounded-lg text-chalk-muted hover:text-chalk-white transition-colors"
+          className="app-header-action"
           title="Settings"
           aria-label="Open settings"
         >
-          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <svg className="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path
               strokeLinecap="round"
               strokeLinejoin="round"
@@ -61,7 +54,7 @@ export function AppHeader({ onOpenSettings, breadcrumb, title }: AppHeaderProps)
             />
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
           </svg>
-        </motion.button>
+        </button>
       </div>
     </header>
   );

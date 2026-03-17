@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { motion } from "framer-motion";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 interface Props {
   onNext: () => void;
@@ -18,7 +18,14 @@ export function StepGoogleAuth({ onNext, onBack, setError }: Props) {
     try {
       const url = await invoke<string>("get_authorization_url");
       setAuthUrl(url);
-      window.open(url, "_blank");
+
+      // Open in the system default browser via Tauri opener plugin
+      try {
+        await openUrl(url);
+      } catch {
+        // Opener failed (e.g. dev mode without Tauri runtime) — the
+        // fallback link below lets the user open it manually.
+      }
     } catch (e) {
       setError(`Failed to start sign-in: ${e}`);
     }
@@ -44,19 +51,19 @@ export function StepGoogleAuth({ onNext, onBack, setError }: Props) {
 
   return (
     <div>
-      <h2 className="text-2xl font-bold text-bat-cyan mb-2">
+      <h2 className="text-xl font-semibold text-chalk-blue mb-2">
         Sign in with Google
       </h2>
-      <p className="text-gray-400 text-sm mb-6">
+      <p className="text-chalk-muted text-sm mb-6">
         Chalk needs read-only access to your Google Drive to find your
         lesson plans. We never modify your documents.
       </p>
 
       {!authUrl ? (
         <div className="text-center py-8">
-          <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-bat-charcoal border-2 border-bat-purple/40 flex items-center justify-center">
+          <div className="w-16 h-16 mx-auto mb-5 rounded-2xl bg-chalk-board-dark border border-chalk-white/8 flex items-center justify-center">
             <svg
-              className="w-10 h-10 text-bat-cyan"
+              className="w-8 h-8 text-chalk-blue"
               fill="none"
               stroke="currentColor"
               viewBox="0 0 24 24"
@@ -69,29 +76,38 @@ export function StepGoogleAuth({ onNext, onBack, setError }: Props) {
               />
             </svg>
           </div>
-          <motion.button
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.95 }}
+          <button
             onClick={handleGetUrl}
-            className="px-8 py-3 bg-gradient-to-r from-bat-cyan to-bat-purple rounded-lg font-semibold text-white shadow-lg shadow-bat-cyan/20"
+            className="btn btn-primary px-8 py-3 text-base"
           >
             Sign in with Google
-          </motion.button>
-          <p className="mt-4 text-xs text-gray-600">
+          </button>
+          <p className="mt-4 text-xs text-chalk-muted">
             Read-only access &middot; No student data sent to our servers
           </p>
         </div>
       ) : (
         <div className="space-y-4">
-          <div className="p-3 bg-bat-charcoal rounded-lg border border-bat-purple/20">
-            <p className="text-xs text-gray-500 mb-1">
+          <div className="p-3 bg-chalk-board-dark rounded-lg border border-chalk-white/8">
+            <p className="text-xs text-chalk-muted mb-2">
               A browser window should have opened. Sign in with Google, then
               copy the authorization code and paste it below.
+            </p>
+            <p className="text-xs text-chalk-muted">
+              Didn't open?{" "}
+              <a
+                href={authUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-chalk-blue underline hover:no-underline"
+              >
+                Click here to open manually
+              </a>
             </p>
           </div>
 
           <div>
-            <label className="block text-sm text-gray-300 mb-1">
+            <label className="block text-sm text-chalk-dust mb-1">
               Authorization Code
             </label>
             <input
@@ -99,31 +115,27 @@ export function StepGoogleAuth({ onNext, onBack, setError }: Props) {
               value={authCode}
               onChange={(e) => setAuthCode(e.target.value)}
               placeholder="Paste the code from Google here..."
-              className="w-full px-4 py-2.5 bg-bat-charcoal border border-bat-purple/30 rounded-lg text-white placeholder-gray-600 focus:outline-none focus:border-bat-cyan transition-colors"
+              className="w-full px-4 py-2.5 bg-chalk-board-dark border border-chalk-white/10 rounded-lg text-chalk-white placeholder-chalk-muted focus:outline-none focus:border-chalk-blue/40 transition-colors"
             />
           </div>
 
-          <motion.button
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.95 }}
+          <button
             onClick={handleExchange}
             disabled={exchanging}
-            className="w-full px-6 py-2.5 bg-gradient-to-r from-bat-gold to-bat-cyan rounded-lg font-semibold text-bat-dark disabled:opacity-50 shadow-lg"
+            className="btn btn-primary w-full justify-center py-2.5"
           >
             {exchanging ? "Authenticating..." : "Complete Sign-In"}
-          </motion.button>
+          </button>
         </div>
       )}
 
       <div className="flex justify-between mt-8">
-        <motion.button
-          whileHover={{ scale: 1.05 }}
-          whileTap={{ scale: 0.95 }}
+        <button
           onClick={onBack}
-          className="px-6 py-2.5 border border-gray-600 rounded-lg text-gray-400 hover:text-white hover:border-gray-400 transition-colors"
+          className="btn btn-ghost"
         >
           Back
-        </motion.button>
+        </button>
       </div>
     </div>
   );

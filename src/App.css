@@ -1,6 +1,6 @@
 :root {
-  font-family: 'Inter', system-ui, -apple-system, sans-serif;
-  font-size: 16px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', system-ui, sans-serif;
+  font-size: 14px;
   line-height: 1.5;
   font-weight: 400;
 
@@ -12,6 +12,9 @@
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   -webkit-text-size-adjust: 100%;
+
+  /* Prevent rubber-banding / overscroll on macOS */
+  overscroll-behavior: none;
 }
 
 *, *::before, *::after {
@@ -20,7 +23,13 @@
 
 body {
   margin: 0;
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
+}
+
+#root {
+  height: 100vh;
+  overflow: hidden;
 }
 
 input,
@@ -40,4 +49,146 @@ textarea:focus {
 
 code {
   font-family: 'SF Mono', 'Fira Code', 'Fira Mono', monospace;
+}
+
+/* ── App header ─────────────────────────────────────────────────── */
+
+.app-header {
+  flex-shrink: 0;
+  height: 48px;
+  background: var(--color-chalk-board-dark);
+  border-bottom: 1px solid rgba(232, 228, 223, 0.06);
+  /* Allow window dragging on macOS */
+  -webkit-app-region: drag;
+  user-select: none;
+}
+
+.app-header-inner {
+  max-width: 64rem;
+  margin: 0 auto;
+  padding: 0 20px;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.app-header-brand {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--color-chalk-white);
+}
+
+.app-header-back {
+  -webkit-app-region: no-drag;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--color-chalk-muted);
+  background: none;
+  border: none;
+  padding: 4px 8px;
+  border-radius: 6px;
+  transition: color 0.15s, background 0.15s;
+}
+
+.app-header-back:hover {
+  color: var(--color-chalk-white);
+  background: rgba(232, 228, 223, 0.06);
+}
+
+.app-header-action {
+  -webkit-app-region: no-drag;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  border: none;
+  background: none;
+  color: var(--color-chalk-muted);
+  transition: color 0.15s, background 0.15s;
+}
+
+.app-header-action:hover {
+  color: var(--color-chalk-white);
+  background: rgba(232, 228, 223, 0.06);
+}
+
+/* ── Buttons ────────────────────────────────────────────────────── */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  border: none;
+  transition: background 0.15s, opacity 0.15s, transform 0.1s;
+  user-select: none;
+}
+
+.btn:active {
+  transform: scale(0.97);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--color-chalk-blue);
+  color: var(--color-chalk-board-dark);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: #85c4ff;
+}
+
+.btn-secondary {
+  background: rgba(232, 228, 223, 0.08);
+  color: var(--color-chalk-white);
+  border: 1px solid rgba(232, 228, 223, 0.1);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: rgba(232, 228, 223, 0.12);
+  border-color: rgba(232, 228, 223, 0.15);
+}
+
+.btn-ghost {
+  background: none;
+  color: var(--color-chalk-muted);
+}
+
+.btn-ghost:hover:not(:disabled) {
+  color: var(--color-chalk-white);
+  background: rgba(232, 228, 223, 0.06);
+}
+
+/* ── Spinner ────────────────────────────────────────────────────── */
+
+.spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid rgba(116, 185, 255, 0.25);
+  border-top-color: var(--color-chalk-blue);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.spinner-sm {
+  width: 14px;
+  height: 14px;
+  border-width: 1.5px;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
