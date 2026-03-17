@@ -6,12 +6,16 @@ pub mod safety;
 pub mod shredder;
 pub mod updater;
 
-use admin::oauth::OAuthClient;
-use connectors::ConnectorDispatcher;
 use std::sync::Mutex;
 
+use connectors::dispatcher::ConnectorDispatcher;
+use connectors::factory::ConnectorFactory;
+use connectors::ConnectorConfig;
+
 pub struct AppState {
-    pub oauth_client: Mutex<OAuthClient>,
+    pub dispatcher: Mutex<ConnectorDispatcher>,
+    /// Data directory for connector file storage.
+    pub data_dir: std::path::PathBuf,
 }
 
 /// Tauri command: pipe frontend console errors to the backend structured log.
@@ -36,18 +40,45 @@ pub fn run() {
     let _log_guard = logging::init();
 
     let data_dir = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    let oauth_client = OAuthClient::new(&data_dir);
+
+    // Initialize the connector dispatcher.
+    let mut dispatcher = ConnectorDispatcher::new();
+
+    // Create a default Google Drive connector (Phase 1 — single connector).
+    // In the future, configs will be loaded from SQLite.
+    let gd_config = ConnectorConfig {
+        id: "google_drive_default".to_string(),
+        connector_type: "google_drive".to_string(),
+        display_name: "Google Drive".to_string(),
+        credentials: None,
+        source_id: None,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        last_sync_at: None,
+    };
+
+    match ConnectorFactory::create(&gd_config, &data_dir) {
+        Ok(connector) => {
+            dispatcher.register(connector);
+            tracing::info!("Google Drive connector registered via factory");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to create Google Drive connector");
+        }
+    }
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState {
-            oauth_client: Mutex::new(oauth_client),
+            dispatcher: Mutex::new(dispatcher),
+            data_dir: data_dir.clone(),
         })
-        .manage(ConnectorDispatcher::new())
         .invoke_handler(tauri::generate_handler![
             greet,
             log_frontend_error,
+            connectors::commands::list_connectors,
+            connectors::commands::list_connected_connectors,
+            connectors::commands::disconnect_connector,
             admin::oauth::initialize_oauth,
             admin::oauth::has_embedded_credentials,
             admin::oauth::save_oauth_config,
@@ -61,10 +92,6 @@ pub fn run() {
             admin::oauth::select_single_document,
             admin::oauth::trigger_initial_shred,
             admin::oauth::list_scanned_documents,
-            connectors::dispatcher::list_connectors,
-            connectors::dispatcher::get_connection_details,
-            connectors::dispatcher::disconnect_connector,
-            connectors::dispatcher::rescan_connector,
             updater::check_for_update,
             updater::install_update,
         ])

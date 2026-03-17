@@ -3,28 +3,46 @@
 //! These tests verify the end-to-end flow of the admin onboarding process:
 //! OAuth configuration, token persistence, onboarding status tracking,
 //! and the interaction between admin and database modules.
+//!
+//! After the connector architecture refactor, OAuth types live in
+//! connectors::google_drive and onboarding status is managed by admin::oauth
+//! using standalone functions (no longer OAuthClient struct).
 
-use chalk_lib::admin::oauth::{
-    get_valid_access_token, OAuthClient, OAuthConfig, OnboardingStatus, TokenStorage,
+use chalk_lib::connectors::google_drive::{
+    get_valid_access_token, GoogleDriveConnector, OAuthConfig, TokenStorage,
 };
+use chalk_lib::connectors::{AuthStatus, ConnectorConfig, LessonPlanConnector};
 use chalk_lib::database::{Database, NewLessonPlan, NewSubject};
 use chrono::Utc;
 use std::fs;
 use tempfile::TempDir;
 
-// ── OAuth Client Integration ────────────────────────────────────
+// ── GoogleDriveConnector Integration ────────────────────────────
 
 #[test]
 fn test_full_oauth_config_lifecycle() {
     let dir = TempDir::new().unwrap();
-    let mut client = OAuthClient::new(dir.path());
+    let chalk_dir = dir.path().join("com.madison.chalk");
+    fs::create_dir_all(&chalk_dir).unwrap();
 
-    // Initially no config loaded.
-    assert!(!client.load_config().unwrap());
-    assert!(client.config.client_id.is_empty());
+    let config = ConnectorConfig {
+        id: "gd-int-1".into(),
+        connector_type: "google_drive".into(),
+        display_name: "Integration Test Drive".into(),
+        credentials: None,
+        source_id: None,
+        created_at: "2026-01-01".into(),
+        last_sync_at: None,
+    };
+
+    let connector = GoogleDriveConnector::new(&config, dir.path()).unwrap();
+
+    // Initially no config → empty client_id.
+    let loaded = connector.oauth_config().unwrap();
+    assert!(loaded.client_id.is_empty());
 
     // Save a config.
-    let config = OAuthConfig {
+    let oauth_config = OAuthConfig {
         client_id: "integration-test-id".into(),
         client_secret: "integration-test-secret".into(),
         redirect_uri: "http://localhost:1420/oauth/callback".into(),
@@ -33,142 +51,94 @@ fn test_full_oauth_config_lifecycle() {
             "https://www.googleapis.com/auth/documents.readonly".into(),
         ],
     };
-    client.save_config(&config).unwrap();
+    connector.save_oauth_config(&oauth_config).unwrap();
 
-    // Create a new client and load the config from disk.
-    let mut client2 = OAuthClient::new(dir.path());
-    assert!(client2.load_config().unwrap());
-    assert_eq!(client2.config.client_id, "integration-test-id");
-    assert_eq!(client2.config.client_secret, "integration-test-secret");
-    assert_eq!(client2.config.scopes.len(), 2);
+    // Create a new connector and verify config persisted.
+    let connector2 = GoogleDriveConnector::new(&config, dir.path()).unwrap();
+    connector2.load_oauth_config().unwrap();
+    let loaded2 = connector2.oauth_config().unwrap();
+    assert_eq!(loaded2.client_id, "integration-test-id");
+    assert_eq!(loaded2.client_secret, "integration-test-secret");
+    assert_eq!(loaded2.scopes.len(), 2);
 
     // Authorization URL contains the saved client_id.
-    let url = client2.get_authorization_url();
+    let url = connector2.get_authorization_url().unwrap();
     assert!(url.contains("integration-test-id"));
     assert!(url.contains("access_type=offline"));
 }
 
 #[test]
-fn test_full_token_lifecycle() {
+fn test_connector_auth_status_lifecycle() {
     let dir = TempDir::new().unwrap();
-    let client = OAuthClient::new(dir.path());
+    let chalk_dir = dir.path().join("com.madison.chalk");
+    fs::create_dir_all(&chalk_dir).unwrap();
 
-    // No tokens initially.
-    assert!(client.load_tokens().unwrap().is_none());
+    let config = ConnectorConfig {
+        id: "gd-int-2".into(),
+        connector_type: "google_drive".into(),
+        display_name: "Test".into(),
+        credentials: None,
+        source_id: None,
+        created_at: "2026-01-01".into(),
+        last_sync_at: None,
+    };
 
-    // Save tokens.
+    // No tokens → disconnected.
+    let connector = GoogleDriveConnector::new(&config, dir.path()).unwrap();
+    assert_eq!(connector.auth_status(), AuthStatus::Disconnected);
+
+    // Write valid tokens.
     let tokens = TokenStorage {
         access_token: "integration-access-token".into(),
         refresh_token: Some("integration-refresh-token".into()),
         expires_at: Utc::now() + chrono::Duration::seconds(3600),
         token_type: "Bearer".into(),
     };
-    client.save_tokens(&tokens).unwrap();
+    fs::write(
+        chalk_dir.join("oauth_tokens.json"),
+        serde_json::to_string(&tokens).unwrap(),
+    )
+    .unwrap();
 
-    // Load and verify.
-    let loaded = client.load_tokens().unwrap().unwrap();
-    assert_eq!(loaded.access_token, "integration-access-token");
-    assert_eq!(
-        loaded.refresh_token,
-        Some("integration-refresh-token".into())
-    );
-    assert!(!loaded.is_expired());
+    // Re-create connector — should detect tokens.
+    let connector2 = GoogleDriveConnector::new(&config, dir.path()).unwrap();
+    assert_eq!(connector2.auth_status(), AuthStatus::Connected);
 
-    // Overwrite with expired tokens.
-    let expired_tokens = TokenStorage {
+    // Disconnect.
+    connector2.disconnect().unwrap();
+    assert_eq!(connector2.auth_status(), AuthStatus::Disconnected);
+    assert!(!chalk_dir.join("oauth_tokens.json").exists());
+}
+
+#[test]
+fn test_connector_expired_tokens() {
+    let dir = TempDir::new().unwrap();
+    let chalk_dir = dir.path().join("com.madison.chalk");
+    fs::create_dir_all(&chalk_dir).unwrap();
+
+    let tokens = TokenStorage {
         access_token: "expired-token".into(),
         refresh_token: None,
         expires_at: Utc::now() - chrono::Duration::seconds(100),
         token_type: "Bearer".into(),
     };
-    client.save_tokens(&expired_tokens).unwrap();
+    fs::write(
+        chalk_dir.join("oauth_tokens.json"),
+        serde_json::to_string(&tokens).unwrap(),
+    )
+    .unwrap();
 
-    let loaded2 = client.load_tokens().unwrap().unwrap();
-    assert!(loaded2.is_expired());
-    assert!(loaded2.refresh_token.is_none());
-}
-
-// ── Onboarding Status Integration ───────────────────────────────
-
-#[test]
-fn test_full_onboarding_flow() {
-    let dir = TempDir::new().unwrap();
-    let client = OAuthClient::new(dir.path());
-
-    // Step 1: Fresh start — nothing configured.
-    let status = client.load_onboarding_status();
-    assert!(!status.oauth_configured);
-    assert!(!status.tokens_stored);
-    assert!(!status.folder_selected);
-    assert!(!status.initial_shred_complete);
-
-    // Step 2: OAuth configured.
-    let mut status = OnboardingStatus {
-        oauth_configured: true,
-        ..Default::default()
+    let config = ConnectorConfig {
+        id: "gd-int-3".into(),
+        connector_type: "google_drive".into(),
+        display_name: "Test".into(),
+        credentials: None,
+        source_id: None,
+        created_at: "2026-01-01".into(),
+        last_sync_at: None,
     };
-    client.save_onboarding_status(&status).unwrap();
-    let loaded = client.load_onboarding_status();
-    assert!(loaded.oauth_configured);
-    assert!(!loaded.tokens_stored);
-
-    // Step 3: Tokens stored.
-    status.tokens_stored = true;
-    client.save_onboarding_status(&status).unwrap();
-    let loaded = client.load_onboarding_status();
-    assert!(loaded.tokens_stored);
-
-    // Step 4: Folder selected and accessible.
-    status.folder_selected = true;
-    status.folder_accessible = true;
-    status.selected_folder_id = Some("folder_123".into());
-    status.selected_folder_name = Some("Lesson Plans 2026".into());
-    client.save_onboarding_status(&status).unwrap();
-    let loaded = client.load_onboarding_status();
-    assert!(loaded.folder_selected);
-    assert!(loaded.folder_accessible);
-    assert_eq!(loaded.selected_folder_id, Some("folder_123".into()));
-    assert_eq!(
-        loaded.selected_folder_name,
-        Some("Lesson Plans 2026".into())
-    );
-
-    // Step 5: Initial shred complete.
-    status.initial_shred_complete = true;
-    client.save_onboarding_status(&status).unwrap();
-    let loaded = client.load_onboarding_status();
-    assert!(loaded.initial_shred_complete);
-
-    // All steps complete.
-    assert!(loaded.oauth_configured);
-    assert!(loaded.tokens_stored);
-    assert!(loaded.folder_selected);
-    assert!(loaded.folder_accessible);
-    assert!(loaded.initial_shred_complete);
-}
-
-#[test]
-fn test_onboarding_persistence_across_clients() {
-    let dir = TempDir::new().unwrap();
-
-    // Client 1 saves status.
-    let client1 = OAuthClient::new(dir.path());
-    let status = OnboardingStatus {
-        oauth_configured: true,
-        tokens_stored: true,
-        folder_selected: true,
-        folder_accessible: true,
-        initial_shred_complete: true,
-        selected_folder_id: Some("abc".into()),
-        selected_folder_name: Some("Plans".into()),
-    };
-    client1.save_onboarding_status(&status).unwrap();
-
-    // Client 2 (new instance) reads the same status.
-    let client2 = OAuthClient::new(dir.path());
-    let loaded = client2.load_onboarding_status();
-    assert!(loaded.initial_shred_complete);
-    assert_eq!(loaded.selected_folder_id, Some("abc".into()));
+    let connector = GoogleDriveConnector::new(&config, dir.path()).unwrap();
+    assert_eq!(connector.auth_status(), AuthStatus::Expired);
 }
 
 // ── Admin + Database Integration ────────────────────────────────
@@ -340,53 +310,53 @@ async fn test_get_valid_access_token_expired_no_refresh() {
 #[test]
 fn test_exchange_params_roundtrip() {
     let dir = TempDir::new().unwrap();
-    let mut client = OAuthClient::new(dir.path());
+    let chalk_dir = dir.path().join("com.madison.chalk");
+    fs::create_dir_all(&chalk_dir).unwrap();
 
-    let config = OAuthConfig {
+    let config = ConnectorConfig {
+        id: "gd-int-ep".into(),
+        connector_type: "google_drive".into(),
+        display_name: "Test".into(),
+        credentials: None,
+        source_id: None,
+        created_at: "2026-01-01".into(),
+        last_sync_at: None,
+    };
+    let connector = GoogleDriveConnector::new(&config, dir.path()).unwrap();
+
+    let oauth_cfg = OAuthConfig {
         client_id: "param-id".into(),
         client_secret: "param-secret".into(),
         redirect_uri: "http://localhost/cb".into(),
         scopes: vec!["scope1".into()],
     };
-    client.save_config(&config).unwrap();
-    client.load_config().unwrap();
+    connector.save_oauth_config(&oauth_cfg).unwrap();
+    connector.load_oauth_config().unwrap();
 
-    let (extracted_config, token_file, _pkce_verifier) = client.exchange_params();
+    let (extracted_config, token_file, _pkce_verifier) = connector.exchange_params().unwrap();
     assert_eq!(extracted_config.client_id, "param-id");
     assert_eq!(extracted_config.client_secret, "param-secret");
     assert!(token_file.to_str().unwrap().contains("oauth_tokens.json"));
 }
 
-// ── Concurrent Client Access ────────────────────────────────────
+// ── Connector Trait Integration ─────────────────────────────────
 
 #[test]
-fn test_concurrent_status_access() {
-    use std::sync::{Arc, Mutex};
-    use std::thread;
-
+fn test_connector_info_from_config() {
     let dir = TempDir::new().unwrap();
-    let client = Arc::new(Mutex::new(OAuthClient::new(dir.path())));
-
-    let handles: Vec<_> = (0..5)
-        .map(|i| {
-            let client = Arc::clone(&client);
-            thread::spawn(move || {
-                let c = client.lock().unwrap();
-                let mut status = c.load_onboarding_status();
-                status.oauth_configured = true;
-                status.selected_folder_id = Some(format!("folder_{}", i));
-                c.save_onboarding_status(&status).unwrap();
-            })
-        })
-        .collect();
-
-    for h in handles {
-        h.join().unwrap();
-    }
-
-    // Verify final state is consistent.
-    let c = client.lock().unwrap();
-    let final_status = c.load_onboarding_status();
-    assert!(final_status.oauth_configured);
-    assert!(final_status.selected_folder_id.is_some());
+    let config = ConnectorConfig {
+        id: "gd-info-test".into(),
+        connector_type: "google_drive".into(),
+        display_name: "Teacher's Drive".into(),
+        credentials: None,
+        source_id: None,
+        created_at: "2026-01-01".into(),
+        last_sync_at: None,
+    };
+    let connector = GoogleDriveConnector::new(&config, dir.path()).unwrap();
+    let info = connector.info();
+    assert_eq!(info.id, "gd-info-test");
+    assert_eq!(info.connector_type, "google_drive");
+    assert_eq!(info.display_name, "Teacher's Drive");
+    assert_eq!(info.icon, "google-drive");
 }
