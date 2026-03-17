@@ -5,6 +5,7 @@ pub mod database;
 pub mod errors;
 pub mod events;
 pub mod feature_flags;
+pub mod library;
 mod logging;
 pub mod privacy;
 pub mod safety;
@@ -235,15 +236,13 @@ pub fn run() {
     let cache_path = data_dir.join("com.madison.chalk").join("cache.db");
     let cache = cache::Cache::open(&cache_path).expect("failed to open cache database");
 
-    let mut builder = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init());
 
     // Only register the updater plugin in release builds — it requires a
     // signing pubkey that isn't available during development.
     #[cfg(not(debug_assertions))]
-    {
-        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
-    }
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
 
     builder
         .manage(AppState {
@@ -284,11 +283,21 @@ pub fn run() {
             cache_get,
             cache_clear,
             cache_stats,
+            library::create_tag,
+            library::list_tags,
+            library::update_tag,
+            library::delete_tag,
+            library::add_tag_to_plan,
+            library::remove_tag_from_plan,
+            library::get_tags_for_plan,
+            library::list_library_plans,
+            library::create_plan,
+            library::delete_plan,
         ])
-        .setup(|app| {
+        .setup(|_app| {
             // Start periodic update checker only in release builds.
             #[cfg(not(debug_assertions))]
-            updater::spawn_update_checker(app.handle().clone());
+            updater::spawn_update_checker(_app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!())
