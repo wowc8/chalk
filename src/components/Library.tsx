@@ -21,8 +21,6 @@ interface LibraryPlanCard {
   updated_at: string;
 }
 
-type TabKey = "my_plans" | "imported";
-
 const TAG_COLORS = [
   "#74b9ff",
   "#55efc4",
@@ -68,11 +66,8 @@ export function Library() {
   const [allTags, setAllTags] = useState<Tag[]>([]);
   const [selectedTagIds, setSelectedTagIds] = useState<string[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
-  const [activeTab, setActiveTab] = useState<TabKey>("my_plans");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  const sourceType = activeTab === "my_plans" ? "created" : "imported";
 
   const loadPlans = async () => {
     setLoading(true);
@@ -80,7 +75,6 @@ export function Library() {
     try {
       const [fetchedPlans, fetchedTags] = await Promise.all([
         invoke<LibraryPlanCard[]>("list_library_plans", {
-          sourceType,
           search: searchQuery || null,
           tagIds: selectedTagIds.length > 0 ? selectedTagIds : null,
         }),
@@ -98,7 +92,7 @@ export function Library() {
 
   useEffect(() => {
     loadPlans();
-  }, [activeTab, selectedTagIds]);
+  }, [selectedTagIds]);
 
   // Debounced search
   useEffect(() => {
@@ -154,28 +148,6 @@ export function Library() {
             onChange={(e) => setSearchQuery(e.target.value)}
             className="w-full pl-10 pr-4 py-2 bg-chalk-board-dark/60 border border-chalk-white/8 rounded-lg text-sm text-chalk-white placeholder-chalk-muted focus:outline-none focus:border-chalk-blue/40 transition-colors"
           />
-        </div>
-
-        {/* Tabs */}
-        <div className="flex gap-1 mb-4 p-1 rounded-lg bg-chalk-board-dark/50">
-          {(
-            [
-              { key: "my_plans" as TabKey, label: "My Plans" },
-              { key: "imported" as TabKey, label: "Imported" },
-            ] as const
-          ).map((tab) => (
-            <button
-              key={tab.key}
-              onClick={() => setActiveTab(tab.key)}
-              className={`flex-1 py-1.5 px-4 rounded-md text-sm font-medium transition-all ${
-                activeTab === tab.key
-                  ? "bg-chalk-white/10 text-chalk-white"
-                  : "text-chalk-muted hover:text-chalk-dust"
-              }`}
-            >
-              {tab.label}
-            </button>
-          ))}
         </div>
 
         {/* Tag chips */}
@@ -252,20 +224,14 @@ export function Library() {
               </svg>
             </div>
             <h3 className="text-base font-medium text-chalk-white mb-1">
-              {activeTab === "my_plans"
-                ? searchQuery
-                  ? "No matching plans"
-                  : "No plans yet"
-                : "No imported plans"}
+              {searchQuery ? "No matching plans" : "No plans yet"}
             </h3>
             <p className="text-chalk-muted text-sm mb-5">
-              {activeTab === "my_plans"
-                ? searchQuery
-                  ? "Try a different search term"
-                  : "Create your first lesson plan to get started."
-                : "Import plans from Google Drive to see them here."}
+              {searchQuery
+                ? "Try a different search term"
+                : "Create your first lesson plan to get started."}
             </p>
-            {activeTab === "my_plans" && !searchQuery && (
+            {!searchQuery && (
               <button onClick={() => navigate("/plan/new")} className="btn btn-secondary">
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
