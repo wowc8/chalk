@@ -1,5 +1,5 @@
 @import "tailwindcss";
-@import url('https://fonts.googleapis.com/css2?family=Fredericka+the+Great&family=Patrick+Hand&family=Inter:wght@300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 
 @theme {
   /* Chalk palette — chalkboard-inspired */
@@ -31,65 +31,27 @@
   --color-bat-glass-light: rgba(108, 92, 231, 0.3);
 }
 
-/* Chalkboard background texture */
+/* Chalkboard background — clean, no noise texture */
 .chalk-bg {
   background-color: var(--color-chalk-board);
-  background-image:
-    radial-gradient(ellipse at 20% 50%, rgba(45, 52, 54, 0.9) 0%, transparent 70%),
-    radial-gradient(ellipse at 80% 20%, rgba(61, 74, 75, 0.4) 0%, transparent 50%),
-    url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.03'/%3E%3C/svg%3E");
 }
 
-/* Chalk text effect — slight roughness */
+/* Chalk text effect — use for special emphasis only */
 .chalk-text {
-  font-family: 'Patrick Hand', cursive;
   color: var(--color-chalk-white);
-  text-shadow: 0 0 3px rgba(232, 228, 223, 0.15);
 }
 
-/* Chalk heading — decorative display font */
+/* Chalk heading — clean system font */
 .chalk-heading {
-  font-family: 'Fredericka the Great', cursive;
+  font-weight: 600;
   color: var(--color-chalk-white);
-  text-shadow: 0 0 4px rgba(232, 228, 223, 0.1);
 }
 
-/* Chalk line separator — looks hand-drawn */
+/* Chalk line separator */
 .chalk-line {
   border: none;
-  height: 2px;
-  background: repeating-linear-gradient(
-    90deg,
-    rgba(232, 228, 223, 0.15) 0px,
-    rgba(232, 228, 223, 0.15) 4px,
-    transparent 4px,
-    transparent 8px
-  );
-}
-
-/* Chalk dust particle animation */
-@keyframes dust-float {
-  0%, 100% { transform: translateY(0) rotate(0deg); opacity: 0; }
-  10% { opacity: 0.4; }
-  90% { opacity: 0.1; }
-  100% { transform: translateY(-60px) rotate(180deg); opacity: 0; }
-}
-
-.chalk-dust-particle {
-  position: absolute;
-  width: 2px;
-  height: 2px;
-  background: var(--color-chalk-dust);
-  border-radius: 50%;
-  animation: dust-float 6s ease-in-out infinite;
-}
-
-/* Subtle chalkboard grid lines */
-.chalk-grid {
-  background-image:
-    linear-gradient(rgba(232, 228, 223, 0.03) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(232, 228, 223, 0.03) 1px, transparent 1px);
-  background-size: 48px 48px;
+  height: 1px;
+  background: rgba(232, 228, 223, 0.08);
 }
 
 /* Settings modal backdrop */

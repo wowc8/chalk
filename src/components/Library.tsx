@@ -1,7 +1,6 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useNavigate } from "react-router-dom";
-import { motion, AnimatePresence } from "framer-motion";
 
 interface Tag {
   id: string;
@@ -75,6 +74,7 @@ export function Library() {
       setAllTags(fetchedTags);
     } catch (e) {
       setError(`Failed to load plans: ${e}`);
+      setPlans([]);
     } finally {
       setLoading(false);
     }
@@ -101,29 +101,28 @@ export function Library() {
   }
 
   return (
-    <div className="flex-1 px-6 py-8">
-      <div className="max-w-6xl mx-auto">
+    <div className="px-6 py-6">
+      <div className="max-w-4xl mx-auto">
         {/* Library header */}
-        <div className="flex items-center justify-between mb-6">
+        <div className="flex items-center justify-between mb-5">
           <div>
-            <h2 className="chalk-heading text-2xl tracking-wide text-chalk-white mb-1">
+            <h2 className="text-lg font-semibold text-chalk-white">
               Library
             </h2>
-            <p className="text-sm text-chalk-muted">
+            <p className="text-xs text-chalk-muted mt-0.5">
               Your lesson plans and imported documents
             </p>
           </div>
-          <motion.button
-            whileHover={{ scale: 1.03 }}
-            whileTap={{ scale: 0.97 }}
-            className="px-4 py-2.5 bg-chalk-blue/15 border border-chalk-blue/30 rounded-lg text-chalk-blue text-sm font-medium hover:bg-chalk-blue/25 transition-colors"
-          >
-            + New Plan
-          </motion.button>
+          <button className="btn btn-primary">
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+            </svg>
+            New Plan
+          </button>
         </div>
 
         {/* Search bar */}
-        <div className="relative mb-5">
+        <div className="relative mb-4">
           <svg
             className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-chalk-muted"
             fill="none"
@@ -137,12 +136,12 @@ export function Library() {
             placeholder="Search plans..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full pl-10 pr-4 py-2.5 bg-chalk-board-dark/60 border border-chalk-white/8 rounded-lg text-sm text-chalk-white placeholder-chalk-muted focus:outline-none focus:border-chalk-blue/40 transition-colors"
+            className="w-full pl-10 pr-4 py-2 bg-chalk-board-dark/60 border border-chalk-white/8 rounded-lg text-sm text-chalk-white placeholder-chalk-muted focus:outline-none focus:border-chalk-blue/40 transition-colors"
           />
         </div>
 
         {/* Tabs */}
-        <div className="flex gap-1 mb-5 p-1 rounded-lg bg-chalk-board-dark/50">
+        <div className="flex gap-1 mb-4 p-1 rounded-lg bg-chalk-board-dark/50">
           {(
             [
               { key: "my_plans" as TabKey, label: "My Plans" },
@@ -152,10 +151,10 @@ export function Library() {
             <button
               key={tab.key}
               onClick={() => setActiveTab(tab.key)}
-              className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition-all ${
+              className={`flex-1 py-1.5 px-4 rounded-md text-sm font-medium transition-all ${
                 activeTab === tab.key
-                  ? "bg-chalk-white/10 text-chalk-white border-b-2 border-chalk-blue/50"
-                  : "text-chalk-muted border-b-2 border-transparent hover:text-chalk-dust"
+                  ? "bg-chalk-white/10 text-chalk-white"
+                  : "text-chalk-muted hover:text-chalk-dust"
               }`}
             >
               {tab.label}
@@ -165,15 +164,13 @@ export function Library() {
 
         {/* Tag chips */}
         {allTags.length > 0 && (
-          <div className="flex flex-wrap gap-2 mb-6">
+          <div className="flex flex-wrap gap-2 mb-5">
             {allTags.map((tag, i) => {
               const isSelected = selectedTagIds.includes(tag.id);
               const tagColor = getTagColor(tag, i);
               return (
-                <motion.button
+                <button
                   key={tag.id}
-                  whileHover={{ scale: 1.05 }}
-                  whileTap={{ scale: 0.95 }}
                   onClick={() => toggleTag(tag.id)}
                   className="px-3 py-1 rounded-full text-xs font-medium transition-all"
                   style={{
@@ -185,7 +182,7 @@ export function Library() {
                   }}
                 >
                   {tag.name}
-                </motion.button>
+                </button>
               );
             })}
             {selectedTagIds.length > 0 && (
@@ -201,11 +198,7 @@ export function Library() {
 
         {/* Error state */}
         {error && (
-          <motion.div
-            initial={{ opacity: 0, y: -10 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="mb-6 p-4 bg-chalk-red/10 border border-chalk-red/30 rounded-lg text-sm text-chalk-red"
-          >
+          <div className="mb-5 p-4 bg-chalk-red/10 border border-chalk-red/30 rounded-lg text-sm text-chalk-red">
             {error}
             <button
               onClick={loadPlans}
@@ -213,31 +206,23 @@ export function Library() {
             >
               Retry
             </button>
-          </motion.div>
+          </div>
         )}
 
         {/* Loading state */}
         {loading && (
-          <div className="flex items-center justify-center py-20">
-            <motion.div
-              animate={{ rotate: 360 }}
-              transition={{ duration: 1.5, repeat: Infinity, ease: "linear" }}
-              className="w-8 h-8 border-2 border-chalk-blue border-t-transparent rounded-full"
-            />
-            <span className="ml-3 text-chalk-muted">Loading plans...</span>
+          <div className="flex items-center justify-center py-16">
+            <div className="spinner" />
+            <span className="ml-3 text-chalk-muted text-sm">Loading plans...</span>
           </div>
         )}
 
         {/* Empty state */}
         {!loading && !error && plans.length === 0 && (
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="text-center py-20"
-          >
-            <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-chalk-board-dark border-2 border-chalk-white/10 flex items-center justify-center">
+          <div className="text-center py-16">
+            <div className="w-16 h-16 mx-auto mb-5 rounded-2xl bg-chalk-board-dark border border-chalk-white/8 flex items-center justify-center">
               <svg
-                className="w-10 h-10 text-chalk-muted"
+                className="w-8 h-8 text-chalk-muted"
                 fill="none"
                 stroke="currentColor"
                 viewBox="0 0 24 24"
@@ -250,14 +235,14 @@ export function Library() {
                 />
               </svg>
             </div>
-            <h3 className="text-lg chalk-text mb-2">
+            <h3 className="text-base font-medium text-chalk-white mb-1">
               {activeTab === "my_plans"
                 ? searchQuery
                   ? "No matching plans"
                   : "No plans yet"
                 : "No imported plans"}
             </h3>
-            <p className="text-chalk-muted text-sm mb-6">
+            <p className="text-chalk-muted text-sm mb-5">
               {activeTab === "my_plans"
                 ? searchQuery
                   ? "Try a different search term"
@@ -265,122 +250,109 @@ export function Library() {
                 : "Import plans from Google Drive to see them here."}
             </p>
             {activeTab === "my_plans" && !searchQuery && (
-              <motion.button
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-                className="px-6 py-2.5 border border-chalk-blue/30 rounded-lg text-chalk-blue hover:bg-chalk-blue/10 transition-colors"
-              >
-                + Create Plan
-              </motion.button>
+              <button className="btn btn-secondary">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                </svg>
+                Create Plan
+              </button>
             )}
-          </motion.div>
+          </div>
         )}
 
         {/* Plan cards */}
         {!loading && plans.length > 0 && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ delay: 0.1 }}
-          >
-            <div className="flex items-center justify-between mb-4">
-              <p className="text-sm text-chalk-muted">
+          <div>
+            <div className="flex items-center justify-between mb-3">
+              <p className="text-xs text-chalk-muted">
                 {plans.length} plan{plans.length !== 1 ? "s" : ""}
                 {searchQuery && ` matching "${searchQuery}"`}
               </p>
-              <motion.button
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
+              <button
                 onClick={loadPlans}
-                className="px-3 py-1.5 text-xs border border-chalk-white/10 rounded-lg text-chalk-muted hover:text-chalk-white hover:border-chalk-white/20 transition-colors"
+                className="btn btn-ghost text-xs"
               >
                 Refresh
-              </motion.button>
+              </button>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-              <AnimatePresence>
-                {plans.map((plan, i) => (
-                  <motion.button
-                    key={plan.id}
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -10 }}
-                    transition={{ delay: i * 0.02 }}
-                    onClick={() => navigate(`/plan/${plan.id}`)}
-                    className="text-left p-4 bg-chalk-board-dark/50 border border-chalk-white/5 hover:border-chalk-blue/20 rounded-lg transition-all group hover:bg-chalk-board-dark/80"
-                  >
-                    <div className="flex items-start gap-3">
-                      <div className="w-9 h-9 rounded-lg bg-chalk-blue/8 flex items-center justify-center flex-shrink-0 group-hover:bg-chalk-blue/15 transition-colors">
-                        <svg
-                          className="w-4.5 h-4.5 text-chalk-blue/60 group-hover:text-chalk-blue transition-colors"
-                          fill="none"
-                          stroke="currentColor"
-                          viewBox="0 0 24 24"
-                        >
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth={1.5}
-                            d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-                          />
-                        </svg>
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <span className="block text-sm font-medium text-chalk-white truncate">
-                          {plan.title}
-                        </span>
-                        <div className="flex items-center gap-2 mt-1">
-                          <span className="text-xs text-chalk-muted">
-                            {formatDate(plan.updated_at)}
-                          </span>
-                          <span className="text-xs px-1.5 py-0.5 rounded bg-chalk-ghost text-chalk-muted">
-                            v{plan.version}
-                          </span>
-                          <span
-                            className={`text-xs px-1.5 py-0.5 rounded capitalize ${
-                              plan.status === "published"
-                                ? "bg-chalk-green/10 text-chalk-green"
-                                : "bg-chalk-ghost text-chalk-muted"
-                            }`}
-                          >
-                            {plan.status}
-                          </span>
-                        </div>
-                        {/* Tags */}
-                        {plan.tags.length > 0 && (
-                          <div className="flex flex-wrap gap-1 mt-2">
-                            {plan.tags.map((tag, ti) => {
-                              const tagColor = getTagColor(tag, ti);
-                              return (
-                                <span
-                                  key={tag.id}
-                                  className="px-1.5 py-0.5 rounded-full text-[10px] font-medium"
-                                  style={{
-                                    backgroundColor: `${tagColor}15`,
-                                    border: `1px solid ${tagColor}30`,
-                                    color: `${tagColor}cc`,
-                                  }}
-                                >
-                                  {tag.name}
-                                </span>
-                              );
-                            })}
-                          </div>
-                        )}
-                      </div>
+              {plans.map((plan) => (
+                <button
+                  key={plan.id}
+                  onClick={() => navigate(`/plan/${plan.id}`)}
+                  className="text-left p-4 bg-chalk-board-dark/50 border border-chalk-white/5 hover:border-chalk-blue/20 rounded-lg transition-all group hover:bg-chalk-board-dark/80"
+                >
+                  <div className="flex items-start gap-3">
+                    <div className="w-9 h-9 rounded-lg bg-chalk-blue/8 flex items-center justify-center flex-shrink-0 group-hover:bg-chalk-blue/15 transition-colors">
+                      <svg
+                        className="w-4 h-4 text-chalk-blue/60 group-hover:text-chalk-blue transition-colors"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={1.5}
+                          d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+                        />
+                      </svg>
                     </div>
-                  </motion.button>
-                ))}
-              </AnimatePresence>
+                    <div className="flex-1 min-w-0">
+                      <span className="block text-sm font-medium text-chalk-white truncate">
+                        {plan.title}
+                      </span>
+                      <div className="flex items-center gap-2 mt-1">
+                        <span className="text-xs text-chalk-muted">
+                          {formatDate(plan.updated_at)}
+                        </span>
+                        <span className="text-xs px-1.5 py-0.5 rounded bg-chalk-ghost text-chalk-muted">
+                          v{plan.version}
+                        </span>
+                        <span
+                          className={`text-xs px-1.5 py-0.5 rounded capitalize ${
+                            plan.status === "published"
+                              ? "bg-chalk-green/10 text-chalk-green"
+                              : "bg-chalk-ghost text-chalk-muted"
+                          }`}
+                        >
+                          {plan.status}
+                        </span>
+                      </div>
+                      {/* Tags */}
+                      {plan.tags.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-2">
+                          {plan.tags.map((tag, ti) => {
+                            const tagColor = getTagColor(tag, ti);
+                            return (
+                              <span
+                                key={tag.id}
+                                className="px-1.5 py-0.5 rounded-full text-[10px] font-medium"
+                                style={{
+                                  backgroundColor: `${tagColor}15`,
+                                  border: `1px solid ${tagColor}30`,
+                                  color: `${tagColor}cc`,
+                                }}
+                              >
+                                {tag.name}
+                              </span>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </button>
+              ))}
             </div>
-          </motion.div>
+          </div>
         )}
 
         {/* Footer */}
         {!loading && (
-          <div className="mt-10 pt-6">
-            <hr className="chalk-line mb-4" />
+          <div className="mt-8 pt-5">
+            <hr className="chalk-line mb-3" />
             <p className="text-xs text-chalk-muted/60 text-center">
               Chalk is indexing your documents in the background.
             </p>

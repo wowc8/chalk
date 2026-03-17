@@ -19,6 +19,8 @@ function App() {
   const [showConsentDialog, setShowConsentDialog] = useState(false);
 
   useEffect(() => {
+    let settled = false;
+
     async function init() {
       // Check privacy consent status
       try {
@@ -39,7 +41,6 @@ function App() {
       }
 
       // Check if onboarding was already completed
-      // First check connector auth status — if tokens are valid, skip onboarding
       try {
         const status = (await invoke("check_onboarding_status")) as {
           initial_shred_complete: boolean;
@@ -52,14 +53,12 @@ function App() {
           status.tokens_stored &&
           status.folder_selected
         ) {
-          // Already authenticated and onboarding completed — go straight to app
+          settled = true;
           setView("app");
           return;
         }
 
         // Also check if we have valid auth via connector status
-        // This handles the case where tokens exist but the onboarding
-        // status check is overly strict
         try {
           const connections = await invoke<
             Array<{ auth_status: string }>
@@ -69,7 +68,7 @@ function App() {
           );
 
           if (hasValidAuth && status.folder_selected) {
-            // We have valid OAuth tokens and a folder selected — skip onboarding
+            settled = true;
             setView("app");
             return;
           }
@@ -77,12 +76,26 @@ function App() {
           // get_connection_details not available, fall through
         }
 
+        settled = true;
         setView("onboarding");
       } catch {
+        settled = true;
         setView("onboarding");
       }
     }
+
     init();
+
+    // Safety timeout: if backend never responds, fall through to onboarding
+    // after 4 seconds so the user isn't stuck on a spinner forever.
+    const timeout = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        setView("onboarding");
+      }
+    }, 4000);
+
+    return () => clearTimeout(timeout);
   }, []);
 
   const handleConsent = async (consented: boolean) => {
@@ -99,8 +112,8 @@ function App() {
 
   if (view === "loading") {
     return (
-      <div className="min-h-screen chalk-bg flex items-center justify-center">
-        <div className="w-8 h-8 border-2 border-chalk-blue border-t-transparent rounded-full animate-spin" />
+      <div className="h-screen chalk-bg flex items-center justify-center">
+        <div className="spinner" />
       </div>
     );
   }
