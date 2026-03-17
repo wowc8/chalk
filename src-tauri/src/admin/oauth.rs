@@ -227,6 +227,14 @@ impl OAuthClient {
         Ok(())
     }
 
+    /// Delete stored tokens (used during disconnect).
+    pub fn delete_tokens(&self) -> Result<(), OAuthError> {
+        if self.token_file.exists() {
+            fs::remove_file(&self.token_file)?;
+        }
+        Ok(())
+    }
+
     pub fn load_onboarding_status(&self) -> OnboardingStatus {
         if self.status_file.exists() {
             if let Ok(content) = fs::read_to_string(&self.status_file) {
@@ -1503,6 +1511,32 @@ mod tests {
             query,
             "'root' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
         );
+    }
+
+    #[test]
+    fn test_delete_tokens_removes_file() {
+        let dir = TempDir::new().unwrap();
+        let client = OAuthClient::new(dir.path());
+
+        let tokens = TokenStorage {
+            access_token: "to_delete".into(),
+            refresh_token: Some("refresh".into()),
+            expires_at: Utc::now() + chrono::Duration::seconds(3600),
+            token_type: "Bearer".into(),
+        };
+        client.save_tokens(&tokens).unwrap();
+        assert!(client.token_file.exists());
+
+        client.delete_tokens().unwrap();
+        assert!(!client.token_file.exists());
+    }
+
+    #[test]
+    fn test_delete_tokens_no_file_is_ok() {
+        let dir = TempDir::new().unwrap();
+        let client = OAuthClient::new(dir.path());
+        assert!(!client.token_file.exists());
+        client.delete_tokens().unwrap(); // should not panic or error
     }
 
     #[test]

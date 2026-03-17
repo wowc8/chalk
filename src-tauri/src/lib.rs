@@ -6,6 +6,7 @@ pub mod safety;
 pub mod shredder;
 
 use admin::oauth::OAuthClient;
+use connectors::ConnectorDispatcher;
 use std::sync::Mutex;
 
 pub struct AppState {
@@ -41,6 +42,7 @@ pub fn run() {
         .manage(AppState {
             oauth_client: Mutex::new(oauth_client),
         })
+        .manage(ConnectorDispatcher::new())
         .invoke_handler(tauri::generate_handler![
             greet,
             log_frontend_error,
@@ -57,6 +59,10 @@ pub fn run() {
             admin::oauth::select_single_document,
             admin::oauth::trigger_initial_shred,
             admin::oauth::list_scanned_documents,
+            connectors::dispatcher::list_connectors,
+            connectors::dispatcher::get_connection_details,
+            connectors::dispatcher::disconnect_connector,
+            connectors::dispatcher::rescan_connector,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
