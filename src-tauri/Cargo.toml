@@ -38,6 +38,8 @@ tokio = { version = "1", features = ["full"] }
 sha2 = "0.10"
 base64 = "0.22"
 rand = "0.8"
+sentry = { version = "0.35", features = ["backtrace", "panic", "contexts", "reqwest", "rustls"] }
+sentry-tracing = "0.35"
 
 [dev-dependencies]
 tempfile = "3"

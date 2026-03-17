@@ -60,3 +60,17 @@ Each entry follows:
 - `tokio::sync::Mutex`: Would allow holding the guard across awaits but adds unnecessary async overhead for simple file operations.
 - Database-backed token storage: More complex than needed for single-user desktop app. JSON files are simpler and human-readable.
 - Single-page form instead of wizard: Rejected because the multi-step flow matches the spec's "conversational wizard" requirement and reduces cognitive load.
+
+---
+
+## 2026-03-16 — Sentry Integration with Privacy Consent
+
+**Decision**: Integrate Sentry on both Rust (`sentry` v0.35 crate with `backtrace`, `panic`, `contexts`, `reqwest`, `rustls` features) and React (`@sentry/react` with `ErrorBoundary`). Initialization is gated behind an opt-in privacy consent stored in the `app_settings` SQLite table. A first-launch dialog asks users to opt in/out. A Settings page allows changing the preference and manually submitting bug reports.
+
+**Rationale**: Crash reporting is essential for improving app stability, but teachers handle sensitive student data. Opt-in consent respects privacy (FERPA compliance considerations). Storing consent in SQLite (not a file) leverages the existing database layer and transactional guarantees. The `app_settings` key-value table is generic enough for future settings without schema changes. PII stripping in `beforeSend` (frontend) and `send_default_pii: false` (backend) ensures no student data leaks. The "Send Report" button in Settings gives users agency to proactively report issues.
+
+**Alternatives considered**:
+- Always-on Sentry: Rejected — privacy concerns for education software.
+- Separate settings file: Rejected — adds another persistence layer when SQLite is already available.
+- Sentry `sentry-log` integration: Rejected in favor of `sentry-tracing` since the backend already uses `tracing`.
+- Third-party crash reporting (Bugsnag, Crashlytics): Rejected — Sentry is open-source, self-hostable, and already specified in the project spec.

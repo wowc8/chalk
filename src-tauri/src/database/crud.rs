@@ -268,6 +268,33 @@ impl Database {
             Ok(())
         })
     }
+
+    // ── App Settings ──────────────────────────────────────────
+
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
+        self.with_conn(|conn| {
+            match conn.query_row(
+                "SELECT value FROM app_settings WHERE key = ?1",
+                params![key],
+                |row| row.get::<_, String>(0),
+            ) {
+                Ok(val) => Ok(Some(val)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(DatabaseError::Sqlite(e)),
+            }
+        })
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO app_settings (key, value, updated_at) VALUES (?1, ?2, datetime('now'))
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
+                params![key, value],
+            )?;
+            Ok(())
+        })
+    }
 }
 
 #[cfg(test)]

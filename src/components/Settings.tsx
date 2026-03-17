@@ -1,3 +1,5 @@
+import { useState, useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { motion } from "framer-motion";
 import { useConnectors, type ConnectionDetails, type PendingOp } from "../hooks/useConnectors";
 import { useToast } from "./Toast";
@@ -14,6 +16,24 @@ export function Settings({
   const { connections, loading, pendingOp, disconnect, rescan } =
     useConnectors();
   const { addToast } = useToast();
+
+  const [crashReportingEnabled, setCrashReportingEnabled] = useState(false);
+  const [reportText, setReportText] = useState("");
+  const [reportStatus, setReportStatus] = useState<
+    "idle" | "sending" | "sent" | "error"
+  >("idle");
+  const [privacyLoading, setPrivacyLoading] = useState(true);
+
+  useEffect(() => {
+    invoke<{ consent_shown: boolean; crash_reporting_enabled: boolean }>(
+      "get_privacy_consent_status"
+    )
+      .then((status) => {
+        setCrashReportingEnabled(status.crash_reporting_enabled);
+      })
+      .catch(() => {})
+      .finally(() => setPrivacyLoading(false));
+  }, []);
 
   const handleDisconnect = async (id: string) => {
     const result = await disconnect(id);
@@ -33,6 +53,30 @@ export function Settings({
       );
     } else {
       addToast(result.error ?? "Re-scan failed", "error");
+    }
+  };
+
+  const toggleCrashReporting = async () => {
+    const newValue = !crashReportingEnabled;
+    try {
+      await invoke("save_privacy_consent", { consented: newValue });
+      setCrashReportingEnabled(newValue);
+    } catch {
+      // silent fail — will retry on next toggle
+    }
+  };
+
+  const sendReport = async () => {
+    if (!reportText.trim()) return;
+    setReportStatus("sending");
+    try {
+      await invoke("send_crash_report", { message: reportText.trim() });
+      setReportStatus("sent");
+      setReportText("");
+      setTimeout(() => setReportStatus("idle"), 3000);
+    } catch {
+      setReportStatus("error");
+      setTimeout(() => setReportStatus("idle"), 3000);
     }
   };
 
@@ -140,11 +184,113 @@ export function Settings({
           )}
         </motion.section>
 
-        {/* App Info Section */}
+        {/* Privacy & Crash Reporting Section */}
         <motion.section
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.2 }}
+          className="mb-8"
+        >
+          <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">
+            Privacy & Crash Reporting
+          </h2>
+
+          {privacyLoading ? (
+            <div className="flex items-center gap-3 py-4 justify-center">
+              <div className="w-4 h-4 border-2 border-bat-cyan border-t-transparent rounded-full animate-spin" />
+            </div>
+          ) : (
+            <div className="bg-bat-charcoal/50 rounded-lg border border-gray-800 p-4 space-y-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm text-gray-300">
+                    Automatic crash reporting
+                  </p>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    Send anonymous error reports to help improve Chalk
+                  </p>
+                </div>
+                <button
+                  onClick={toggleCrashReporting}
+                  className={`relative w-12 h-7 rounded-full transition-colors ${
+                    crashReportingEnabled ? "bg-bat-cyan" : "bg-gray-600"
+                  }`}
+                  role="switch"
+                  aria-checked={crashReportingEnabled}
+                >
+                  <motion.div
+                    animate={{ x: crashReportingEnabled ? 20 : 2 }}
+                    transition={{ type: "spring", stiffness: 500, damping: 30 }}
+                    className="absolute top-1 w-5 h-5 bg-white rounded-full shadow-sm"
+                  />
+                </button>
+              </div>
+
+              <p className="text-xs text-gray-600">
+                No student data, document content, or personal information is
+                collected. Only OS version, app version, and error traces are sent.
+                Changes take effect on next app launch.
+              </p>
+            </div>
+          )}
+        </motion.section>
+
+        {/* Send Report Section */}
+        <motion.section
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.3 }}
+          className="mb-8"
+        >
+          <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">
+            Send Report
+          </h2>
+
+          <div className="bg-bat-charcoal/50 rounded-lg border border-gray-800 p-4">
+            <p className="text-xs text-gray-500 mb-3">
+              Encountered a bug? Describe what happened and we'll look into it.
+            </p>
+
+            <textarea
+              value={reportText}
+              onChange={(e) => setReportText(e.target.value)}
+              placeholder="Describe what went wrong..."
+              rows={4}
+              className="w-full bg-bat-dark/50 border border-gray-700 rounded-lg p-3 text-sm text-white placeholder-gray-600 resize-none focus:outline-none focus:border-bat-cyan/50 transition-colors"
+            />
+
+            <div className="flex items-center justify-between mt-3">
+              {reportStatus === "sent" && (
+                <p className="text-xs text-bat-green">Report sent. Thank you!</p>
+              )}
+              {reportStatus === "error" && (
+                <p className="text-xs text-bat-red">
+                  Failed to send. Please try again.
+                </p>
+              )}
+              {(reportStatus === "idle" || reportStatus === "sending") && (
+                <span />
+              )}
+              <motion.button
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+                disabled={
+                  !reportText.trim() || reportStatus === "sending"
+                }
+                onClick={sendReport}
+                className="px-5 py-2 bg-bat-gold text-bat-dark font-semibold rounded-lg text-sm hover:bg-bat-gold/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {reportStatus === "sending" ? "Sending..." : "Send Report"}
+              </motion.button>
+            </div>
+          </div>
+        </motion.section>
+
+        {/* App Info Section */}
+        <motion.section
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.4 }}
         >
           <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">
             App
