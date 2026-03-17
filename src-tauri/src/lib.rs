@@ -235,9 +235,17 @@ pub fn run() {
     let cache_path = data_dir.join("com.madison.chalk").join("cache.db");
     let cache = cache::Cache::open(&cache_path).expect("failed to open cache database");
 
-    tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
+    let mut builder = tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init());
+
+    // Only register the updater plugin in release builds — it requires a
+    // signing pubkey that isn't available during development.
+    #[cfg(not(debug_assertions))]
+    {
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    }
+
+    builder
         .manage(AppState {
             dispatcher: Mutex::new(dispatcher),
             data_dir: data_dir.clone(),
@@ -278,7 +286,8 @@ pub fn run() {
             cache_stats,
         ])
         .setup(|app| {
-            // Start periodic update checker in background.
+            // Start periodic update checker only in release builds.
+            #[cfg(not(debug_assertions))]
             updater::spawn_update_checker(app.handle().clone());
             Ok(())
         })
