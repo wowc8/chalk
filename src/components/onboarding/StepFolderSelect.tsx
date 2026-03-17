@@ -188,7 +188,7 @@ export function StepFolderSelect({ onNext, onBack, setError }: Props) {
           </motion.button>
         </div>
       ) : (
-        <div className="max-h-64 overflow-y-auto mb-6 space-y-1 pr-1 scrollbar-thin scrollbar-thumb-bat-purple/40">
+        <div className="max-h-64 overflow-y-auto overflow-x-hidden mb-6 space-y-1 pr-1 scrollbar-thin scrollbar-thumb-bat-purple/40">
           {/* Folders first */}
           {folders.map((item) => (
             <motion.button
