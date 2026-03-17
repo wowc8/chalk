@@ -28,6 +28,28 @@ export const MOCK_FOLDERS = [
   },
 ];
 
+/** Mock drive items (folders + documents) returned by `list_drive_items`. */
+export const MOCK_ITEMS = [
+  {
+    id: "folder-1",
+    name: "Lesson Plans 2024",
+    mime_type: "application/vnd.google-apps.folder",
+    is_folder: true,
+  },
+  {
+    id: "folder-2",
+    name: "English Department",
+    mime_type: "application/vnd.google-apps.folder",
+    is_folder: true,
+  },
+  {
+    id: "folder-3",
+    name: "Master Plans",
+    mime_type: "application/vnd.google-apps.folder",
+    is_folder: true,
+  },
+];
+
 /** Default onboarding status (fresh start — nothing completed). */
 export const FRESH_STATUS = {
   oauth_configured: false,
@@ -53,7 +75,9 @@ export async function setupTauriMocks(
   opts: {
     /** Status returned by `check_onboarding_status`. Mutated as the wizard progresses. */
     initialStatus?: typeof FRESH_STATUS;
-    /** Folders returned by `list_drive_folders`. */
+    /** Items returned by `list_drive_items`. */
+    items?: typeof MOCK_ITEMS;
+    /** Folders returned by `list_drive_folders` (fallback). */
     folders?: typeof MOCK_FOLDERS;
     /** Message returned by `trigger_initial_shred`. */
     shredMessage?: string;
@@ -62,6 +86,7 @@ export async function setupTauriMocks(
   } = {},
 ) {
   const status = opts.initialStatus ?? { ...FRESH_STATUS };
+  const items = opts.items ?? MOCK_ITEMS;
   const folders = opts.folders ?? MOCK_FOLDERS;
   const shredMessage =
     opts.shredMessage ?? "Found 7 documents with 14 lesson plans in 'Master Plans'.";
@@ -70,11 +95,13 @@ export async function setupTauriMocks(
   await page.addInitScript(
     ({
       status,
+      items,
       folders,
       shredMessage,
       folderAccessible,
     }: {
       status: typeof FRESH_STATUS;
+      items: typeof MOCK_ITEMS;
       folders: typeof MOCK_FOLDERS;
       shredMessage: string;
       folderAccessible: boolean;
@@ -86,6 +113,7 @@ export async function setupTauriMocks(
       const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
         initialize_oauth: () => "OAuth initialized (mock)",
         log_frontend_error: () => null,
+        has_embedded_credentials: () => true,
 
         check_onboarding_status: () => ({ ...onboardingStatus }),
 
@@ -102,7 +130,9 @@ export async function setupTauriMocks(
           return "Tokens stored (mock)";
         },
 
+        list_drive_items: () => items,
         list_drive_folders: () => folders,
+        list_drive_subfolders: () => [],
 
         test_folder_permissions_command: (args: Record<string, unknown>) => {
           if (folderAccessible) {
@@ -110,6 +140,16 @@ export async function setupTauriMocks(
             onboardingStatus.folder_accessible = true;
             onboardingStatus.selected_folder_id = (args.folderId as string) ?? null;
             onboardingStatus.selected_folder_name = (args.folderName as string) ?? null;
+          }
+          return folderAccessible;
+        },
+
+        select_single_document: (args: Record<string, unknown>) => {
+          if (folderAccessible) {
+            onboardingStatus.folder_selected = true;
+            onboardingStatus.folder_accessible = true;
+            onboardingStatus.selected_folder_id = (args.docId as string) ?? null;
+            onboardingStatus.selected_folder_name = (args.docName as string) ?? null;
           }
           return folderAccessible;
         },
@@ -143,6 +183,6 @@ export async function setupTauriMocks(
         metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main" } },
       };
     },
-    { status, folders, shredMessage, folderAccessible },
+    { status, items, folders, shredMessage, folderAccessible },
   );
 }
