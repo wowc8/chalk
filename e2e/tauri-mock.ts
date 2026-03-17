@@ -130,6 +130,12 @@ export async function setupTauriMocks(
           return "Tokens stored (mock)";
         },
 
+        start_oauth_flow: () => {
+          onboardingStatus.oauth_configured = true;
+          onboardingStatus.tokens_stored = true;
+          return "Authentication successful";
+        },
+
         list_drive_items: () => items,
         list_drive_folders: () => folders,
         list_drive_subfolders: () => [],

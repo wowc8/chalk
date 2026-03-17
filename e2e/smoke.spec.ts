@@ -23,18 +23,9 @@ import { setupTauriMocks, MOCK_ITEMS } from "./tauri-mock";
 // Helper: navigate through the sign-in step (used by multiple tests)
 // ---------------------------------------------------------------------------
 async function completeSignIn(page: import("@playwright/test").Page) {
-  // Click "Sign in with Google" to get the auth URL
+  // Click "Sign in with Google" — the mock start_oauth_flow resolves
+  // immediately, completing the full OAuth flow automatically.
   await page.getByRole("button", { name: /Sign in with Google/i }).click();
-
-  // Wait for the auth code input to appear (URL was fetched, UI switches to code entry)
-  const codeInput = page.getByPlaceholder(/Paste the code from Google/i);
-  await codeInput.waitFor();
-
-  // Fill in the authorization code
-  await codeInput.fill("mock-auth-code-123");
-
-  // Submit the code
-  await page.getByRole("button", { name: /Complete Sign-In/i }).click();
 }
 
 // ---------------------------------------------------------------------------
