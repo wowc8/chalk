@@ -113,7 +113,7 @@ export function Library() {
               Your lesson plans and imported documents
             </p>
           </div>
-          <button className="btn btn-primary">
+          <button onClick={() => navigate("/plan/new")} className="btn btn-primary">
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
             </svg>
@@ -250,7 +250,7 @@ export function Library() {
                 : "Import plans from Google Drive to see them here."}
             </p>
             {activeTab === "my_plans" && !searchQuery && (
-              <button className="btn btn-secondary">
+              <button onClick={() => navigate("/plan/new")} className="btn btn-secondary">
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
                 </svg>

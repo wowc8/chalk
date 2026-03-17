@@ -292,6 +292,9 @@ pub fn run() {
             library::get_tags_for_plan,
             library::list_library_plans,
             library::create_plan,
+            library::get_plan,
+            library::update_plan_content,
+            library::update_plan_title,
             library::delete_plan,
         ])
         .setup(|_app| {
