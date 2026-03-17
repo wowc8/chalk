@@ -8,15 +8,15 @@ interface FallbackProps {
 
 function ErrorFallback({ error, resetError }: FallbackProps) {
   return (
-    <div className="min-h-screen bg-bat-dark flex items-center justify-center text-white">
+    <div className="min-h-screen chalk-bg flex items-center justify-center text-chalk-white">
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
-        className="bg-bat-charcoal border border-bat-red/30 rounded-2xl p-8 max-w-md mx-4 text-center"
+        className="bg-chalk-board border border-chalk-red/20 rounded-2xl p-8 max-w-md mx-4 text-center"
       >
-        <div className="w-14 h-14 mx-auto mb-5 rounded-full bg-bat-red/20 border-2 border-bat-red/40 flex items-center justify-center">
+        <div className="w-14 h-14 mx-auto mb-5 rounded-full bg-chalk-red/10 border-2 border-chalk-red/30 flex items-center justify-center">
           <svg
-            className="w-7 h-7 text-bat-red"
+            className="w-7 h-7 text-chalk-red"
             fill="none"
             stroke="currentColor"
             viewBox="0 0 24 24"
@@ -31,10 +31,10 @@ function ErrorFallback({ error, resetError }: FallbackProps) {
         </div>
 
         <h2 className="text-xl font-bold mb-2">Something went wrong</h2>
-        <p className="text-gray-400 text-sm mb-4">
+        <p className="text-chalk-muted text-sm mb-4">
           An unexpected error occurred. This has been automatically reported.
         </p>
-        <p className="text-xs text-gray-600 bg-bat-dark/50 rounded-lg p-3 mb-6 font-mono break-all">
+        <p className="text-xs text-chalk-muted/60 bg-chalk-board-dark/50 rounded-lg p-3 mb-6 font-mono break-all">
           {error.message}
         </p>
 
@@ -42,7 +42,7 @@ function ErrorFallback({ error, resetError }: FallbackProps) {
           whileHover={{ scale: 1.05 }}
           whileTap={{ scale: 0.95 }}
           onClick={resetError}
-          className="px-6 py-2.5 bg-bat-cyan text-bat-dark font-semibold rounded-lg hover:bg-bat-cyan/90 transition-colors text-sm"
+          className="px-6 py-2.5 bg-chalk-blue text-chalk-board-dark font-semibold rounded-lg hover:bg-chalk-blue/90 transition-colors text-sm"
         >
           Try Again
         </motion.button>

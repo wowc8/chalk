@@ -64,23 +64,14 @@ export function OnboardingWizard({
   };
 
   return (
-    <div className="min-h-screen bg-bat-dark text-white relative overflow-hidden">
-      {/* Animated background grid */}
-      <div className="absolute inset-0 opacity-5">
-        <div
-          className="w-full h-full"
-          style={{
-            backgroundImage:
-              "linear-gradient(rgba(0,212,255,0.3) 1px, transparent 1px), linear-gradient(90deg, rgba(0,212,255,0.3) 1px, transparent 1px)",
-            backgroundSize: "40px 40px",
-          }}
-        />
-      </div>
+    <div className="min-h-screen chalk-bg text-chalk-white relative overflow-hidden">
+      {/* Chalk grid overlay */}
+      <div className="absolute inset-0 chalk-grid" />
 
       {/* Progress bar */}
-      <div className="absolute top-0 left-0 right-0 h-1 bg-bat-charcoal z-20">
+      <div className="absolute top-0 left-0 right-0 h-1 bg-chalk-board-dark z-20">
         <motion.div
-          className="h-full bg-gradient-to-r from-bat-cyan to-bat-purple"
+          className="h-full bg-gradient-to-r from-chalk-blue to-chalk-green"
           animate={{ width: `${((stepIndex + 1) / STEPS.length) * 100}%` }}
           transition={spring}
         />
@@ -93,8 +84,8 @@ export function OnboardingWizard({
             key={s}
             className={`w-2.5 h-2.5 rounded-full transition-colors duration-300 ${
               i <= stepIndex
-                ? "bg-bat-cyan shadow-[0_0_8px_rgba(0,212,255,0.6)]"
-                : "bg-bat-charcoal"
+                ? "bg-chalk-blue shadow-[0_0_6px_rgba(116,185,255,0.5)]"
+                : "bg-chalk-board-light"
             }`}
           />
         ))}
