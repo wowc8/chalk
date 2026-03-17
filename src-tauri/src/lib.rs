@@ -67,6 +67,18 @@ fn save_privacy_consent(
     privacy::save_consent(&state.db, consented)
 }
 
+// ── App Settings Tauri Commands ─────────────────────────────
+
+#[tauri::command]
+fn get_app_setting(state: tauri::State<AppState>, key: String) -> Result<Option<String>, String> {
+    state.db.get_setting(&key).map_err(|e| format!("{e}"))
+}
+
+#[tauri::command]
+fn set_app_setting(state: tauri::State<AppState>, key: String, value: String) -> Result<(), String> {
+    state.db.set_setting(&key, &value).map_err(|e| format!("{e}"))
+}
+
 /// Send a user-submitted crash report.
 #[tauri::command]
 fn send_crash_report(message: String) -> Result<(), String> {
@@ -239,7 +251,7 @@ pub fn run() {
     let cache = cache::Cache::open(&cache_path).expect("failed to open cache database");
 
     let builder = tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init());
+        .plugin(tauri_plugin_opener::init())
 
     // Only register the updater plugin in release builds — it requires a
     // signing pubkey that isn't available during development.
@@ -259,6 +271,8 @@ pub fn run() {
             get_privacy_consent_status,
             save_privacy_consent,
             send_crash_report,
+            get_app_setting,
+            set_app_setting,
             connectors::commands::list_connectors,
             connectors::commands::list_connected_connectors,
             connectors::commands::disconnect_connector,

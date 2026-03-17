@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { motion, AnimatePresence } from "framer-motion";
 import { StepWelcome } from "./StepWelcome";
@@ -7,6 +7,7 @@ import { StepFolderSelect } from "./StepFolderSelect";
 import { StepInitialShred } from "./StepInitialShred";
 import { StepComplete } from "./StepComplete";
 import { BatmanOverlay } from "./BatmanOverlay";
+import { useTeacherName } from "../../hooks/useTeacherName";
 
 export interface OnboardingStatus {
   oauth_configured: boolean;
@@ -42,10 +43,19 @@ export function OnboardingWizard({
   const [direction, setDirection] = useState(1);
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { name: teacherName, setName: saveTeacherName } = useTeacherName();
 
   useEffect(() => {
     invoke("initialize_oauth").catch(() => {});
   }, []);
+
+  const handleWelcomeNext = useCallback(
+    (name: string) => {
+      if (name) saveTeacherName(name);
+      goTo("google-auth");
+    },
+    [saveTeacherName],
+  );
 
   const goTo = (next: Step) => {
     const curIdx = STEPS.indexOf(step);
@@ -119,7 +129,7 @@ export function OnboardingWizard({
 
             {step === "welcome" && (
               <StepWelcome
-                onNext={() => goTo("google-auth")}
+                onNext={handleWelcomeNext}
                 onSkip={onComplete}
               />
             )}
@@ -146,7 +156,7 @@ export function OnboardingWizard({
               />
             )}
             {step === "complete" && (
-              <StepComplete onFinish={onComplete} />
+              <StepComplete onFinish={onComplete} teacherName={teacherName} />
             )}
           </motion.div>
         </AnimatePresence>

@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useChat, type ChatMessage as BackendMessage } from "../../hooks/useChat";
+import { useTeacherName } from "../../hooks/useTeacherName";
 
 export interface ChatMessage {
   id: string;
@@ -134,6 +135,7 @@ export function ChatPane({
   // Use the integrated chat hook when no external messages are provided.
   const chat = useChat(planId);
   const isIntegrated = !externalMessages && !externalSendMessage;
+  const { name: teacherName } = useTeacherName();
 
   const displayMessages: ChatMessage[] = isIntegrated
     ? chat.messages
@@ -222,7 +224,9 @@ export function ChatPane({
         <div className="flex-1 flex items-center justify-center px-6">
           <div className="text-center">
             <p className="text-sm text-chalk-muted/60 mb-1">
-              Ask Chalk about your lesson plans
+              {teacherName
+                ? `Hey ${teacherName}, what are we working on?`
+                : "Ask Chalk about your lesson plans"}
             </p>
             <p className="text-[11px] text-chalk-muted/30">
               Chalk searches your teaching history to give context-aware suggestions

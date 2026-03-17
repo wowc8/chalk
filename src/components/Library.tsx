@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useNavigate } from "react-router-dom";
+import { useTeacherName } from "../hooks/useTeacherName";
 
 interface Tag {
   id: string;
@@ -46,8 +47,23 @@ function formatDate(iso: string): string {
   });
 }
 
+const LIBRARY_GREETINGS = [
+  "Ready to plan?",
+  "What are we building today?",
+  "Let's make something great.",
+  "Good to see you!",
+];
+
+function getGreeting(name: string | null): string {
+  const greeting =
+    LIBRARY_GREETINGS[Math.floor(Math.random() * LIBRARY_GREETINGS.length)];
+  return name ? `Hey ${name}! ${greeting}` : greeting;
+}
+
 export function Library() {
   const navigate = useNavigate();
+  const { name: teacherName } = useTeacherName();
+  const [greeting] = useState(() => getGreeting(null));
   const [plans, setPlans] = useState<LibraryPlanCard[]>([]);
   const [allTags, setAllTags] = useState<Tag[]>([]);
   const [selectedTagIds, setSelectedTagIds] = useState<string[]>([]);
@@ -110,7 +126,7 @@ export function Library() {
               Library
             </h2>
             <p className="text-xs text-chalk-muted mt-0.5">
-              Your lesson plans and imported documents
+              {teacherName ? getGreeting(teacherName) : greeting}
             </p>
           </div>
           <button onClick={() => navigate("/plan/new")} className="btn btn-primary">
