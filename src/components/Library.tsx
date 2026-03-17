@@ -116,6 +116,7 @@ export function Library() {
           <motion.button
             whileHover={{ scale: 1.03 }}
             whileTap={{ scale: 0.97 }}
+            onClick={() => navigate("/plan/new")}
             className="px-4 py-2.5 bg-chalk-blue/15 border border-chalk-blue/30 rounded-lg text-chalk-blue text-sm font-medium hover:bg-chalk-blue/25 transition-colors"
           >
             + New Plan
@@ -268,6 +269,7 @@ export function Library() {
               <motion.button
                 whileHover={{ scale: 1.05 }}
                 whileTap={{ scale: 0.95 }}
+                onClick={() => navigate("/plan/new")}
                 className="px-6 py-2.5 border border-chalk-blue/30 rounded-lg text-chalk-blue hover:bg-chalk-blue/10 transition-colors"
               >
                 + Create Plan
