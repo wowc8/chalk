@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod backup;
 pub mod cache;
 pub mod chat;
 pub mod connectors;
@@ -252,6 +253,7 @@ pub fn run() {
 
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init());
 
     // Only register the updater plugin in release builds — it requires a
     // signing pubkey that isn't available during development.
@@ -325,6 +327,9 @@ pub fn run() {
             chat::vectorize_all_plans,
             chat::save_ai_config,
             chat::get_ai_config,
+            backup::export_backup,
+            backup::import_backup,
+            backup::get_backup_info,
         ])
         .setup(|_app| {
             // Start periodic update checker only in release builds.
