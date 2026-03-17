@@ -104,10 +104,27 @@ pub fn create_plan(
     content: Option<String>,
     source_type: Option<String>,
 ) -> Result<LibraryPlanCard, String> {
+    // Ensure the subject exists — the frontend may pass a placeholder like "default"
+    // for manually-created plans where the user hasn't chosen a subject yet.
+    let resolved_subject_id = match state.db.get_subject(&subject_id) {
+        Ok(_) => subject_id,
+        Err(_) => {
+            let subject = state
+                .db
+                .create_subject(&crate::database::NewSubject {
+                    name: "General".into(),
+                    grade_level: None,
+                    description: None,
+                })
+                .map_err(|e| format!("{}", e))?;
+            subject.id
+        }
+    };
+
     let plan = state
         .db
         .create_lesson_plan(&NewLessonPlan {
-            subject_id,
+            subject_id: resolved_subject_id,
             title,
             content,
             source_doc_id: None,
