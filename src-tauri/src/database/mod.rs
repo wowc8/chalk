@@ -1,6 +1,6 @@
 mod connection;
 mod crud;
-mod migrations;
+pub mod migrations;
 mod models;
 mod vectors;
 

@@ -5,6 +5,7 @@ import { OnboardingWizard } from "./components/onboarding/OnboardingWizard";
 import { Dashboard } from "./components/Dashboard";
 import { Settings } from "./components/Settings";
 import { ToastProvider } from "./components/Toast";
+import { UpdateBanner } from "./components/UpdateBanner";
 import "./App.css";
 
 type AppView = "loading" | "onboarding" | "dashboard" | "settings";
@@ -46,10 +47,13 @@ function App() {
         <OnboardingWizard onComplete={() => setView("dashboard")} />
       )}
       {view === "dashboard" && (
-        <Dashboard
-          onResetOnboarding={() => setView("onboarding")}
-          onOpenSettings={() => setView("settings")}
-        />
+        <>
+          <UpdateBanner />
+          <Dashboard
+            onResetOnboarding={() => setView("onboarding")}
+            onOpenSettings={() => setView("settings")}
+          />
+        </>
       )}
       {view === "settings" && (
         <Settings
