@@ -1,5 +1,9 @@
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use chrono::{DateTime, Utc};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::State;
@@ -7,6 +11,26 @@ use thiserror::Error;
 use tracing::info;
 
 use crate::AppState;
+
+/// Embedded OAuth client ID for the distributed desktop app.
+/// This is a public client using PKCE — no client secret is needed.
+/// Replace this placeholder with the real client ID from your Google Cloud project.
+const EMBEDDED_CLIENT_ID: &str = "PLACEHOLDER.apps.googleusercontent.com";
+
+// ── PKCE Helpers ────────────────────────────────────────────────
+
+/// Generate a cryptographically random PKCE code verifier (43–128 chars, base64url).
+pub fn generate_code_verifier() -> String {
+    let mut rng = rand::thread_rng();
+    let bytes: Vec<u8> = (0..32).map(|_| rng.gen::<u8>()).collect();
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// Derive the S256 code challenge from a code verifier.
+pub fn generate_code_challenge(verifier: &str) -> String {
+    let digest = Sha256::digest(verifier.as_bytes());
+    URL_SAFE_NO_PAD.encode(digest)
+}
 
 #[derive(Debug, Error)]
 pub enum OAuthError {
@@ -89,6 +113,10 @@ impl Default for OnboardingStatus {
 
 pub struct OAuthClient {
     pub config: OAuthConfig,
+    /// Whether we're using the embedded (PKCE) credentials vs user-provided.
+    pub using_embedded: bool,
+    /// PKCE code verifier for the current auth flow (ephemeral, per-session).
+    pkce_verifier: Option<String>,
     token_file: PathBuf,
     config_file: PathBuf,
     status_file: PathBuf,
@@ -100,16 +128,42 @@ impl OAuthClient {
         fs::create_dir_all(&dir).ok();
         Self {
             config: OAuthConfig::default(),
+            using_embedded: false,
+            pkce_verifier: None,
             token_file: dir.join("oauth_tokens.json"),
             config_file: dir.join("oauth_config.json"),
             status_file: dir.join("onboarding_status.json"),
         }
     }
 
+    /// Load embedded credentials (PKCE flow, no client secret).
+    /// Returns true if embedded credentials are available.
+    pub fn load_embedded_credentials(&mut self) -> bool {
+        if EMBEDDED_CLIENT_ID == "PLACEHOLDER.apps.googleusercontent.com" {
+            return false;
+        }
+        self.config = OAuthConfig {
+            client_id: EMBEDDED_CLIENT_ID.to_string(),
+            client_secret: String::new(), // PKCE — no secret needed
+            ..OAuthConfig::default()
+        };
+        self.using_embedded = true;
+        true
+    }
+
+    /// Check whether embedded credentials are configured.
+    pub fn has_embedded_credentials() -> bool {
+        EMBEDDED_CLIENT_ID != "PLACEHOLDER.apps.googleusercontent.com"
+    }
+
     pub fn load_config(&mut self) -> Result<bool, OAuthError> {
         if self.config_file.exists() {
             let content = fs::read_to_string(&self.config_file)?;
             self.config = serde_json::from_str(&content)?;
+            self.using_embedded = false;
+            Ok(true)
+        } else if self.load_embedded_credentials() {
+            info!("Using embedded OAuth credentials (PKCE flow)");
             Ok(true)
         } else {
             Ok(false)
@@ -122,19 +176,40 @@ impl OAuthClient {
         Ok(())
     }
 
-    pub fn get_authorization_url(&self) -> String {
+    /// Build the authorization URL. When using embedded credentials, this
+    /// generates a PKCE code verifier/challenge pair automatically.
+    pub fn get_authorization_url(&mut self) -> String {
         let scopes = self.config.scopes.join(" ");
-        format!(
+        let mut url = format!(
             "https://accounts.google.com/o/oauth2/v2/auth?\
              client_id={}&redirect_uri={}&response_type=code&\
              scope={}&access_type=offline&prompt=consent",
             self.config.client_id, self.config.redirect_uri, scopes
-        )
+        );
+
+        // Always generate PKCE params for embedded credentials.
+        // Also generate for user-provided creds (extra security, optional).
+        if self.using_embedded || self.config.client_secret.is_empty() {
+            let verifier = generate_code_verifier();
+            let challenge = generate_code_challenge(&verifier);
+            url.push_str(&format!(
+                "&code_challenge={}&code_challenge_method=S256",
+                challenge
+            ));
+            self.pkce_verifier = Some(verifier);
+        }
+
+        url
     }
 
-    /// Extract config and token file path for use outside the MutexGuard.
-    pub fn exchange_params(&self) -> (OAuthConfig, PathBuf) {
-        (self.config.clone(), self.token_file.clone())
+    /// Extract config, token file path, and optional PKCE verifier
+    /// for use outside the MutexGuard.
+    pub fn exchange_params(&self) -> (OAuthConfig, PathBuf, Option<String>) {
+        (
+            self.config.clone(),
+            self.token_file.clone(),
+            self.pkce_verifier.clone(),
+        )
     }
 
     pub fn load_tokens(&self) -> Result<Option<TokenStorage>, OAuthError> {
@@ -175,24 +250,34 @@ impl OAuthClient {
 }
 
 /// Exchange an authorization code for tokens (async, no MutexGuard held).
+/// When `code_verifier` is provided, uses PKCE flow (no client_secret).
 pub async fn exchange_code(
     config: &OAuthConfig,
     code: &str,
     token_file: &Path,
+    code_verifier: Option<&str>,
 ) -> Result<TokenStorage, OAuthError> {
     let client = reqwest::Client::new();
 
-    let params = [
+    let mut form: Vec<(&str, &str)> = vec![
         ("client_id", config.client_id.as_str()),
-        ("client_secret", config.client_secret.as_str()),
         ("code", code),
         ("grant_type", "authorization_code"),
         ("redirect_uri", config.redirect_uri.as_str()),
     ];
 
+    // PKCE flow: send code_verifier instead of client_secret.
+    // For user-provided credentials with a secret, send the secret.
+    if let Some(verifier) = code_verifier {
+        form.push(("code_verifier", verifier));
+    }
+    if !config.client_secret.is_empty() {
+        form.push(("client_secret", config.client_secret.as_str()));
+    }
+
     let response = client
         .post("https://oauth2.googleapis.com/token")
-        .form(&params)
+        .form(&form)
         .send()
         .await?;
 
@@ -243,12 +328,14 @@ pub async fn refresh_access_token(
 ) -> Result<TokenStorage, OAuthError> {
     let client = reqwest::Client::new();
 
-    let params = [
+    let mut params: Vec<(&str, &str)> = vec![
         ("client_id", config.client_id.as_str()),
-        ("client_secret", config.client_secret.as_str()),
         ("refresh_token", refresh_token),
         ("grant_type", "refresh_token"),
     ];
+    if !config.client_secret.is_empty() {
+        params.push(("client_secret", config.client_secret.as_str()));
+    }
 
     let response = client
         .post("https://oauth2.googleapis.com/token")
@@ -409,12 +496,75 @@ pub async fn list_drive_children_api(
     Ok(parse_drive_folders(&body))
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DriveItem {
+    pub id: String,
+    pub name: String,
+    pub mime_type: String,
+    pub is_folder: bool,
+}
+
+/// List both folders and Google Docs in a parent folder.
+pub async fn list_drive_items_api(
+    access_token: &str,
+    parent_id: &str,
+) -> Result<Vec<DriveItem>, OAuthError> {
+    let client = reqwest::Client::new();
+
+    let query = format!(
+        "'{}' in parents and trashed=false and (mimeType='application/vnd.google-apps.folder' or mimeType='application/vnd.google-apps.document')",
+        parent_id
+    );
+
+    let response = client
+        .get("https://www.googleapis.com/drive/v3/files")
+        .query(&[
+            ("q", query.as_str()),
+            ("fields", "files(id,name,mimeType)"),
+            ("pageSize", "100"),
+            ("orderBy", "folder,name"),
+        ])
+        .header("Authorization", format!("Bearer {}", access_token))
+        .send()
+        .await?;
+
+    let body: serde_json::Value = response.json().await?;
+
+    let items: Vec<DriveItem> = body
+        .get("files")
+        .and_then(|f| f.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| {
+                    let name = item.get("name")?.as_str()?;
+                    if name.starts_with('.') || name.starts_with('!') {
+                        return None;
+                    }
+                    let mime = item.get("mimeType")?.as_str()?.to_string();
+                    Some(DriveItem {
+                        id: item.get("id")?.as_str()?.to_string(),
+                        name: name.to_string(),
+                        is_folder: mime == "application/vnd.google-apps.folder",
+                        mime_type: mime,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(items)
+}
+
 // ── Tauri Commands ──────────────────────────────────────────────
 
 #[tauri::command]
 pub async fn initialize_oauth(state: State<'_, AppState>) -> Result<String, String> {
     let mut client = state.oauth_client.lock().map_err(|e| e.to_string())?;
     match client.load_config() {
+        Ok(true) if client.using_embedded => {
+            info!("OAuth client initialized with embedded PKCE credentials");
+            Ok("OAuth initialized with embedded credentials".into())
+        }
         Ok(true) => {
             info!("OAuth client initialized with saved config");
             Ok("OAuth initialized with existing config".into())
@@ -425,6 +575,12 @@ pub async fn initialize_oauth(state: State<'_, AppState>) -> Result<String, Stri
         }
         Err(e) => Err(format!("Failed to initialize OAuth: {}", e)),
     }
+}
+
+/// Check whether the app ships with embedded OAuth credentials.
+#[tauri::command]
+pub async fn has_embedded_credentials() -> Result<bool, String> {
+    Ok(OAuthClient::has_embedded_credentials())
 }
 
 #[tauri::command]
@@ -452,7 +608,7 @@ pub async fn get_authorization_url(state: State<'_, AppState>) -> Result<String,
     if client.config.client_id.is_empty() {
         return Err("OAuth not configured — set client_id and client_secret first".into());
     }
-    Ok(client.get_authorization_url())
+    Ok(client.get_authorization_url()) // now generates PKCE params if needed
 }
 
 #[tauri::command]
@@ -461,14 +617,19 @@ pub async fn handle_oauth_callback(
     code: String,
 ) -> Result<String, String> {
     // Extract what we need, then drop the MutexGuard before awaiting.
-    let (config, token_file) = {
+    let (config, token_file, pkce_verifier) = {
         let client = state.oauth_client.lock().map_err(|e| e.to_string())?;
         client.exchange_params()
     };
 
-    exchange_code(&config, &code, &token_file)
-        .await
-        .map_err(|e| e.to_string())?;
+    exchange_code(
+        &config,
+        &code,
+        &token_file,
+        pkce_verifier.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     // Update onboarding status.
     {
@@ -491,7 +652,7 @@ pub async fn test_folder_permissions_command(
     folder_id: String,
     folder_name: String,
 ) -> Result<bool, String> {
-    let (config, token_file) = {
+    let (config, token_file, _) = {
         let client = state.oauth_client.lock().map_err(|e| e.to_string())?;
         client.exchange_params()
     };
@@ -532,7 +693,7 @@ pub async fn check_onboarding_status(
 pub async fn list_drive_folders(
     state: State<'_, AppState>,
 ) -> Result<Vec<DriveFolder>, String> {
-    let (config, token_file) = {
+    let (config, token_file, _) = {
         let client = state.oauth_client.lock().map_err(|e| e.to_string())?;
         client.exchange_params()
     };
@@ -551,7 +712,7 @@ pub async fn list_drive_subfolders(
     state: State<'_, AppState>,
     parent_id: String,
 ) -> Result<Vec<DriveFolder>, String> {
-    let (config, token_file) = {
+    let (config, token_file, _) = {
         let client = state.oauth_client.lock().map_err(|e| e.to_string())?;
         client.exchange_params()
     };
@@ -563,6 +724,60 @@ pub async fn list_drive_subfolders(
     list_drive_children_api(&access_token, &parent_id)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_drive_items(
+    state: State<'_, AppState>,
+    parent_id: String,
+) -> Result<Vec<DriveItem>, String> {
+    let (config, token_file, _) = {
+        let client = state.oauth_client.lock().map_err(|e| e.to_string())?;
+        client.exchange_params()
+    };
+
+    let access_token = get_valid_access_token(&config, &token_file)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    list_drive_items_api(&access_token, &parent_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn select_single_document(
+    state: State<'_, AppState>,
+    doc_id: String,
+    doc_name: String,
+) -> Result<bool, String> {
+    let (config, token_file, _) = {
+        let client = state.oauth_client.lock().map_err(|e| e.to_string())?;
+        client.exchange_params()
+    };
+
+    let access_token = get_valid_access_token(&config, &token_file)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Verify the document is accessible
+    let accessible = test_folder_permissions(&access_token, &doc_id)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if accessible {
+        let client = state.oauth_client.lock().map_err(|e| e.to_string())?;
+        let mut status = client.load_onboarding_status();
+        status.folder_selected = true;
+        status.folder_accessible = true;
+        status.selected_folder_id = Some(doc_id);
+        status.selected_folder_name = Some(doc_name);
+        client
+            .save_onboarding_status(&status)
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(accessible)
 }
 
 #[tauri::command]
@@ -582,7 +797,7 @@ pub async fn trigger_initial_shred(
             .selected_folder_id
             .clone()
             .ok_or("No folder ID stored")?;
-        let (cfg, tf) = client.exchange_params();
+        let (cfg, tf, _) = client.exchange_params();
         (cfg, tf, folder_id)
     };
 
@@ -638,10 +853,118 @@ pub async fn trigger_initial_shred(
     ))
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScannedDocument {
+    pub id: String,
+    pub name: String,
+    pub modified_time: Option<String>,
+}
+
+#[tauri::command]
+pub async fn list_scanned_documents(
+    state: State<'_, AppState>,
+) -> Result<Vec<ScannedDocument>, String> {
+    let (config, token_file, folder_id) = {
+        let client = state.oauth_client.lock().map_err(|e| e.to_string())?;
+        let status = client.load_onboarding_status();
+        if !status.tokens_stored {
+            return Err("Not authenticated".into());
+        }
+        let folder_id = status
+            .selected_folder_id
+            .clone()
+            .ok_or("No folder selected")?;
+        let (cfg, tf, _) = client.exchange_params();
+        (cfg, tf, folder_id)
+    };
+
+    let access_token = get_valid_access_token(&config, &token_file)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let reqwest_client = reqwest::Client::new();
+    let query = format!(
+        "'{}' in parents and trashed=false and mimeType='application/vnd.google-apps.document'",
+        folder_id
+    );
+    let response = reqwest_client
+        .get("https://www.googleapis.com/drive/v3/files")
+        .query(&[
+            ("q", query.as_str()),
+            ("fields", "files(id,name,modifiedTime)"),
+            ("pageSize", "100"),
+            ("orderBy", "modifiedTime desc"),
+        ])
+        .header("Authorization", format!("Bearer {}", access_token))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let body: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+
+    let documents: Vec<ScannedDocument> = body
+        .get("files")
+        .and_then(|f| f.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| {
+                    Some(ScannedDocument {
+                        id: item.get("id")?.as_str()?.to_string(),
+                        name: item.get("name")?.as_str()?.to_string(),
+                        modified_time: item
+                            .get("modifiedTime")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    info!(count = documents.len(), "Listed scanned documents");
+    Ok(documents)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_pkce_code_verifier_length() {
+        let verifier = generate_code_verifier();
+        assert!(verifier.len() >= 43);
+        assert!(verifier.len() <= 128);
+    }
+
+    #[test]
+    fn test_pkce_code_challenge_deterministic() {
+        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+        let challenge1 = generate_code_challenge(verifier);
+        let challenge2 = generate_code_challenge(verifier);
+        assert_eq!(challenge1, challenge2);
+        assert!(!challenge1.is_empty());
+    }
+
+    #[test]
+    fn test_pkce_verifier_uniqueness() {
+        let v1 = generate_code_verifier();
+        let v2 = generate_code_verifier();
+        assert_ne!(v1, v2);
+    }
+
+    #[test]
+    fn test_embedded_credentials_placeholder() {
+        assert!(!OAuthClient::has_embedded_credentials());
+    }
+
+    #[test]
+    fn test_load_embedded_credentials_placeholder() {
+        let dir = TempDir::new().unwrap();
+        let mut client = OAuthClient::new(dir.path());
+        assert!(!client.load_embedded_credentials());
+        assert!(!client.using_embedded);
+    }
 
     #[test]
     fn test_token_storage_expired() {
@@ -748,12 +1071,30 @@ mod tests {
         assert!(url.contains("prompt=consent"));
         assert!(url.contains("drive.readonly"));
         assert!(url.contains("response_type=code"));
+        // Non-embedded with secret: no PKCE params
+        assert!(!url.contains("code_challenge"));
+    }
+
+    #[test]
+    fn test_authorization_url_pkce_for_embedded() {
+        let dir = TempDir::new().unwrap();
+        let mut client = OAuthClient::new(dir.path());
+        client.config = OAuthConfig {
+            client_id: "embedded_id".into(),
+            client_secret: String::new(),
+            ..OAuthConfig::default()
+        };
+        client.using_embedded = true;
+        let url = client.get_authorization_url();
+        assert!(url.contains("code_challenge="));
+        assert!(url.contains("code_challenge_method=S256"));
+        assert!(client.pkce_verifier.is_some());
     }
 
     #[test]
     fn test_authorization_url_empty_client_id() {
         let dir = TempDir::new().unwrap();
-        let client = OAuthClient::new(dir.path());
+        let mut client = OAuthClient::new(dir.path());
         let url = client.get_authorization_url();
         assert!(url.contains("client_id=&"));
     }
@@ -926,9 +1267,25 @@ mod tests {
             client_secret: "ex_secret".into(),
             ..OAuthConfig::default()
         };
-        let (cfg, tf) = client.exchange_params();
+        let (cfg, tf, verifier) = client.exchange_params();
         assert_eq!(cfg.client_id, "ex_id");
         assert!(tf.to_str().unwrap().contains("oauth_tokens"));
+        assert!(verifier.is_none()); // no PKCE without calling get_authorization_url
+    }
+
+    #[test]
+    fn test_exchange_params_with_pkce() {
+        let dir = TempDir::new().unwrap();
+        let mut client = OAuthClient::new(dir.path());
+        client.config = OAuthConfig {
+            client_id: "pkce_id".into(),
+            client_secret: String::new(),
+            ..OAuthConfig::default()
+        };
+        client.using_embedded = true;
+        client.get_authorization_url(); // generates PKCE verifier
+        let (_, _, verifier) = client.exchange_params();
+        assert!(verifier.is_some());
     }
 
     #[test]

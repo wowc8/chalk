@@ -1,15 +1,48 @@
+import { useState, useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { useErrorPipe } from "./hooks/useErrorPipe";
-import { AdminWizard } from "./components/admin/AdminWizard";
+import { OnboardingWizard } from "./components/onboarding/OnboardingWizard";
+import { Dashboard } from "./components/Dashboard";
 import "./App.css";
+
+type AppView = "loading" | "onboarding" | "dashboard";
 
 function App() {
   useErrorPipe();
+  const [view, setView] = useState<AppView>("loading");
 
-  return (
-    <main className="container">
-      <AdminWizard />
-    </main>
-  );
+  useEffect(() => {
+    invoke("check_onboarding_status")
+      .then((status: unknown) => {
+        const s = status as {
+          initial_shred_complete: boolean;
+          tokens_stored: boolean;
+          folder_selected: boolean;
+        };
+        if (s.initial_shred_complete && s.tokens_stored && s.folder_selected) {
+          setView("dashboard");
+        } else {
+          setView("onboarding");
+        }
+      })
+      .catch(() => {
+        setView("onboarding");
+      });
+  }, []);
+
+  if (view === "loading") {
+    return (
+      <div className="min-h-screen bg-bat-dark flex items-center justify-center">
+        <div className="w-8 h-8 border-2 border-bat-cyan border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  if (view === "onboarding") {
+    return <OnboardingWizard onComplete={() => setView("dashboard")} />;
+  }
+
+  return <Dashboard onResetOnboarding={() => setView("onboarding")} />;
 }
 
 export default App;
