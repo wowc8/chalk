@@ -1,11 +1,18 @@
+import { useState } from "react";
 import { motion } from "framer-motion";
 
 interface Props {
-  onNext: () => void;
+  onNext: (name: string) => void;
   onSkip?: () => void;
 }
 
 export function StepWelcome({ onNext, onSkip }: Props) {
+  const [name, setName] = useState("");
+
+  const handleNext = () => {
+    onNext(name.trim());
+  };
+
   return (
     <div className="text-center">
       <motion.div
@@ -30,15 +37,31 @@ export function StepWelcome({ onNext, onSkip }: Props) {
         Google Drive so Chalk can learn from your teaching history.
       </motion.p>
 
-      <motion.p
+      <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 0.4 }}
-        className="text-chalk-muted text-sm mb-10"
+        className="mb-8"
       >
-        Sign in with Google to get started. Chalk only needs read-only
-        access to find your lesson plans &mdash; we never modify your documents.
-      </motion.p>
+        <label
+          htmlFor="teacher-name"
+          className="block text-sm text-chalk-muted mb-2"
+        >
+          What should we call you?
+        </label>
+        <input
+          id="teacher-name"
+          type="text"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") handleNext();
+          }}
+          placeholder="Your first name"
+          className="w-full max-w-xs mx-auto block px-4 py-2.5 bg-chalk-board-dark/60 border border-chalk-white/8 rounded-lg text-sm text-chalk-white placeholder-chalk-muted focus:outline-none focus:border-chalk-blue/40 transition-colors text-center"
+          autoFocus
+        />
+      </motion.div>
 
       <motion.div
         initial={{ opacity: 0, y: 20 }}
@@ -46,7 +69,7 @@ export function StepWelcome({ onNext, onSkip }: Props) {
         transition={{ delay: 0.6 }}
       >
         <button
-          onClick={onNext}
+          onClick={handleNext}
           className="btn btn-primary px-8 py-3 text-base"
         >
           Get Started

@@ -1,6 +1,15 @@
 import { motion } from "framer-motion";
 
-export function StepComplete({ onFinish }: { onFinish: () => void }) {
+interface Props {
+  onFinish: () => void;
+  teacherName?: string | null;
+}
+
+export function StepComplete({ onFinish, teacherName }: Props) {
+  const heading = teacherName
+    ? `You're all set, ${teacherName}!`
+    : "You're All Set!";
+
   return (
     <div className="text-center">
       <motion.div
@@ -30,7 +39,7 @@ export function StepComplete({ onFinish }: { onFinish: () => void }) {
         transition={{ delay: 0.2 }}
         className="text-3xl font-bold bg-gradient-to-r from-bat-gold to-bat-cyan bg-clip-text text-transparent mb-4"
       >
-        You're All Set!
+        {heading}
       </motion.h2>
 
       <motion.p

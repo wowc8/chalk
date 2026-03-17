@@ -1113,4 +1113,36 @@ mod tests {
             Err(DatabaseError::NotFound)
         ));
     }
+
+    // ── App Settings Tests ────────────────────────────────────
+
+    #[test]
+    fn test_app_settings_crud() {
+        let db = test_db();
+
+        // Getting a non-existent setting returns None.
+        assert_eq!(db.get_setting("teacher_name").unwrap(), None);
+
+        // Set a value.
+        db.set_setting("teacher_name", "Madison").unwrap();
+        assert_eq!(
+            db.get_setting("teacher_name").unwrap(),
+            Some("Madison".into())
+        );
+
+        // Upsert overwrites the value.
+        db.set_setting("teacher_name", "Jordan").unwrap();
+        assert_eq!(
+            db.get_setting("teacher_name").unwrap(),
+            Some("Jordan".into())
+        );
+
+        // Multiple keys don't interfere.
+        db.set_setting("theme", "dark").unwrap();
+        assert_eq!(
+            db.get_setting("teacher_name").unwrap(),
+            Some("Jordan".into())
+        );
+        assert_eq!(db.get_setting("theme").unwrap(), Some("dark".into()));
+    }
 }
