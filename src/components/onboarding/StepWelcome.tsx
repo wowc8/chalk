@@ -1,16 +1,38 @@
 import { useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import { motion } from "framer-motion";
 
 interface Props {
   onNext: (name: string) => void;
   onSkip?: () => void;
+  onRestore?: () => void;
 }
 
-export function StepWelcome({ onNext, onSkip }: Props) {
+export function StepWelcome({ onNext, onSkip, onRestore }: Props) {
   const [name, setName] = useState("");
+  const [restoring, setRestoring] = useState(false);
 
   const handleNext = () => {
     onNext(name.trim());
+  };
+
+  const handleRestore = async () => {
+    try {
+      const path = await open({
+        multiple: false,
+        filters: [{ name: "Chalk Backup", extensions: ["chalk-backup.zip", "zip"] }],
+      });
+      if (!path) return;
+      setRestoring(true);
+      await invoke("import_backup", { path });
+      // Re-vectorize in background
+      invoke("vectorize_all_plans").catch(() => {});
+      onRestore?.();
+    } catch (e) {
+      console.error("Restore failed:", e);
+      setRestoring(false);
+    }
   };
 
   return (
@@ -76,17 +98,30 @@ export function StepWelcome({ onNext, onSkip }: Props) {
         </button>
       </motion.div>
 
-      {onSkip && (
-        <motion.button
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ delay: 0.8 }}
-          onClick={onSkip}
-          className="block mx-auto mt-4 text-sm text-chalk-muted hover:text-chalk-dust transition-colors"
-        >
-          Skip for now
-        </motion.button>
-      )}
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ delay: 0.8 }}
+        className="flex items-center justify-center gap-4 mt-4"
+      >
+        {onSkip && (
+          <button
+            onClick={onSkip}
+            className="text-sm text-chalk-muted hover:text-chalk-dust transition-colors"
+          >
+            Skip for now
+          </button>
+        )}
+        {onRestore && (
+          <button
+            onClick={handleRestore}
+            disabled={restoring}
+            className="text-sm text-chalk-muted hover:text-chalk-dust transition-colors disabled:opacity-50"
+          >
+            {restoring ? "Restoring..." : "Restore Backup"}
+          </button>
+        )}
+      </motion.div>
     </div>
   );
 }

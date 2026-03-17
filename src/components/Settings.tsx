@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { save, open } from "@tauri-apps/plugin-dialog";
 import { motion } from "framer-motion";
 import { useConnectors, type ConnectionDetails, type PendingOp } from "../hooks/useConnectors";
 import { useToast } from "./Toast";
@@ -286,6 +287,9 @@ export function Settings({
           </div>
         </motion.section>
 
+        {/* Backup & Restore Section */}
+        <BackupSection addToast={addToast} />
+
         {/* App Info Section */}
         <motion.section
           initial={{ opacity: 0, y: 20 }}
@@ -493,5 +497,159 @@ function ConnectionCard({
         )}
       </div>
     </motion.div>
+  );
+}
+
+// ── Backup & Restore Section ──────────────────────────────────────
+
+interface BackupInfo {
+  format_version: number;
+  created_at: string;
+  plan_count: number;
+  tag_count: number;
+  conversation_count: number;
+}
+
+function BackupSection({
+  addToast,
+}: {
+  addToast: (msg: string, type: "success" | "error") => void;
+}) {
+  const [exporting, setExporting] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [confirmInfo, setConfirmInfo] = useState<BackupInfo | null>(null);
+  const [confirmPath, setConfirmPath] = useState<string | null>(null);
+
+  const handleExport = async () => {
+    try {
+      const path = await save({
+        defaultPath: `chalk-backup-${new Date().toISOString().slice(0, 10)}.chalk-backup.zip`,
+        filters: [{ name: "Chalk Backup", extensions: ["chalk-backup.zip"] }],
+      });
+      if (!path) return;
+      setExporting(true);
+      await invoke("export_backup", { path });
+      addToast("Backup exported successfully", "success");
+    } catch (e) {
+      addToast(`Export failed: ${e}`, "error");
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const handleImportPick = async () => {
+    try {
+      const path = await open({
+        multiple: false,
+        filters: [{ name: "Chalk Backup", extensions: ["chalk-backup.zip", "zip"] }],
+      });
+      if (!path) return;
+      const info = await invoke<BackupInfo>("get_backup_info", { path });
+      setConfirmInfo(info);
+      setConfirmPath(path);
+    } catch (e) {
+      addToast(`Could not read backup: ${e}`, "error");
+    }
+  };
+
+  const handleConfirmImport = async () => {
+    if (!confirmPath) return;
+    setImporting(true);
+    setConfirmInfo(null);
+    try {
+      await invoke("import_backup", { path: confirmPath });
+      addToast("Backup restored successfully", "success");
+      // Re-vectorize in background
+      invoke("vectorize_all_plans").catch(() => {});
+    } catch (e) {
+      addToast(`Import failed: ${e}`, "error");
+    } finally {
+      setImporting(false);
+      setConfirmPath(null);
+    }
+  };
+
+  return (
+    <>
+      <motion.section
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.35 }}
+        className="mb-8"
+      >
+        <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">
+          Backup & Restore
+        </h2>
+
+        <div className="bg-bat-charcoal/50 rounded-lg border border-gray-800 p-4 space-y-4">
+          <p className="text-xs text-gray-500">
+            Export all lesson plans, tags, chat history, and settings to a
+            portable backup file, or restore from a previous backup.
+          </p>
+
+          <div className="flex gap-3">
+            <motion.button
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+              disabled={exporting || importing}
+              onClick={handleExport}
+              className="px-4 py-2 bg-bat-cyan/10 border border-bat-cyan/30 rounded-lg text-bat-cyan text-sm hover:bg-bat-cyan/20 transition-colors disabled:opacity-50"
+            >
+              {exporting ? "Exporting..." : "Export Backup"}
+            </motion.button>
+
+            <motion.button
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+              disabled={exporting || importing}
+              onClick={handleImportPick}
+              className="px-4 py-2 bg-bat-gold/10 border border-bat-gold/30 rounded-lg text-bat-gold text-sm hover:bg-bat-gold/20 transition-colors disabled:opacity-50"
+            >
+              {importing ? "Restoring..." : "Restore Backup"}
+            </motion.button>
+          </div>
+        </div>
+      </motion.section>
+
+      {/* Import confirmation dialog */}
+      {confirmInfo && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <motion.div
+            initial={{ scale: 0.9, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            className="bg-bat-charcoal rounded-xl border border-gray-700 p-6 max-w-sm w-full mx-4 shadow-xl"
+          >
+            <h3 className="text-lg font-semibold text-white mb-3">
+              Restore Backup?
+            </h3>
+            <div className="text-sm text-gray-300 space-y-1 mb-4">
+              <p>Created: {new Date(confirmInfo.created_at).toLocaleDateString()}</p>
+              <p>{confirmInfo.plan_count} lesson plan{confirmInfo.plan_count !== 1 ? "s" : ""}</p>
+              <p>{confirmInfo.tag_count} tag{confirmInfo.tag_count !== 1 ? "s" : ""}</p>
+              <p>{confirmInfo.conversation_count} conversation{confirmInfo.conversation_count !== 1 ? "s" : ""}</p>
+            </div>
+            <p className="text-xs text-bat-gold mb-4">
+              Your current data will be auto-backed up before restoring.
+            </p>
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => { setConfirmInfo(null); setConfirmPath(null); }}
+                className="px-4 py-2 text-sm text-gray-400 hover:text-white transition-colors"
+              >
+                Cancel
+              </button>
+              <motion.button
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+                onClick={handleConfirmImport}
+                className="px-4 py-2 bg-bat-gold text-bat-dark font-semibold rounded-lg text-sm hover:bg-bat-gold/90 transition-colors"
+              >
+                Confirm Restore
+              </motion.button>
+            </div>
+          </motion.div>
+        </div>
+      )}
+    </>
   );
 }

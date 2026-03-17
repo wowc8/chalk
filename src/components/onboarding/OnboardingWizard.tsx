@@ -131,6 +131,7 @@ export function OnboardingWizard({
               <StepWelcome
                 onNext={handleWelcomeNext}
                 onSkip={onComplete}
+                onRestore={onComplete}
               />
             )}
             {step === "google-auth" && (
