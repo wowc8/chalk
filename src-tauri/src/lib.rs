@@ -4,6 +4,7 @@ pub mod database;
 mod logging;
 pub mod safety;
 pub mod shredder;
+pub mod updater;
 
 use admin::oauth::OAuthClient;
 use connectors::ConnectorDispatcher;
@@ -39,6 +40,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState {
             oauth_client: Mutex::new(oauth_client),
         })
@@ -63,7 +65,14 @@ pub fn run() {
             connectors::dispatcher::get_connection_details,
             connectors::dispatcher::disconnect_connector,
             connectors::dispatcher::rescan_connector,
+            updater::check_for_update,
+            updater::install_update,
         ])
+        .setup(|app| {
+            // Start periodic update checker in background.
+            updater::spawn_update_checker(app.handle().clone());
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
