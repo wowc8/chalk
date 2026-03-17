@@ -2,7 +2,6 @@ import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { motion, AnimatePresence } from "framer-motion";
 import { StepWelcome } from "./StepWelcome";
-import { StepOAuthConfig } from "./StepOAuthConfig";
 import { StepGoogleAuth } from "./StepGoogleAuth";
 import { StepFolderSelect } from "./StepFolderSelect";
 import { StepInitialShred } from "./StepInitialShred";
@@ -19,9 +18,11 @@ export interface OnboardingStatus {
   selected_folder_name: string | null;
 }
 
+/** Default flow skips the manual OAuth config step — embedded credentials
+ *  are used automatically via PKCE. The oauth-config step is kept in the
+ *  array so users can still be routed there from Settings (advanced). */
 const STEPS = [
   "welcome",
-  "oauth-config",
   "google-auth",
   "folder-select",
   "initial-shred",
@@ -126,19 +127,15 @@ export function OnboardingWizard({
             )}
 
             {step === "welcome" && (
-              <StepWelcome onNext={() => goTo("oauth-config")} />
-            )}
-            {step === "oauth-config" && (
-              <StepOAuthConfig
+              <StepWelcome
                 onNext={() => goTo("google-auth")}
-                onBack={() => goTo("welcome")}
-                setError={setError}
+                onSkip={onComplete}
               />
             )}
             {step === "google-auth" && (
               <StepGoogleAuth
                 onNext={() => goTo("folder-select")}
-                onBack={() => goTo("oauth-config")}
+                onBack={() => goTo("welcome")}
                 setError={setError}
               />
             )}

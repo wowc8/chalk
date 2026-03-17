@@ -1,6 +1,11 @@
 import { motion } from "framer-motion";
 
-export function StepWelcome({ onNext }: { onNext: () => void }) {
+interface Props {
+  onNext: () => void;
+  onSkip?: () => void;
+}
+
+export function StepWelcome({ onNext, onSkip }: Props) {
   return (
     <div className="text-center">
       <motion.div
@@ -21,7 +26,7 @@ export function StepWelcome({ onNext }: { onNext: () => void }) {
         transition={{ delay: 0.2 }}
         className="text-gray-400 text-lg mb-8 leading-relaxed"
       >
-        Your AI-powered lesson plan assistant. Let's connect your
+        Your AI-powered lesson plan assistant. Connect your
         Google Drive so Chalk can learn from your teaching history.
       </motion.p>
 
@@ -31,8 +36,8 @@ export function StepWelcome({ onNext }: { onNext: () => void }) {
         transition={{ delay: 0.4 }}
         className="text-gray-500 text-sm mb-10"
       >
-        This wizard will walk you through connecting your Google account,
-        selecting your lesson plan folder, and importing your archive.
+        Sign in with Google to get started. Chalk only needs read-only
+        access to find your lesson plans &mdash; we never modify your documents.
       </motion.p>
 
       <motion.button
@@ -46,6 +51,18 @@ export function StepWelcome({ onNext }: { onNext: () => void }) {
       >
         Get Started
       </motion.button>
+
+      {onSkip && (
+        <motion.button
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ delay: 0.8 }}
+          onClick={onSkip}
+          className="block mx-auto mt-4 text-sm text-gray-500 hover:text-gray-300 transition-colors"
+        >
+          Skip for now
+        </motion.button>
+      )}
     </div>
   );
 }

@@ -8,8 +8,7 @@ import "./AdminWizard.css";
 
 const STEP_LABELS: Record<SetupStep, string> = {
   welcome: "Welcome",
-  credentials: "API Credentials",
-  authorize: "Authorize",
+  authorize: "Sign In",
   folder: "Select Folder",
   shred: "Initial Scan",
   complete: "All Set",
@@ -17,7 +16,6 @@ const STEP_LABELS: Record<SetupStep, string> = {
 
 const STEP_ORDER: SetupStep[] = [
   "welcome",
-  "credentials",
   "authorize",
   "folder",
   "shred",
@@ -31,7 +29,6 @@ export function AdminWizard() {
     status,
     error,
     loading,
-    saveCredentials,
     getAuthUrl,
     submitAuthCode,
     listFolders,
@@ -64,10 +61,7 @@ export function AdminWizard() {
       {error && <div className="wizard-error">{error}</div>}
 
       <div className="wizard-content">
-        {step === "welcome" && <WelcomeStep onNext={() => setStep("credentials")} />}
-        {step === "credentials" && (
-          <CredentialsStep onSubmit={saveCredentials} loading={loading} />
-        )}
+        {step === "welcome" && <WelcomeStep onNext={() => setStep("authorize")} />}
         {step === "authorize" && (
           <AuthorizeStep
             getAuthUrl={getAuthUrl}
@@ -112,57 +106,6 @@ function WelcomeStep({ onNext }: { onNext: () => void }) {
       <button className="btn-primary" onClick={onNext}>
         Get Started
       </button>
-    </div>
-  );
-}
-
-function CredentialsStep({
-  onSubmit,
-  loading,
-}: {
-  onSubmit: (clientId: string, clientSecret: string) => void;
-  loading: boolean;
-}) {
-  const [clientId, setClientId] = useState("");
-  const [clientSecret, setClientSecret] = useState("");
-
-  return (
-    <div className="step-card">
-      <h2>Google API Credentials</h2>
-      <p>
-        Enter your Google Cloud OAuth credentials. These are used to securely
-        connect Chalk to your Google Drive.
-      </p>
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          onSubmit(clientId, clientSecret);
-        }}
-      >
-        <label>
-          Client ID
-          <input
-            type="text"
-            value={clientId}
-            onChange={(e) => setClientId(e.target.value)}
-            placeholder="your-client-id.apps.googleusercontent.com"
-            required
-          />
-        </label>
-        <label>
-          Client Secret
-          <input
-            type="password"
-            value={clientSecret}
-            onChange={(e) => setClientSecret(e.target.value)}
-            placeholder="Client secret"
-            required
-          />
-        </label>
-        <button className="btn-primary" type="submit" disabled={loading}>
-          {loading ? "Saving..." : "Save & Continue"}
-        </button>
-      </form>
     </div>
   );
 }

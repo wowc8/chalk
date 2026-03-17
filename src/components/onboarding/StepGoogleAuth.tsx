@@ -20,7 +20,7 @@ export function StepGoogleAuth({ onNext, onBack, setError }: Props) {
       setAuthUrl(url);
       window.open(url, "_blank");
     } catch (e) {
-      setError(`Failed to get authorization URL: ${e}`);
+      setError(`Failed to start sign-in: ${e}`);
     }
   };
 
@@ -45,10 +45,11 @@ export function StepGoogleAuth({ onNext, onBack, setError }: Props) {
   return (
     <div>
       <h2 className="text-2xl font-bold text-bat-cyan mb-2">
-        Connect Google Account
+        Sign in with Google
       </h2>
       <p className="text-gray-400 text-sm mb-6">
-        Authorize Chalk to read your Google Drive and Docs.
+        Chalk needs read-only access to your Google Drive to find your
+        lesson plans. We never modify your documents.
       </p>
 
       {!authUrl ? (
@@ -74,8 +75,11 @@ export function StepGoogleAuth({ onNext, onBack, setError }: Props) {
             onClick={handleGetUrl}
             className="px-8 py-3 bg-gradient-to-r from-bat-cyan to-bat-purple rounded-lg font-semibold text-white shadow-lg shadow-bat-cyan/20"
           >
-            Open Google Sign-In
+            Sign in with Google
           </motion.button>
+          <p className="mt-4 text-xs text-gray-600">
+            Read-only access &middot; No student data sent to our servers
+          </p>
         </div>
       ) : (
         <div className="space-y-4">
@@ -106,7 +110,7 @@ export function StepGoogleAuth({ onNext, onBack, setError }: Props) {
             disabled={exchanging}
             className="w-full px-6 py-2.5 bg-gradient-to-r from-bat-gold to-bat-cyan rounded-lg font-semibold text-bat-dark disabled:opacity-50 shadow-lg"
           >
-            {exchanging ? "Authenticating..." : "Complete Authentication"}
+            {exchanging ? "Authenticating..." : "Complete Sign-In"}
           </motion.button>
         </div>
       )}
