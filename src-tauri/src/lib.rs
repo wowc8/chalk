@@ -45,6 +45,7 @@ pub fn run() {
             greet,
             log_frontend_error,
             admin::oauth::initialize_oauth,
+            admin::oauth::has_embedded_credentials,
             admin::oauth::save_oauth_config,
             admin::oauth::get_authorization_url,
             admin::oauth::handle_oauth_callback,
@@ -52,7 +53,10 @@ pub fn run() {
             admin::oauth::check_onboarding_status,
             admin::oauth::list_drive_folders,
             admin::oauth::list_drive_subfolders,
+            admin::oauth::list_drive_items,
+            admin::oauth::select_single_document,
             admin::oauth::trigger_initial_shred,
+            admin::oauth::list_scanned_documents,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

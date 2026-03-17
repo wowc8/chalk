@@ -19,7 +19,6 @@ export interface DriveFolder {
 
 export type SetupStep =
   | "welcome"
-  | "credentials"
   | "authorize"
   | "folder"
   | "shred"

@@ -351,7 +351,7 @@ fn test_exchange_params_roundtrip() {
     client.save_config(&config).unwrap();
     client.load_config().unwrap();
 
-    let (extracted_config, token_file) = client.exchange_params();
+    let (extracted_config, token_file, _pkce_verifier) = client.exchange_params();
     assert_eq!(extracted_config.client_id, "param-id");
     assert_eq!(extracted_config.client_secret, "param-secret");
     assert!(token_file.to_str().unwrap().contains("oauth_tokens.json"));
