@@ -105,3 +105,17 @@ pub struct LibraryQuery {
     pub search: Option<String>,
     pub tag_ids: Option<Vec<String>>,
 }
+
+// ── Plan Versions ───────────────────────────────────────────
+
+/// A snapshot of a lesson plan at a particular version.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanVersion {
+    pub id: String,
+    pub plan_id: String,
+    pub version: i32,
+    pub title: String,
+    pub content: String,
+    pub learning_objectives: Option<String>,
+    pub created_at: String,
+}

@@ -15,6 +15,8 @@ pub enum ErrorDomain {
     #[serde(rename = "oauth")]
     OAuth,
     Shredder,
+    Rag,
+    Chat,
     Cache,
     FeatureFlag,
     Io,
@@ -41,6 +43,12 @@ pub enum ErrorCode {
     // Shredder
     ShredderParseFailed,
     ShredderNoTables,
+
+    // RAG / Chat
+    RagEmbeddingFailed,
+    RagSearchFailed,
+    ChatApiKeyMissing,
+    ChatCompletionFailed,
 
     // Cache
     CacheExpired,
