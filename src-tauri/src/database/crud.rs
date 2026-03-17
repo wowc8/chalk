@@ -205,6 +205,44 @@ impl Database {
         })
     }
 
+    /// List all lesson plans that don't have embeddings in the vector table.
+    pub fn list_plans_without_embeddings(&self) -> Result<Vec<LessonPlan>> {
+        self.with_conn(|conn| {
+            // Ensure mapping table exists.
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS _vec_id_map (
+                    rowid   INTEGER PRIMARY KEY AUTOINCREMENT,
+                    plan_id TEXT NOT NULL UNIQUE
+                )",
+            )?;
+
+            let mut stmt = conn.prepare(
+                "SELECT lp.id, lp.subject_id, lp.title, lp.content, lp.source_doc_id,
+                        lp.source_table_index, lp.learning_objectives, lp.status,
+                        lp.created_at, lp.updated_at
+                 FROM lesson_plans lp
+                 LEFT JOIN _vec_id_map vm ON vm.plan_id = lp.id
+                 WHERE vm.rowid IS NULL
+                 ORDER BY lp.updated_at DESC",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(LessonPlan {
+                    id: row.get(0)?,
+                    subject_id: row.get(1)?,
+                    title: row.get(2)?,
+                    content: row.get(3)?,
+                    source_doc_id: row.get(4)?,
+                    source_table_index: row.get(5)?,
+                    learning_objectives: row.get(6)?,
+                    status: row.get(7)?,
+                    created_at: row.get(8)?,
+                    updated_at: row.get(9)?,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
     // ── Metadata ──────────────────────────────────────────────
 
     pub fn set_metadata(&self, input: &NewMetadata) -> Result<Metadata> {
@@ -266,6 +304,155 @@ impl Database {
                 return Err(DatabaseError::NotFound);
             }
             Ok(())
+        })
+    }
+
+    // ── Plan Versions ────────────────────────────────────────
+
+    /// Finalize a plan: snapshot current state as a new version, bump the
+    /// version counter on the plan, and set status to "finalized".
+    pub fn finalize_plan(&self, plan_id: &str) -> Result<PlanVersion> {
+        self.with_conn(|conn| {
+            // Get current plan
+            let plan = self.get_lesson_plan_inner(conn, plan_id)?;
+
+            // Determine next version number
+            let next_version: i32 = conn
+                .query_row(
+                    "SELECT COALESCE(MAX(version), 0) + 1 FROM plan_versions WHERE plan_id = ?1",
+                    params![plan_id],
+                    |row| row.get(0),
+                )
+                .map_err(DatabaseError::Sqlite)?;
+
+            let version_id = uuid::Uuid::new_v4().to_string();
+
+            // Insert version snapshot
+            conn.execute(
+                "INSERT INTO plan_versions (id, plan_id, version, title, content, learning_objectives)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    version_id,
+                    plan_id,
+                    next_version,
+                    plan.title,
+                    plan.content,
+                    plan.learning_objectives,
+                ],
+            )?;
+
+            // Update plan's version counter and status
+            conn.execute(
+                "UPDATE lesson_plans SET version = ?1, status = 'finalized', updated_at = datetime('now') WHERE id = ?2",
+                params![next_version, plan_id],
+            )?;
+
+            // Return the created version
+            conn.query_row(
+                "SELECT id, plan_id, version, title, content, learning_objectives, created_at
+                 FROM plan_versions WHERE id = ?1",
+                params![version_id],
+                |row| {
+                    Ok(PlanVersion {
+                        id: row.get(0)?,
+                        plan_id: row.get(1)?,
+                        version: row.get(2)?,
+                        title: row.get(3)?,
+                        content: row.get(4)?,
+                        learning_objectives: row.get(5)?,
+                        created_at: row.get(6)?,
+                    })
+                },
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound,
+                other => DatabaseError::Sqlite(other),
+            })
+        })
+    }
+
+    /// List all versions for a plan, ordered newest first.
+    pub fn list_plan_versions(&self, plan_id: &str) -> Result<Vec<PlanVersion>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, plan_id, version, title, content, learning_objectives, created_at
+                 FROM plan_versions WHERE plan_id = ?1
+                 ORDER BY version DESC",
+            )?;
+            let rows = stmt.query_map(params![plan_id], |row| {
+                Ok(PlanVersion {
+                    id: row.get(0)?,
+                    plan_id: row.get(1)?,
+                    version: row.get(2)?,
+                    title: row.get(3)?,
+                    content: row.get(4)?,
+                    learning_objectives: row.get(5)?,
+                    created_at: row.get(6)?,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    /// Get a specific version by plan_id and version number.
+    pub fn get_plan_version(&self, plan_id: &str, version: i32) -> Result<PlanVersion> {
+        self.with_conn(|conn| {
+            conn.query_row(
+                "SELECT id, plan_id, version, title, content, learning_objectives, created_at
+                 FROM plan_versions WHERE plan_id = ?1 AND version = ?2",
+                params![plan_id, version],
+                |row| {
+                    Ok(PlanVersion {
+                        id: row.get(0)?,
+                        plan_id: row.get(1)?,
+                        version: row.get(2)?,
+                        title: row.get(3)?,
+                        content: row.get(4)?,
+                        learning_objectives: row.get(5)?,
+                        created_at: row.get(6)?,
+                    })
+                },
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound,
+                other => DatabaseError::Sqlite(other),
+            })
+        })
+    }
+
+    /// Revert a plan to a previous version: restores title, content, and
+    /// learning_objectives from the snapshot. Does NOT create a new version.
+    pub fn revert_plan_to_version(&self, plan_id: &str, version: i32) -> Result<LessonPlan> {
+        self.with_conn(|conn| {
+            // Get the version snapshot
+            let snapshot = conn
+                .query_row(
+                    "SELECT title, content, learning_objectives
+                     FROM plan_versions WHERE plan_id = ?1 AND version = ?2",
+                    params![plan_id, version],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                        ))
+                    },
+                )
+                .map_err(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound,
+                    other => DatabaseError::Sqlite(other),
+                })?;
+
+            // Apply the snapshot to the plan
+            let updated = conn.execute(
+                "UPDATE lesson_plans SET title = ?1, content = ?2, learning_objectives = ?3, status = 'draft', updated_at = datetime('now') WHERE id = ?4",
+                params![snapshot.0, snapshot.1, snapshot.2, plan_id],
+            )?;
+            if updated == 0 {
+                return Err(DatabaseError::NotFound);
+            }
+
+            self.get_lesson_plan_inner(conn, plan_id)
         })
     }
 
@@ -720,5 +907,210 @@ mod tests {
         ));
         let meta = db.get_metadata_for_plan(&plan.id).unwrap();
         assert_eq!(meta.len(), 0);
+    }
+
+    #[test]
+    fn test_list_plans_without_embeddings() {
+        let db = test_db();
+
+        let subject = db
+            .create_subject(&NewSubject {
+                name: "Bio".into(),
+                grade_level: None,
+                description: None,
+            })
+            .unwrap();
+
+        let plan1 = db
+            .create_lesson_plan(&NewLessonPlan {
+                subject_id: subject.id.clone(),
+                title: "Plan 1".into(),
+                content: Some("Content 1".into()),
+                source_doc_id: None,
+                source_table_index: None,
+                learning_objectives: None,
+            })
+            .unwrap();
+
+        let plan2 = db
+            .create_lesson_plan(&NewLessonPlan {
+                subject_id: subject.id.clone(),
+                title: "Plan 2".into(),
+                content: Some("Content 2".into()),
+                source_doc_id: None,
+                source_table_index: None,
+                learning_objectives: None,
+            })
+            .unwrap();
+
+        // Both plans should be listed as unembedded.
+        let unembedded = db.list_plans_without_embeddings().unwrap();
+        assert_eq!(unembedded.len(), 2);
+
+        // Recreate vec table with smaller dims for test.
+        db.with_conn(|conn| {
+            conn.execute_batch("DROP TABLE IF EXISTS lesson_plan_vectors")?;
+            conn.execute_batch(
+                "CREATE VIRTUAL TABLE lesson_plan_vectors USING vec0(embedding float[4])",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        // Embed plan1.
+        db.upsert_embedding(&plan1.id, &[1.0, 0.0, 0.0, 0.0])
+            .unwrap();
+
+        // Now only plan2 should be unembedded.
+        let unembedded = db.list_plans_without_embeddings().unwrap();
+        assert_eq!(unembedded.len(), 1);
+        assert_eq!(unembedded[0].id, plan2.id);
+    }
+
+    // ── Plan Version Tests ───────────────────────────────────
+
+    fn create_test_plan(db: &Database) -> LessonPlan {
+        let subject = db
+            .create_subject(&NewSubject {
+                name: "Test Subject".into(),
+                grade_level: None,
+                description: None,
+            })
+            .unwrap();
+        db.create_lesson_plan(&NewLessonPlan {
+            subject_id: subject.id.clone(),
+            title: "Test Plan".into(),
+            content: Some("Initial content".into()),
+            source_doc_id: None,
+            source_table_index: None,
+            learning_objectives: Some("Learn things".into()),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn test_finalize_plan_creates_version() {
+        let db = test_db();
+        let plan = create_test_plan(&db);
+
+        let v1 = db.finalize_plan(&plan.id).unwrap();
+        assert_eq!(v1.version, 1);
+        assert_eq!(v1.title, "Test Plan");
+        assert_eq!(v1.content, "Initial content");
+        assert_eq!(v1.learning_objectives.as_deref(), Some("Learn things"));
+        assert_eq!(v1.plan_id, plan.id);
+
+        // Plan should now be version 1 with "finalized" status
+        let updated_plan = db.get_lesson_plan(&plan.id).unwrap();
+        assert_eq!(updated_plan.status, "finalized");
+    }
+
+    #[test]
+    fn test_finalize_plan_increments_version() {
+        let db = test_db();
+        let plan = create_test_plan(&db);
+
+        let v1 = db.finalize_plan(&plan.id).unwrap();
+        assert_eq!(v1.version, 1);
+
+        // Update content then finalize again
+        db.update_lesson_plan_content(&plan.id, "Updated content").unwrap();
+        let v2 = db.finalize_plan(&plan.id).unwrap();
+        assert_eq!(v2.version, 2);
+        assert_eq!(v2.content, "Updated content");
+    }
+
+    #[test]
+    fn test_list_plan_versions() {
+        let db = test_db();
+        let plan = create_test_plan(&db);
+
+        // No versions yet
+        let versions = db.list_plan_versions(&plan.id).unwrap();
+        assert_eq!(versions.len(), 0);
+
+        // Create two versions
+        db.finalize_plan(&plan.id).unwrap();
+        db.update_lesson_plan_content(&plan.id, "v2 content").unwrap();
+        db.finalize_plan(&plan.id).unwrap();
+
+        let versions = db.list_plan_versions(&plan.id).unwrap();
+        assert_eq!(versions.len(), 2);
+        // Newest first
+        assert_eq!(versions[0].version, 2);
+        assert_eq!(versions[1].version, 1);
+    }
+
+    #[test]
+    fn test_get_plan_version() {
+        let db = test_db();
+        let plan = create_test_plan(&db);
+
+        db.finalize_plan(&plan.id).unwrap();
+        db.update_lesson_plan_content(&plan.id, "v2 content").unwrap();
+        db.finalize_plan(&plan.id).unwrap();
+
+        let v1 = db.get_plan_version(&plan.id, 1).unwrap();
+        assert_eq!(v1.content, "Initial content");
+
+        let v2 = db.get_plan_version(&plan.id, 2).unwrap();
+        assert_eq!(v2.content, "v2 content");
+
+        // Non-existent version
+        assert!(matches!(
+            db.get_plan_version(&plan.id, 99),
+            Err(DatabaseError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn test_revert_plan_to_version() {
+        let db = test_db();
+        let plan = create_test_plan(&db);
+
+        // Finalize v1
+        db.finalize_plan(&plan.id).unwrap();
+
+        // Change content and finalize v2
+        db.update_lesson_plan_content(&plan.id, "v2 content").unwrap();
+        db.finalize_plan(&plan.id).unwrap();
+
+        // Revert to v1
+        let reverted = db.revert_plan_to_version(&plan.id, 1).unwrap();
+        assert_eq!(reverted.content, "Initial content");
+        assert_eq!(reverted.title, "Test Plan");
+        assert_eq!(reverted.status, "draft");
+
+        // Non-existent version
+        assert!(matches!(
+            db.revert_plan_to_version(&plan.id, 99),
+            Err(DatabaseError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn test_cascade_delete_plan_removes_versions() {
+        let db = test_db();
+        let plan = create_test_plan(&db);
+
+        db.finalize_plan(&plan.id).unwrap();
+        db.finalize_plan(&plan.id).unwrap();
+
+        let versions = db.list_plan_versions(&plan.id).unwrap();
+        assert_eq!(versions.len(), 2);
+
+        // Delete the plan — versions should cascade-delete
+        db.delete_lesson_plan(&plan.id).unwrap();
+        let versions = db.list_plan_versions(&plan.id).unwrap();
+        assert_eq!(versions.len(), 0);
+    }
+
+    #[test]
+    fn test_finalize_nonexistent_plan() {
+        let db = test_db();
+        assert!(matches!(
+            db.finalize_plan("nonexistent-id"),
+            Err(DatabaseError::NotFound)
+        ));
     }
 }

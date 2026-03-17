@@ -149,6 +149,22 @@ fn embedded_migrations() -> Vec<Migration> {
                 include_str!("../../migrations/004_tags_and_library.down.sql").to_string(),
             ),
         },
+        Migration {
+            version: 5,
+            description: "chat_tables".to_string(),
+            up_sql: include_str!("../../migrations/005_chat_tables.up.sql").to_string(),
+            down_sql: Some(
+                include_str!("../../migrations/005_chat_tables.down.sql").to_string(),
+            ),
+        },
+        Migration {
+            version: 6,
+            description: "plan_versions".to_string(),
+            up_sql: include_str!("../../migrations/006_plan_versions.up.sql").to_string(),
+            down_sql: Some(
+                include_str!("../../migrations/006_plan_versions.down.sql").to_string(),
+            ),
+        },
     ]
 }
 
@@ -311,13 +327,13 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 6);
     }
 
     #[test]
     fn test_embedded_migrations_match_file_count() {
         let migrations = embedded_migrations();
-        assert_eq!(migrations.len(), 4);
+        assert_eq!(migrations.len(), 6);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(migrations[0].description, "initial_schema");
         assert_eq!(migrations[1].version, 2);
@@ -326,6 +342,10 @@ mod tests {
         assert_eq!(migrations[2].description, "app_settings");
         assert_eq!(migrations[3].version, 4);
         assert_eq!(migrations[3].description, "tags_and_library");
+        assert_eq!(migrations[4].version, 5);
+        assert_eq!(migrations[4].description, "chat_tables");
+        assert_eq!(migrations[5].version, 6);
+        assert_eq!(migrations[5].description, "plan_versions");
     }
 
     #[test]
@@ -335,7 +355,7 @@ mod tests {
         assert_eq!(current_version(&conn).unwrap(), 0);
 
         run_all(&conn).unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 3);
+        assert_eq!(current_version(&conn).unwrap(), 6);
     }
 
     #[test]
@@ -343,6 +363,21 @@ mod tests {
         let conn = test_conn();
 
         run_all(&conn).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 6);
+
+        // Rollback version 6 (plan_versions).
+        let rolled_back = rollback_last(&conn, None).unwrap();
+        assert_eq!(rolled_back, Some(6));
+        assert_eq!(current_version(&conn).unwrap(), 5);
+
+        // Rollback version 5 (chat_tables).
+        let rolled_back = rollback_last(&conn, None).unwrap();
+        assert_eq!(rolled_back, Some(5));
+        assert_eq!(current_version(&conn).unwrap(), 4);
+
+        // Rollback version 4 (tags_and_library).
+        let rolled_back = rollback_last(&conn, None).unwrap();
+        assert_eq!(rolled_back, Some(4));
         assert_eq!(current_version(&conn).unwrap(), 3);
 
         // Rollback version 3 (app_settings).
@@ -370,17 +405,17 @@ mod tests {
         let conn = test_conn();
 
         run_all(&conn).unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 3);
+        assert_eq!(current_version(&conn).unwrap(), 6);
 
         // Rollback all.
-        rollback_last(&conn, None).unwrap();
-        rollback_last(&conn, None).unwrap();
-        rollback_last(&conn, None).unwrap();
+        for _ in 0..6 {
+            rollback_last(&conn, None).unwrap();
+        }
         assert_eq!(current_version(&conn).unwrap(), 0);
 
         // Reapply all.
         run_all(&conn).unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 3);
+        assert_eq!(current_version(&conn).unwrap(), 6);
 
         // Verify tables exist after reapply.
         let table_count: i32 = conn
@@ -484,7 +519,7 @@ mod tests {
         let migrations =
             discover_migrations(Path::new("/nonexistent/migrations/dir")).unwrap();
         // Falls back to embedded migrations.
-        assert_eq!(migrations.len(), 4);
+        assert_eq!(migrations.len(), 6);
     }
 
     #[test]
@@ -511,8 +546,8 @@ mod tests {
 
         assert_eq!(current_version(&conn).unwrap(), 1);
 
-        // Run all — should only apply versions 2 and 3.
+        // Run all — should apply remaining versions.
         run_all(&conn).unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 3);
+        assert_eq!(current_version(&conn).unwrap(), 6);
     }
 }

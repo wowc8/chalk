@@ -1,4 +1,6 @@
-use crate::database::{LessonPlan, LibraryPlanCard, LibraryQuery, NewLessonPlan, NewTag, Tag};
+use crate::database::{
+    LessonPlan, LibraryPlanCard, LibraryQuery, NewLessonPlan, NewTag, PlanVersion, Tag,
+};
 use crate::AppState;
 
 // ── Tag commands ─────────────────────────────────────────────
@@ -197,6 +199,54 @@ pub fn update_plan_title(
         .map_err(|e| e.into())
     })
     .map_err(|e| format!("{}", e))
+}
+
+// ── Plan versioning commands ─────────────────────────────────
+
+#[tauri::command]
+pub fn finalize_plan(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<PlanVersion, String> {
+    state
+        .db
+        .finalize_plan(&id)
+        .map_err(|e| format!("{}", e))
+}
+
+#[tauri::command]
+pub fn list_plan_versions(
+    state: tauri::State<'_, AppState>,
+    plan_id: String,
+) -> Result<Vec<PlanVersion>, String> {
+    state
+        .db
+        .list_plan_versions(&plan_id)
+        .map_err(|e| format!("{}", e))
+}
+
+#[tauri::command]
+pub fn get_plan_version(
+    state: tauri::State<'_, AppState>,
+    plan_id: String,
+    version: i32,
+) -> Result<PlanVersion, String> {
+    state
+        .db
+        .get_plan_version(&plan_id, version)
+        .map_err(|e| format!("{}", e))
+}
+
+#[tauri::command]
+pub fn revert_plan_version(
+    state: tauri::State<'_, AppState>,
+    plan_id: String,
+    version: i32,
+) -> Result<LessonPlan, String> {
+    state
+        .db
+        .revert_plan_to_version(&plan_id, version)
+        .map_err(|e| format!("{}", e))
 }
 
 #[tauri::command]

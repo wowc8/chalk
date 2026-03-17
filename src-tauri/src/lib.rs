@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod cache;
+pub mod chat;
 pub mod connectors;
 pub mod database;
 pub mod errors;
@@ -8,6 +9,7 @@ pub mod feature_flags;
 pub mod library;
 mod logging;
 pub mod privacy;
+pub mod rag;
 pub mod safety;
 pub mod sentry_integration;
 pub mod shredder;
@@ -296,7 +298,19 @@ pub fn run() {
             library::get_plan,
             library::update_plan_content,
             library::update_plan_title,
+            library::finalize_plan,
+            library::list_plan_versions,
+            library::get_plan_version,
+            library::revert_plan_version,
             library::delete_plan,
+            chat::send_chat_message,
+            chat::get_chat_messages_cmd,
+            chat::list_conversations,
+            chat::delete_conversation,
+            chat::vectorize_plan,
+            chat::vectorize_all_plans,
+            chat::save_ai_config,
+            chat::get_ai_config,
         ])
         .setup(|_app| {
             // Start periodic update checker only in release builds.

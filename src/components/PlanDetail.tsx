@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useParams } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import { TipTapEditor } from "./editor/TipTapEditor";
 import { ChatPane, ChatMessage } from "./editor/ChatPane";
 import "./editor/EditorStyles.css";
@@ -17,6 +17,16 @@ interface LessonPlan {
   status: string;
   created_at: string;
   updated_at: string;
+}
+
+interface PlanVersion {
+  id: string;
+  plan_id: string;
+  version: number;
+  title: string;
+  content: string;
+  learning_objectives: string | null;
+  created_at: string;
 }
 
 const WELCOME_MESSAGE: ChatMessage = {
@@ -82,7 +92,27 @@ export function PlanDetail() {
   const [editorRatio, setEditorRatio] = useState(0.667); // 2/3 by default
   const containerRef = useRef<HTMLDivElement>(null);
 
+  // Versioning state
+  const [finalizing, setFinalizing] = useState(false);
+  const [versions, setVersions] = useState<PlanVersion[]>([]);
+  const [showVersionHistory, setShowVersionHistory] = useState(false);
+  const [reverting, setReverting] = useState(false);
+  const versionDropdownRef = useRef<HTMLDivElement>(null);
+
   const isNewPlan = planId === "new";
+
+  // Close version dropdown on outside click
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (versionDropdownRef.current && !versionDropdownRef.current.contains(e.target as Node)) {
+        setShowVersionHistory(false);
+      }
+    }
+    if (showVersionHistory) {
+      document.addEventListener("mousedown", handleClickOutside);
+      return () => document.removeEventListener("mousedown", handleClickOutside);
+    }
+  }, [showVersionHistory]);
 
   useEffect(() => {
     async function load() {
@@ -131,6 +161,21 @@ export function PlanDetail() {
     load();
   }, [planId]);
 
+  // Load versions when plan is available
+  const loadVersions = useCallback(async () => {
+    if (!plan) return;
+    try {
+      const v = await invoke<PlanVersion[]>("list_plan_versions", { planId: plan.id });
+      setVersions(v);
+    } catch {
+      // silently fail — versions are non-critical
+    }
+  }, [plan?.id]);
+
+  useEffect(() => {
+    loadVersions();
+  }, [loadVersions]);
+
   const handleEditorUpdate = useCallback(
     async (content: string) => {
       if (!plan) return;
@@ -148,6 +193,40 @@ export function PlanDetail() {
     },
     [plan]
   );
+
+  const handleFinalize = useCallback(async () => {
+    if (!plan || finalizing) return;
+    setFinalizing(true);
+    try {
+      await invoke<PlanVersion>("finalize_plan", { id: plan.id });
+      // Refresh plan and versions
+      const updated = await invoke<LessonPlan>("get_plan", { id: plan.id });
+      setPlan(updated);
+      await loadVersions();
+    } catch (e) {
+      setError(`Failed to finalize: ${e}`);
+    } finally {
+      setFinalizing(false);
+    }
+  }, [plan, finalizing, loadVersions]);
+
+  const handleRevert = useCallback(async (version: number) => {
+    if (!plan || reverting) return;
+    setReverting(true);
+    try {
+      const reverted = await invoke<LessonPlan>("revert_plan_version", {
+        planId: plan.id,
+        version,
+      });
+      setPlan(reverted);
+      setShowVersionHistory(false);
+      await loadVersions();
+    } catch (e) {
+      setError(`Failed to revert: ${e}`);
+    } finally {
+      setReverting(false);
+    }
+  }, [plan, reverting, loadVersions]);
 
   const handleSendMessage = useCallback(
     (content: string) => {
@@ -243,15 +322,103 @@ export function PlanDetail() {
         </div>
         <div className="flex items-center gap-3">
           <SaveIndicator status={saveStatus} />
+
+          {/* Version history dropdown */}
+          <div className="relative" ref={versionDropdownRef}>
+            <button
+              onClick={() => {
+                setShowVersionHistory((v) => !v);
+                loadVersions();
+              }}
+              className="flex items-center gap-1.5 text-xs px-2 py-1 rounded border border-chalk-white/8 bg-chalk-ghost text-chalk-muted hover:text-chalk-white hover:border-chalk-white/15 transition-colors"
+              title="Version history"
+            >
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              {versions.length > 0 ? `v${versions[0].version}` : "v0"}
+            </button>
+
+            <AnimatePresence>
+              {showVersionHistory && (
+                <motion.div
+                  initial={{ opacity: 0, y: -4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  transition={{ duration: 0.15 }}
+                  className="absolute right-0 top-full mt-1 w-72 bg-chalk-board border border-chalk-white/10 rounded-lg shadow-xl z-50 overflow-hidden"
+                >
+                  <div className="px-3 py-2 border-b border-chalk-white/5">
+                    <span className="text-xs font-medium text-chalk-muted">Version History</span>
+                  </div>
+                  {versions.length === 0 ? (
+                    <div className="px-3 py-4 text-center text-xs text-chalk-muted/60">
+                      No versions yet. Click Finalize to save your first version.
+                    </div>
+                  ) : (
+                    <div className="max-h-64 overflow-y-auto">
+                      {versions.map((v) => (
+                        <div
+                          key={v.id}
+                          className="px-3 py-2 border-b border-chalk-white/5 last:border-0 hover:bg-chalk-white/3 transition-colors"
+                        >
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2 min-w-0">
+                              <span className="text-xs font-mono font-medium text-chalk-blue">v{v.version}</span>
+                              <span className="text-xs text-chalk-white/80 truncate">{v.title}</span>
+                            </div>
+                            <button
+                              onClick={() => handleRevert(v.version)}
+                              disabled={reverting}
+                              className="text-[10px] px-1.5 py-0.5 rounded bg-chalk-white/5 text-chalk-muted hover:text-chalk-white hover:bg-chalk-white/10 transition-colors disabled:opacity-50 flex-shrink-0 ml-2"
+                            >
+                              {reverting ? "..." : "Revert"}
+                            </button>
+                          </div>
+                          <div className="text-[10px] text-chalk-muted/50 mt-0.5">
+                            {new Date(v.created_at + "Z").toLocaleString()}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+
+          {/* Status badge */}
           <span
             className={`text-xs px-2 py-0.5 rounded capitalize ${
-              plan.status === "published"
+              plan.status === "finalized"
+                ? "bg-chalk-green/10 text-chalk-green border border-chalk-green/20"
+                : plan.status === "published"
                 ? "bg-chalk-green/10 text-chalk-green border border-chalk-green/20"
                 : "bg-chalk-ghost text-chalk-muted border border-chalk-white/8"
             }`}
           >
             {plan.status}
           </span>
+
+          {/* Finalize button */}
+          <button
+            onClick={handleFinalize}
+            disabled={finalizing}
+            className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md bg-chalk-blue/15 text-chalk-blue border border-chalk-blue/25 hover:bg-chalk-blue/25 hover:border-chalk-blue/40 transition-colors disabled:opacity-50"
+          >
+            {finalizing ? (
+              <motion.div
+                animate={{ rotate: 360 }}
+                transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
+                className="w-3 h-3 border border-chalk-blue/40 border-t-transparent rounded-full"
+              />
+            ) : (
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+              </svg>
+            )}
+            {finalizing ? "Finalizing..." : "Finalize"}
+          </button>
         </div>
       </div>
 
