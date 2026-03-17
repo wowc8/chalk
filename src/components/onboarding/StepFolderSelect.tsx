@@ -178,17 +178,53 @@ export function StepFolderSelect({ onNext, onBack, setError }: Props) {
               ? "No items in this folder."
               : "No folders or documents found in your Drive."}
           </p>
-          <motion.button
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.95 }}
-            onClick={() => loadItems(currentParentId)}
-            className="px-4 py-2 border border-bat-cyan rounded-lg text-bat-cyan hover:bg-bat-cyan/10 transition-colors"
-          >
-            Refresh
-          </motion.button>
+          <div className="flex gap-3 justify-center">
+            {breadcrumb.length > 1 && (
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={() => handleBreadcrumbNav(breadcrumb.length - 2)}
+                className="px-4 py-2 border border-gray-600 rounded-lg text-gray-400 hover:text-white hover:border-gray-400 transition-colors"
+              >
+                Go Up
+              </motion.button>
+            )}
+            <motion.button
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={() => loadItems(currentParentId)}
+              className="px-4 py-2 border border-bat-cyan rounded-lg text-bat-cyan hover:bg-bat-cyan/10 transition-colors"
+            >
+              Refresh
+            </motion.button>
+          </div>
         </div>
       ) : (
         <div className="max-h-64 overflow-y-auto overflow-x-hidden mb-6 space-y-1 pr-1 scrollbar-thin scrollbar-thumb-bat-purple/40">
+          {/* Up row when inside a subfolder */}
+          {breadcrumb.length > 1 && (
+            <motion.button
+              whileHover={{ x: 4 }}
+              onClick={() => handleBreadcrumbNav(breadcrumb.length - 2)}
+              className="w-full flex items-center gap-3 px-4 py-3 rounded-lg text-left transition-colors bg-bat-charcoal/50 border border-transparent hover:bg-bat-charcoal"
+            >
+              <svg
+                className="w-5 h-5 flex-shrink-0 text-gray-500"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M15 19l-7-7 7-7"
+                />
+              </svg>
+              <span className="text-gray-400">..</span>
+            </motion.button>
+          )}
+
           {/* Folders first */}
           {folders.map((item) => (
             <motion.button
