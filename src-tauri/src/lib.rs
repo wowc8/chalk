@@ -5,6 +5,7 @@ pub mod database;
 pub mod errors;
 pub mod events;
 pub mod feature_flags;
+pub mod library;
 mod logging;
 pub mod privacy;
 pub mod safety;
@@ -284,6 +285,16 @@ pub fn run() {
             cache_get,
             cache_clear,
             cache_stats,
+            library::create_tag,
+            library::list_tags,
+            library::update_tag,
+            library::delete_tag,
+            library::add_tag_to_plan,
+            library::remove_tag_from_plan,
+            library::get_tags_for_plan,
+            library::list_library_plans,
+            library::create_plan,
+            library::delete_plan,
         ])
         .setup(|app| {
             // Start periodic update checker only in release builds.

@@ -141,6 +141,14 @@ fn embedded_migrations() -> Vec<Migration> {
                 include_str!("../../migrations/003_app_settings.down.sql").to_string(),
             ),
         },
+        Migration {
+            version: 4,
+            description: "tags_and_library".to_string(),
+            up_sql: include_str!("../../migrations/004_tags_and_library.up.sql").to_string(),
+            down_sql: Some(
+                include_str!("../../migrations/004_tags_and_library.down.sql").to_string(),
+            ),
+        },
     ]
 }
 
@@ -303,19 +311,21 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
     }
 
     #[test]
     fn test_embedded_migrations_match_file_count() {
         let migrations = embedded_migrations();
-        assert_eq!(migrations.len(), 3);
+        assert_eq!(migrations.len(), 4);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(migrations[0].description, "initial_schema");
         assert_eq!(migrations[1].version, 2);
         assert_eq!(migrations[1].description, "vector_tables");
         assert_eq!(migrations[2].version, 3);
         assert_eq!(migrations[2].description, "app_settings");
+        assert_eq!(migrations[3].version, 4);
+        assert_eq!(migrations[3].description, "tags_and_library");
     }
 
     #[test]
@@ -474,7 +484,7 @@ mod tests {
         let migrations =
             discover_migrations(Path::new("/nonexistent/migrations/dir")).unwrap();
         // Falls back to embedded migrations.
-        assert_eq!(migrations.len(), 3);
+        assert_eq!(migrations.len(), 4);
     }
 
     #[test]

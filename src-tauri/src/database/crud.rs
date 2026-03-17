@@ -269,6 +269,231 @@ impl Database {
         })
     }
 
+    // ── Tags ──────────────────────────────────────────────────
+
+    pub fn create_tag(&self, input: &NewTag) -> Result<Tag> {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO tags (id, name, color) VALUES (?1, ?2, ?3)",
+                params![id, input.name, input.color],
+            )?;
+            conn.query_row(
+                "SELECT id, name, color, created_at FROM tags WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok(Tag {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        color: row.get(2)?,
+                        created_at: row.get(3)?,
+                    })
+                },
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound,
+                other => DatabaseError::Sqlite(other),
+            })
+        })
+    }
+
+    pub fn list_tags(&self) -> Result<Vec<Tag>> {
+        self.with_conn(|conn| {
+            let mut stmt =
+                conn.prepare("SELECT id, name, color, created_at FROM tags ORDER BY name")?;
+            let rows = stmt.query_map([], |row| {
+                Ok(Tag {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    color: row.get(2)?,
+                    created_at: row.get(3)?,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    pub fn update_tag(&self, id: &str, input: &NewTag) -> Result<Tag> {
+        self.with_conn(|conn| {
+            let updated = conn.execute(
+                "UPDATE tags SET name = ?1, color = ?2 WHERE id = ?3",
+                params![input.name, input.color, id],
+            )?;
+            if updated == 0 {
+                return Err(DatabaseError::NotFound);
+            }
+            conn.query_row(
+                "SELECT id, name, color, created_at FROM tags WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok(Tag {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        color: row.get(2)?,
+                        created_at: row.get(3)?,
+                    })
+                },
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound,
+                other => DatabaseError::Sqlite(other),
+            })
+        })
+    }
+
+    pub fn delete_tag(&self, id: &str) -> Result<()> {
+        self.with_conn(|conn| {
+            let deleted = conn.execute("DELETE FROM tags WHERE id = ?1", params![id])?;
+            if deleted == 0 {
+                return Err(DatabaseError::NotFound);
+            }
+            Ok(())
+        })
+    }
+
+    // ── Plan-Tag associations ────────────────────────────────
+
+    pub fn add_tag_to_plan(&self, plan_id: &str, tag_id: &str) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT OR IGNORE INTO plan_tags (plan_id, tag_id) VALUES (?1, ?2)",
+                params![plan_id, tag_id],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn remove_tag_from_plan(&self, plan_id: &str, tag_id: &str) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "DELETE FROM plan_tags WHERE plan_id = ?1 AND tag_id = ?2",
+                params![plan_id, tag_id],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn get_tags_for_plan(&self, plan_id: &str) -> Result<Vec<Tag>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT t.id, t.name, t.color, t.created_at
+                 FROM tags t
+                 INNER JOIN plan_tags pt ON pt.tag_id = t.id
+                 WHERE pt.plan_id = ?1
+                 ORDER BY t.name",
+            )?;
+            let rows = stmt.query_map(params![plan_id], |row| {
+                Ok(Tag {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    color: row.get(2)?,
+                    created_at: row.get(3)?,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    // ── Library queries ──────────────────────────────────────
+
+    pub fn list_library_plans(&self, query: &LibraryQuery) -> Result<Vec<LibraryPlanCard>> {
+        self.with_conn(|conn| {
+            let mut sql = String::from(
+                "SELECT DISTINCT lp.id, lp.title, lp.status, lp.source_type, lp.version, lp.created_at, lp.updated_at
+                 FROM lesson_plans lp",
+            );
+            let mut conditions: Vec<String> = Vec::new();
+            let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+            let mut param_index = 1;
+
+            // Filter by tag_ids (join with plan_tags)
+            if let Some(tag_ids) = &query.tag_ids {
+                if !tag_ids.is_empty() {
+                    sql.push_str(" INNER JOIN plan_tags pt ON pt.plan_id = lp.id");
+                    let placeholders: Vec<String> = tag_ids
+                        .iter()
+                        .map(|_| {
+                            let p = format!("?{}", param_index);
+                            param_index += 1;
+                            p
+                        })
+                        .collect();
+                    conditions.push(format!("pt.tag_id IN ({})", placeholders.join(", ")));
+                    for tag_id in tag_ids {
+                        param_values.push(Box::new(tag_id.clone()));
+                    }
+                }
+            }
+
+            // Filter by source_type
+            if let Some(source_type) = &query.source_type {
+                conditions.push(format!("lp.source_type = ?{}", param_index));
+                param_index += 1;
+                param_values.push(Box::new(source_type.clone()));
+            }
+
+            // Search by title
+            if let Some(search) = &query.search {
+                if !search.is_empty() {
+                    conditions.push(format!("lp.title LIKE ?{}", param_index));
+                    param_index += 1;
+                    param_values.push(Box::new(format!("%{}%", search)));
+                }
+            }
+
+            let _ = param_index; // suppress unused warning
+
+            if !conditions.is_empty() {
+                sql.push_str(" WHERE ");
+                sql.push_str(&conditions.join(" AND "));
+            }
+
+            sql.push_str(" ORDER BY lp.updated_at DESC");
+
+            let mut stmt = conn.prepare(&sql)?;
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                param_values.iter().map(|p| p.as_ref()).collect();
+
+            let rows = stmt.query_map(param_refs.as_slice(), |row| {
+                Ok(LibraryPlanCard {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    status: row.get(2)?,
+                    source_type: row.get(3)?,
+                    version: row.get(4)?,
+                    tags: Vec::new(), // populated below
+                    created_at: row.get(5)?,
+                    updated_at: row.get(6)?,
+                })
+            })?;
+
+            let mut plans: Vec<LibraryPlanCard> =
+                rows.collect::<std::result::Result<Vec<_>, _>>()?;
+
+            // Fetch tags for each plan
+            for plan in &mut plans {
+                let mut tag_stmt = conn.prepare(
+                    "SELECT t.id, t.name, t.color, t.created_at
+                     FROM tags t
+                     INNER JOIN plan_tags pt ON pt.tag_id = t.id
+                     WHERE pt.plan_id = ?1
+                     ORDER BY t.name",
+                )?;
+                let tag_rows = tag_stmt.query_map(params![plan.id], |row| {
+                    Ok(Tag {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        color: row.get(2)?,
+                        created_at: row.get(3)?,
+                    })
+                })?;
+                plan.tags = tag_rows.collect::<std::result::Result<Vec<_>, _>>()?;
+            }
+
+            Ok(plans)
+        })
+    }
+
     // ── App Settings ──────────────────────────────────────────
 
     pub fn get_setting(&self, key: &str) -> Result<Option<String>> {

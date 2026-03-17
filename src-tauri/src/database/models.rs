@@ -66,3 +66,42 @@ pub struct VectorSearchResult {
     pub lesson_plan_id: String,
     pub distance: f64,
 }
+
+// ── Tags ─────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Tag {
+    pub id: String,
+    pub name: String,
+    pub color: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NewTag {
+    pub name: String,
+    pub color: Option<String>,
+}
+
+// ── Library ──────────────────────────────────────────────────
+
+/// A lesson plan card for the Library view, enriched with tags.
+#[derive(Debug, Clone, Serialize)]
+pub struct LibraryPlanCard {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub source_type: String,
+    pub version: i32,
+    pub tags: Vec<Tag>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Query parameters for listing library plans.
+#[derive(Debug, Deserialize)]
+pub struct LibraryQuery {
+    pub source_type: Option<String>,
+    pub search: Option<String>,
+    pub tag_ids: Option<Vec<String>>,
+}
