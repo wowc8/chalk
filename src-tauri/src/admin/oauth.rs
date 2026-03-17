@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use tauri::State;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tracing::info;
 
 use crate::connectors::google_drive::{self, DriveFolder, DriveItem, GoogleDriveConnector, OAuthConfig};
@@ -186,6 +188,160 @@ pub async fn handle_oauth_callback(
 
     info!("OAuth callback handled, tokens stored");
     Ok("Authentication successful".into())
+}
+
+/// Parse a query string parameter from a raw HTTP request line.
+fn parse_query_param<'a>(request_line: &'a str, param: &str) -> Option<&'a str> {
+    let query_start = request_line.find('?')?;
+    let query_end = request_line[query_start..].find(' ').map(|i| query_start + i).unwrap_or(request_line.len());
+    let query = &request_line[query_start + 1..query_end];
+    for pair in query.split('&') {
+        if let Some((key, value)) = pair.split_once('=') {
+            if key == param {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+/// Complete OAuth flow: start a local server, open the browser, capture the
+/// callback code automatically, and exchange it for tokens.
+#[tauri::command]
+pub async fn start_oauth_flow(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    // 1. Bind to a random available port on localhost.
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| format!("Failed to start local OAuth server: {e}"))?;
+    let local_port = listener
+        .local_addr()
+        .map_err(|e| format!("Failed to get local address: {e}"))?
+        .port();
+    let redirect_uri = format!("http://127.0.0.1:{local_port}");
+
+    info!(port = local_port, "OAuth callback server listening");
+
+    // 2. Build the authorization URL with the dynamic redirect_uri.
+    let (mut config, token_file, _) = get_gd_exchange_params(&state)?;
+    if config.client_id.is_empty() {
+        return Err("OAuth not configured — set client_id and client_secret first".into());
+    }
+    config.redirect_uri = redirect_uri.clone();
+
+    let scopes = config.scopes.join(" ");
+    let mut url = format!(
+        "https://accounts.google.com/o/oauth2/v2/auth?\
+         client_id={}&redirect_uri={}&response_type=code&\
+         scope={}&access_type=offline&prompt=consent",
+        config.client_id, redirect_uri, scopes
+    );
+
+    // Generate PKCE params when using embedded credentials or no secret.
+    let pkce_verifier = if config.client_secret.is_empty() {
+        let verifier = google_drive::generate_code_verifier();
+        let challenge = google_drive::generate_code_challenge(&verifier);
+        url.push_str(&format!(
+            "&code_challenge={}&code_challenge_method=S256",
+            challenge
+        ));
+        Some(verifier)
+    } else {
+        None
+    };
+
+    // 3. Open the authorization URL in the system browser.
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_url(&url, None::<&str>)
+        .map_err(|e| format!("Failed to open browser: {e}"))?;
+
+    // 4. Wait for the callback (with a 2-minute timeout).
+    let (stream, _addr) = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        listener.accept(),
+    )
+    .await
+    .map_err(|_| "OAuth timed out — no response received within 2 minutes".to_string())?
+    .map_err(|e| format!("Failed to accept callback connection: {e}"))?;
+
+    let (mut reader, mut writer) = tokio::io::split(stream);
+
+    // 5. Read the HTTP request to extract the authorization code.
+    let mut buf = vec![0u8; 4096];
+    let n = reader
+        .read(&mut buf)
+        .await
+        .map_err(|e| format!("Failed to read callback request: {e}"))?;
+    let request = String::from_utf8_lossy(&buf[..n]);
+
+    // Extract the first line: "GET /path?query HTTP/1.1"
+    let request_line = request.lines().next().unwrap_or("");
+
+    let code = parse_query_param(request_line, "code")
+        .ok_or_else(|| {
+            // Check for an error parameter from Google.
+            let error = parse_query_param(request_line, "error")
+                .unwrap_or("unknown");
+            format!("OAuth denied or failed: {error}")
+        })?
+        .to_string();
+
+    // URL-decode the code (replace %XX sequences).
+    let code = percent_decode(&code);
+
+    // 6. Send a success response page to the browser.
+    let response_body = r#"<!DOCTYPE html>
+<html><head><title>Chalk — Sign-in Complete</title>
+<style>body{font-family:system-ui,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:#1a1a2e;color:#e0e0e0}
+.card{text-align:center;padding:2rem;border-radius:12px;background:#16213e;border:1px solid rgba(255,255,255,0.08)}
+h1{margin:0 0 .5rem;font-size:1.5rem;color:#4fc3f7}p{margin:0;color:#aaa;font-size:.9rem}</style></head>
+<body><div class="card"><h1>Sign-in complete</h1><p>You can close this tab and return to Chalk.</p></div></body></html>"#;
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        response_body.len(),
+        response_body
+    );
+    let _ = writer.write_all(response.as_bytes()).await;
+    let _ = writer.shutdown().await;
+
+    // 7. Exchange the authorization code for tokens.
+    google_drive::exchange_code(&config, &code, &token_file, pkce_verifier.as_deref())
+        .await
+        .map_err(|e| format!("Token exchange failed: {e}"))?;
+
+    // 8. Update onboarding status.
+    let mut status = load_onboarding_status(&state.data_dir);
+    status.oauth_configured = true;
+    status.tokens_stored = true;
+    save_onboarding_status(&state.data_dir, &status)?;
+
+    info!("OAuth flow completed automatically via localhost callback");
+    Ok("Authentication successful".into())
+}
+
+/// Simple percent-decoding for URL query values.
+fn percent_decode(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.chars();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let hex: String = chars.by_ref().take(2).collect();
+            if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                result.push(byte as char);
+            } else {
+                result.push('%');
+                result.push_str(&hex);
+            }
+        } else if c == '+' {
+            result.push(' ');
+        } else {
+            result.push(c);
+        }
+    }
+    result
 }
 
 #[tauri::command]
@@ -561,6 +717,47 @@ mod tests {
         assert!(!status.initial_shred_complete);
         assert!(status.selected_folder_id.is_none());
         assert!(status.selected_folder_name.is_none());
+    }
+
+    #[test]
+    fn test_parse_query_param_extracts_code() {
+        let line = "GET /?code=4/0AQ_abc123&scope=read HTTP/1.1";
+        assert_eq!(parse_query_param(line, "code"), Some("4/0AQ_abc123"));
+        assert_eq!(parse_query_param(line, "scope"), Some("read"));
+        assert_eq!(parse_query_param(line, "missing"), None);
+    }
+
+    #[test]
+    fn test_parse_query_param_extracts_error() {
+        let line = "GET /?error=access_denied HTTP/1.1";
+        assert_eq!(parse_query_param(line, "error"), Some("access_denied"));
+        assert_eq!(parse_query_param(line, "code"), None);
+    }
+
+    #[test]
+    fn test_parse_query_param_no_query_string() {
+        let line = "GET / HTTP/1.1";
+        assert_eq!(parse_query_param(line, "code"), None);
+    }
+
+    #[test]
+    fn test_percent_decode_basic() {
+        assert_eq!(percent_decode("hello%20world"), "hello world");
+        assert_eq!(percent_decode("4%2F0AQ_abc"), "4/0AQ_abc");
+        assert_eq!(percent_decode("no+encoding+here"), "no encoding here");
+        assert_eq!(percent_decode("plain"), "plain");
+    }
+
+    #[test]
+    fn test_percent_decode_empty() {
+        assert_eq!(percent_decode(""), "");
+    }
+
+    #[test]
+    fn test_percent_decode_special_chars() {
+        assert_eq!(percent_decode("%3D"), "=");
+        assert_eq!(percent_decode("%26"), "&");
+        assert_eq!(percent_decode("a%2Fb%2Fc"), "a/b/c");
     }
 
     #[test]

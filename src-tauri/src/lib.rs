@@ -265,6 +265,7 @@ pub fn run() {
             admin::oauth::save_oauth_config,
             admin::oauth::get_authorization_url,
             admin::oauth::handle_oauth_callback,
+            admin::oauth::start_oauth_flow,
             admin::oauth::test_folder_permissions_command,
             admin::oauth::check_onboarding_status,
             admin::oauth::list_drive_folders,
