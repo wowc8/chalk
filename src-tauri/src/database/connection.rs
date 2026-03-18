@@ -5,6 +5,40 @@ use std::sync::Mutex;
 
 use super::migrations;
 
+/// A cancellation token backed by an `AtomicBool`.
+///
+/// Shared between the digest task and the `cancel_digest` Tauri command so the
+/// backend can stop processing when the user clicks Cancel/Back.
+#[derive(Debug, Clone)]
+pub struct CancellationToken {
+    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl CancellationToken {
+    pub fn new() -> Self {
+        Self {
+            flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    /// Signal cancellation.
+    pub fn cancel(&self) {
+        self.flag
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Check whether cancellation has been requested.
+    pub fn is_cancelled(&self) -> bool {
+        self.flag.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Default for CancellationToken {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum DatabaseError {
     #[error("SQLite error: {0}")]
@@ -95,6 +129,26 @@ impl Database {
             ))
         })?;
         f(&conn)
+    }
+
+    /// Execute a closure inside an explicit SQLite transaction.
+    ///
+    /// The transaction is committed only if the closure returns `Ok`. On `Err`
+    /// or panic the transaction is rolled back automatically by `rusqlite`.
+    pub fn with_transaction<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&rusqlite::Transaction<'_>) -> Result<T>,
+    {
+        let mut conn = self.conn.lock().map_err(|_| {
+            DatabaseError::Sqlite(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                Some("Mutex poisoned".to_string()),
+            ))
+        })?;
+        let tx = conn.transaction().map_err(DatabaseError::Sqlite)?;
+        let result = f(&tx)?;
+        tx.commit().map_err(DatabaseError::Sqlite)?;
+        Ok(result)
     }
 
     fn run_migrations(&self) -> Result<()> {

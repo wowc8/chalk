@@ -129,13 +129,20 @@ export function StepInitialDigest({
     }
   };
 
-  const handleCancel = () => {
+  const handleCancel = async () => {
     cancelledRef.current = true;
     stopProgressSimulation();
     setScanState("idle");
     setProcessing(false);
     setError(null);
     setErrorDetail(null);
+
+    // Signal the backend to stop processing and roll back.
+    try {
+      await invoke("cancel_digest");
+    } catch {
+      // Best-effort — if the backend already finished, this is a no-op.
+    }
   };
 
   return (

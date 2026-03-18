@@ -456,6 +456,16 @@ pub async fn select_single_document(
 }
 
 #[tauri::command]
+pub async fn cancel_digest(
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let cancel = state.digest_cancel.lock().map_err(|e| e.to_string())?;
+    cancel.cancel();
+    info!("Digest cancellation requested by user");
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn trigger_initial_digest(
     state: State<'_, AppState>,
 ) -> Result<String, String> {
@@ -477,8 +487,15 @@ pub async fn trigger_initial_digest(
         .await
         .map_err(|e| e.to_string())?;
 
-    // Digest all documents in the selected folder.
-    let summary = crate::digest::digest_folder(&state.db, &access_token, &folder_id)
+    // Reset and grab the cancellation token for this run.
+    let cancel = {
+        let mut guard = state.digest_cancel.lock().map_err(|e| e.to_string())?;
+        *guard = crate::database::CancellationToken::new();
+        guard.clone()
+    };
+
+    // Digest all documents in the selected folder (transactional).
+    let summary = crate::digest::digest_folder(&state.db, &access_token, &folder_id, &cancel)
         .await
         .map_err(|e| e.to_string())?;
 

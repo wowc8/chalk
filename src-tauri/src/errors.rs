@@ -43,6 +43,7 @@ pub enum ErrorCode {
     // Digest
     DigestParseFailed,
     DigestNoTables,
+    DigestCancelled,
 
     // RAG / Chat
     RagEmbeddingFailed,

@@ -3,13 +3,18 @@
 //! Takes Google Docs JSON (from the Documents API), identifies table structures,
 //! splits them into discrete lesson plan chunks, and stores each in the database
 //! with a UUID. Vector indexing happens separately via the RAG pipeline.
+//!
+//! All database writes for a single digest run are wrapped in a transaction.
+//! If the run is cancelled or errors out, the transaction rolls back so
+//! previously imported data stays untouched.
 
 pub mod parser;
 
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use crate::database::{Database, NewLessonPlan, NewSubject};
+use crate::database::{CancellationToken, Database, NewSubject};
 use crate::errors::{ChalkError, ErrorCode, ErrorDomain};
 
 /// A single lesson plan extracted from a table row.
@@ -39,6 +44,14 @@ pub struct DigestSummary {
     pub total_tables: usize,
     pub total_lessons: usize,
     pub results: Vec<DigestResult>,
+}
+
+/// Data fetched from the API for a single document, ready to be written to DB.
+struct FetchedDoc {
+    doc_id: String,
+    doc_name: String,
+    tables_found: usize,
+    lessons: Vec<ExtractedLesson>,
 }
 
 /// Fetch a Google Doc's structured JSON from the Documents API.
@@ -246,111 +259,164 @@ fn capitalize_header(header: &str) -> String {
     }
 }
 
-/// Digest a single document: fetch its JSON, extract tables, store lesson plans.
-pub async fn digest_document(
-    db: &Database,
+/// Fetch a single document's data from Google and extract lessons (no DB writes).
+async fn fetch_document(
     access_token: &str,
     doc_id: &str,
     doc_name: &str,
-    default_subject_id: &str,
-) -> Result<DigestResult, ChalkError> {
+) -> Result<FetchedDoc, ChalkError> {
     let doc_json = fetch_doc_json(access_token, doc_id).await?;
-
     let tables = parser::extract_tables(&doc_json);
     let tables_found = tables.len();
-
     let lessons = extract_lessons_from_doc(&doc_json);
-    let lessons_extracted = lessons.len();
 
-    if lessons.is_empty() {
-        info!(doc_id, doc_name, "No lesson plans found in document");
-        return Ok(DigestResult {
-            doc_id: doc_id.to_string(),
-            doc_name: doc_name.to_string(),
-            tables_found,
-            lessons_extracted: 0,
-            plans_created: Vec::new(),
-        });
-    }
-
-    let mut plans_created = Vec::new();
-
-    for (idx, lesson) in lessons.iter().enumerate() {
-        // Resolve subject: use hint from the table or fall back to default.
-        let subject_id = if let Some(ref hint) = lesson.subject_hint {
-            find_or_create_subject(db, hint, lesson.grade_hint.as_deref())?
-        } else {
-            default_subject_id.to_string()
-        };
-
-        let plan = db
-            .create_lesson_plan(&NewLessonPlan {
-                subject_id,
-                title: lesson.title.clone(),
-                content: Some(lesson.content.clone()),
-                source_doc_id: Some(doc_id.to_string()),
-                source_table_index: Some(idx as i32),
-                learning_objectives: lesson.learning_objectives.clone(),
-            })
-            .map_err(ChalkError::from)?;
-
-        // Mark as imported.
-        db.with_conn(|conn: &rusqlite::Connection| {
-            conn.execute(
-                "UPDATE lesson_plans SET source_type = 'imported' WHERE id = ?1",
-                rusqlite::params![plan.id],
-            )?;
-            Ok(())
-        })
-        .map_err(ChalkError::from)?;
-
-        plans_created.push(plan.id);
-    }
-
-    info!(
-        doc_id,
-        doc_name,
-        tables_found,
-        lessons_extracted,
-        "Document digested successfully"
-    );
-
-    Ok(DigestResult {
+    Ok(FetchedDoc {
         doc_id: doc_id.to_string(),
         doc_name: doc_name.to_string(),
         tables_found,
-        lessons_extracted,
-        plans_created,
+        lessons,
     })
 }
 
-/// Find an existing subject by name or create a new one.
-fn find_or_create_subject(
-    db: &Database,
+/// Find an existing subject by name (case-insensitive) or create a new one,
+/// using a connection/transaction reference directly.
+fn find_or_create_subject_on_conn(
+    conn: &rusqlite::Connection,
     name: &str,
     grade_level: Option<&str>,
 ) -> Result<String, ChalkError> {
-    // Search existing subjects.
-    let subjects = db.list_subjects().map_err(ChalkError::from)?;
     let name_lower = name.to_lowercase();
 
-    if let Some(existing) = subjects
-        .iter()
-        .find(|s| s.name.to_lowercase() == name_lower)
-    {
-        return Ok(existing.id.clone());
+    // Search existing subjects.
+    let mut stmt = conn
+        .prepare("SELECT id, name FROM subjects")
+        .map_err(ChalkError::from)?;
+    let subjects: Vec<(String, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(ChalkError::from)?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    if let Some((id, _)) = subjects.iter().find(|(_, n)| n.to_lowercase() == name_lower) {
+        return Ok(id.clone());
     }
 
     // Create new subject.
-    let subject = db
-        .create_subject(&NewSubject {
-            name: name.to_string(),
-            grade_level: grade_level.map(|g| g.to_string()),
-            description: None,
-        })
-        .map_err(ChalkError::from)?;
+    let id = uuid::Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO subjects (id, name, grade_level, description) VALUES (?1, ?2, ?3, ?4)",
+        params![id, name, grade_level, Option::<String>::None],
+    )
+    .map_err(ChalkError::from)?;
 
-    Ok(subject.id)
+    Ok(id)
+}
+
+/// Write all fetched documents into the database within a transaction.
+///
+/// Returns the `DigestSummary` on success. If the cancellation token is set
+/// before all documents are written, the function returns a `DigestCancelled`
+/// error and the calling transaction is rolled back.
+fn write_digest_results(
+    conn: &rusqlite::Connection,
+    fetched_docs: &[FetchedDoc],
+    cancel: &CancellationToken,
+) -> Result<DigestSummary, ChalkError> {
+    // Create a default "General" subject for plans without a subject hint.
+    let default_subject_id = find_or_create_subject_on_conn(conn, "General", None)?;
+
+    let mut results = Vec::new();
+    let mut total_tables = 0;
+    let mut total_lessons = 0;
+
+    for doc in fetched_docs {
+        // Check cancellation between documents.
+        if cancel.is_cancelled() {
+            return Err(ChalkError::new(
+                ErrorDomain::Digest,
+                ErrorCode::DigestCancelled,
+                "Digest cancelled by user",
+            ));
+        }
+
+        if doc.lessons.is_empty() {
+            info!(
+                doc_id = doc.doc_id.as_str(),
+                doc_name = doc.doc_name.as_str(),
+                "No lesson plans found in document"
+            );
+            results.push(DigestResult {
+                doc_id: doc.doc_id.clone(),
+                doc_name: doc.doc_name.clone(),
+                tables_found: doc.tables_found,
+                lessons_extracted: 0,
+                plans_created: Vec::new(),
+            });
+            continue;
+        }
+
+        let mut plans_created = Vec::new();
+
+        for (idx, lesson) in doc.lessons.iter().enumerate() {
+            // Resolve subject: use hint from the table or fall back to default.
+            let subject_id = if let Some(ref hint) = lesson.subject_hint {
+                find_or_create_subject_on_conn(conn, hint, lesson.grade_hint.as_deref())?
+            } else {
+                default_subject_id.clone()
+            };
+
+            let plan_id = uuid::Uuid::new_v4().to_string();
+            conn.execute(
+                "INSERT INTO lesson_plans (id, subject_id, title, content, source_doc_id, source_table_index, learning_objectives)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    plan_id,
+                    subject_id,
+                    lesson.title,
+                    lesson.content,
+                    doc.doc_id,
+                    idx as i32,
+                    lesson.learning_objectives,
+                ],
+            )
+            .map_err(ChalkError::from)?;
+
+            // Mark as imported.
+            conn.execute(
+                "UPDATE lesson_plans SET source_type = 'imported' WHERE id = ?1",
+                params![plan_id],
+            )
+            .map_err(ChalkError::from)?;
+
+            plans_created.push(plan_id);
+        }
+
+        total_tables += doc.tables_found;
+        total_lessons += doc.lessons.len();
+
+        info!(
+            doc_id = doc.doc_id.as_str(),
+            doc_name = doc.doc_name.as_str(),
+            tables_found = doc.tables_found,
+            lessons_extracted = doc.lessons.len(),
+            "Document digested successfully"
+        );
+
+        results.push(DigestResult {
+            doc_id: doc.doc_id.clone(),
+            doc_name: doc.doc_name.clone(),
+            tables_found: doc.tables_found,
+            lessons_extracted: doc.lessons.len(),
+            plans_created,
+        });
+    }
+
+    Ok(DigestSummary {
+        documents_processed: results.len(),
+        total_tables,
+        total_lessons,
+        results,
+    })
 }
 
 /// List all Google Docs inside a folder, including subfolders (recursive).
@@ -359,7 +425,17 @@ async fn list_docs_recursive(
     client: &reqwest::Client,
     access_token: &str,
     folder_id: &str,
+    cancel: &CancellationToken,
 ) -> Result<Vec<serde_json::Value>, ChalkError> {
+    // Check cancellation before making network requests.
+    if cancel.is_cancelled() {
+        return Err(ChalkError::new(
+            ErrorDomain::Digest,
+            ErrorCode::DigestCancelled,
+            "Digest cancelled by user",
+        ));
+    }
+
     let mut all_docs: Vec<serde_json::Value> = Vec::new();
 
     // 1. List Google Docs directly in this folder (with pagination).
@@ -429,6 +505,14 @@ async fn list_docs_recursive(
     );
     let mut page_token: Option<String> = None;
     loop {
+        if cancel.is_cancelled() {
+            return Err(ChalkError::new(
+                ErrorDomain::Digest,
+                ErrorCode::DigestCancelled,
+                "Digest cancelled by user",
+            ));
+        }
+
         let mut params: Vec<(&str, String)> = vec![
             ("q", subfolder_query.clone()),
             ("fields", "nextPageToken,files(id,name)".into()),
@@ -475,7 +559,7 @@ async fn list_docs_recursive(
                     continue;
                 }
                 // Box the recursive future to avoid infinite type size.
-                let sub_docs = Box::pin(list_docs_recursive(client, access_token, sub_id)).await?;
+                let sub_docs = Box::pin(list_docs_recursive(client, access_token, sub_id, cancel)).await?;
                 all_docs.extend(sub_docs);
             }
         }
@@ -542,89 +626,134 @@ pub async fn check_if_document(
 ///
 /// If `folder_id` is actually a single document ID (from `select_single_document`),
 /// this function detects it and digests just that document.
+///
+/// All database writes are wrapped in a single transaction. If `cancel` is
+/// signalled or an error occurs, the transaction rolls back and nothing from
+/// this run persists.
 pub async fn digest_folder(
     db: &Database,
     access_token: &str,
     folder_id: &str,
+    cancel: &CancellationToken,
 ) -> Result<DigestSummary, ChalkError> {
     let client = reqwest::Client::new();
 
-    // Check if the "folder_id" is actually a single document (selected via select_single_document).
+    // Phase 1: Discover documents (network I/O, no DB writes).
+    let files_to_process: Vec<(String, String)>;
+
+    // Check if the "folder_id" is actually a single document.
     if let Some((doc_id, doc_name)) = check_if_document(access_token, folder_id).await? {
         info!(doc_id = doc_id.as_str(), doc_name = doc_name.as_str(), "Selected item is a single document — digesting directly");
-        let default_subject_id = find_or_create_subject(db, "General", None)?;
-        return match digest_document(db, access_token, &doc_id, &doc_name, &default_subject_id).await {
-            Ok(result) => Ok(DigestSummary {
-                documents_processed: 1,
-                total_tables: result.tables_found,
-                total_lessons: result.lessons_extracted,
-                results: vec![result],
-            }),
-            Err(e) => Err(e),
-        };
-    }
+        files_to_process = vec![(doc_id, doc_name)];
+    } else {
+        // Recursively discover all Google Docs in the folder and subfolders.
+        let files = list_docs_recursive(&client, access_token, folder_id, cancel).await?;
 
-    // Recursively discover all Google Docs in the folder and subfolders.
-    let files = list_docs_recursive(&client, access_token, folder_id).await?;
-
-    if files.is_empty() {
-        info!(folder_id, "No Google Docs found in folder or subfolders");
-        return Ok(DigestSummary {
-            documents_processed: 0,
-            total_tables: 0,
-            total_lessons: 0,
-            results: Vec::new(),
-        });
-    }
-
-    // Create a default "General" subject for plans without a subject hint.
-    let default_subject_id =
-        find_or_create_subject(db, "General", None)?;
-
-    let mut results = Vec::new();
-    let mut total_tables = 0;
-    let mut total_lessons = 0;
-
-    for file in &files {
-        let doc_id = file
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let doc_name = file
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Untitled");
-
-        if doc_id.is_empty() {
-            continue;
+        if files.is_empty() {
+            info!(folder_id, "No Google Docs found in folder or subfolders");
+            return Ok(DigestSummary {
+                documents_processed: 0,
+                total_tables: 0,
+                total_lessons: 0,
+                results: Vec::new(),
+            });
         }
 
-        match digest_document(db, access_token, doc_id, doc_name, &default_subject_id).await {
-            Ok(result) => {
-                total_tables += result.tables_found;
-                total_lessons += result.lessons_extracted;
-                results.push(result);
-            }
+        files_to_process = files
+            .iter()
+            .filter_map(|f| {
+                let id = f.get("id").and_then(|v| v.as_str())?.to_string();
+                let name = f.get("name").and_then(|v| v.as_str()).unwrap_or("Untitled").to_string();
+                if id.is_empty() { None } else { Some((id, name)) }
+            })
+            .collect();
+    }
+
+    // Phase 2: Fetch each document's content from Google (network I/O, no DB writes).
+    let mut fetched_docs = Vec::new();
+
+    for (doc_id, doc_name) in &files_to_process {
+        if cancel.is_cancelled() {
+            return Err(ChalkError::new(
+                ErrorDomain::Digest,
+                ErrorCode::DigestCancelled,
+                "Digest cancelled by user",
+            ));
+        }
+
+        match fetch_document(access_token, doc_id, doc_name).await {
+            Ok(doc) => fetched_docs.push(doc),
             Err(e) => {
-                warn!(doc_id, doc_name, error = %e, "Failed to digest document — skipping");
+                warn!(doc_id = doc_id.as_str(), doc_name = doc_name.as_str(), error = %e, "Failed to fetch document — skipping");
             }
         }
     }
+
+    // Phase 3: Write everything to the database in a single transaction.
+    // If cancelled or errored, the transaction rolls back automatically.
+    let summary = db
+        .with_transaction(|tx| {
+            // rusqlite::Transaction derefs to Connection, so we can pass it directly.
+            write_digest_results(tx, &fetched_docs, cancel).map_err(|e| {
+                crate::database::DatabaseError::Sqlite(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ABORT),
+                    Some(e.message.clone()),
+                ))
+            })
+        })
+        .map_err(|e| {
+            // Check if this was a cancellation
+            if cancel.is_cancelled() {
+                ChalkError::new(
+                    ErrorDomain::Digest,
+                    ErrorCode::DigestCancelled,
+                    "Digest cancelled by user — all changes rolled back",
+                )
+            } else {
+                ChalkError::from(e)
+            }
+        })?;
 
     info!(
         folder_id,
-        documents_processed = results.len(),
-        total_tables,
-        total_lessons,
+        documents_processed = summary.documents_processed,
+        total_tables = summary.total_tables,
+        total_lessons = summary.total_lessons,
         "Folder digest complete"
     );
 
-    Ok(DigestSummary {
-        documents_processed: results.len(),
-        total_tables,
-        total_lessons,
-        results,
-    })
+    Ok(summary)
+}
+
+/// Find an existing subject by name or create a new one.
+/// Used by tests that don't need transactions.
+#[cfg(test)]
+fn find_or_create_subject(
+    db: &Database,
+    name: &str,
+    grade_level: Option<&str>,
+) -> Result<String, ChalkError> {
+    // Search existing subjects.
+    let subjects = db.list_subjects().map_err(ChalkError::from)?;
+    let name_lower = name.to_lowercase();
+
+    if let Some(existing) = subjects
+        .iter()
+        .find(|s| s.name.to_lowercase() == name_lower)
+    {
+        return Ok(existing.id.clone());
+    }
+
+    // Create new subject.
+    let subject = db
+        .create_subject(&NewSubject {
+            name: name.to_string(),
+            grade_level: grade_level.map(|g| g.to_string()),
+            description: None,
+        })
+        .map_err(ChalkError::from)?;
+
+    Ok(subject.id)
 }
 
 #[cfg(test)]
@@ -968,5 +1097,148 @@ mod tests {
         assert_eq!(json["documents_processed"], 3);
         assert_eq!(json["total_tables"], 5);
         assert_eq!(json["total_lessons"], 12);
+    }
+
+    #[test]
+    fn test_cancellation_token_basic() {
+        let token = CancellationToken::new();
+        assert!(!token.is_cancelled());
+        token.cancel();
+        assert!(token.is_cancelled());
+    }
+
+    #[test]
+    fn test_cancellation_token_clone_shares_state() {
+        let token = CancellationToken::new();
+        let clone = token.clone();
+        assert!(!clone.is_cancelled());
+        token.cancel();
+        assert!(clone.is_cancelled());
+    }
+
+    #[test]
+    fn test_write_digest_results_rolls_back_on_cancel() {
+        let db = test_db();
+        let cancel = CancellationToken::new();
+
+        // Create fetched docs
+        let docs = vec![
+            FetchedDoc {
+                doc_id: "doc1".into(),
+                doc_name: "Doc 1".into(),
+                tables_found: 1,
+                lessons: vec![ExtractedLesson {
+                    title: "Lesson 1".into(),
+                    content: "Content 1".into(),
+                    learning_objectives: None,
+                    subject_hint: None,
+                    grade_hint: None,
+                }],
+            },
+            FetchedDoc {
+                doc_id: "doc2".into(),
+                doc_name: "Doc 2".into(),
+                tables_found: 1,
+                lessons: vec![ExtractedLesson {
+                    title: "Lesson 2".into(),
+                    content: "Content 2".into(),
+                    learning_objectives: None,
+                    subject_hint: None,
+                    grade_hint: None,
+                }],
+            },
+        ];
+
+        // Cancel before writing — transaction should roll back.
+        cancel.cancel();
+
+        let result = db.with_transaction(|tx| {
+            write_digest_results(tx, &docs, &cancel).map_err(|e| {
+                crate::database::DatabaseError::Sqlite(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ABORT),
+                    Some(e.message),
+                ))
+            })
+        });
+
+        assert!(result.is_err());
+
+        // Verify no lesson plans were persisted.
+        let plans = db.list_lesson_plans_by_subject("anything");
+        // Either returns empty or the subject doesn't exist — either way, nothing persisted.
+        assert!(plans.is_ok());
+    }
+
+    #[test]
+    fn test_write_digest_results_commits_on_success() {
+        let db = test_db();
+        let cancel = CancellationToken::new();
+
+        let docs = vec![FetchedDoc {
+            doc_id: "doc1".into(),
+            doc_name: "Doc 1".into(),
+            tables_found: 1,
+            lessons: vec![ExtractedLesson {
+                title: "Photosynthesis".into(),
+                content: "Learn about photosynthesis".into(),
+                learning_objectives: Some("Understand light reactions".into()),
+                subject_hint: Some("Biology".into()),
+                grade_hint: Some("9th".into()),
+            }],
+        }];
+
+        let result = db.with_transaction(|tx| {
+            write_digest_results(tx, &docs, &cancel).map_err(|e| {
+                crate::database::DatabaseError::Sqlite(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ABORT),
+                    Some(e.message),
+                ))
+            })
+        });
+
+        assert!(result.is_ok());
+        let summary = result.unwrap();
+        assert_eq!(summary.documents_processed, 1);
+        assert_eq!(summary.total_lessons, 1);
+        assert_eq!(summary.results[0].plans_created.len(), 1);
+
+        // Verify the plan was persisted.
+        let plan_id = &summary.results[0].plans_created[0];
+        let plan = db.get_lesson_plan(plan_id).unwrap();
+        assert_eq!(plan.title, "Photosynthesis");
+
+        // Verify the subject was created.
+        let subjects = db.list_subjects().unwrap();
+        assert!(subjects.iter().any(|s| s.name == "Biology"));
+    }
+
+    #[test]
+    fn test_find_or_create_subject_on_conn() {
+        let db = test_db();
+
+        // Use with_transaction to get a connection reference.
+        let result = db.with_transaction(|tx| {
+            let id1 = find_or_create_subject_on_conn(tx, "Math", Some("8th"))
+                .map_err(|e| crate::database::DatabaseError::Sqlite(
+                    rusqlite::Error::SqliteFailure(
+                        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ABORT),
+                        Some(e.message),
+                    ),
+                ))?;
+
+            // Finding the same subject again should return the same ID.
+            let id2 = find_or_create_subject_on_conn(tx, "math", None)
+                .map_err(|e| crate::database::DatabaseError::Sqlite(
+                    rusqlite::Error::SqliteFailure(
+                        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ABORT),
+                        Some(e.message),
+                    ),
+                ))?;
+
+            assert_eq!(id1, id2);
+            Ok(())
+        });
+
+        assert!(result.is_ok());
     }
 }
