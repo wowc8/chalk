@@ -37,6 +37,10 @@ pub struct SendMessageInput {
     pub conversation_id: Option<String>,
     pub message: String,
     pub plan_id: Option<String>,
+    /// Current content of the active lesson plan in the editor.
+    pub plan_content: Option<String>,
+    /// Title of the active lesson plan.
+    pub plan_title: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -195,15 +199,26 @@ impl Database {
 // ── Chat Completion ─────────────────────────────────────────
 
 /// System prompt for the Chalk AI assistant.
-const SYSTEM_PROMPT: &str = r#"You are Chalk, an AI teaching assistant embedded in a lesson plan application. Your role is to help teachers create, refine, and improve their lesson plans.
+const SYSTEM_PROMPT: &str = r#"You are Chalk, an AI teaching assistant embedded in a lesson plan editor. Your role is to help teachers create, refine, and improve their lesson plans.
 
-You have access to the teacher's lesson plan history. When relevant plans are found in their history, they will be provided as context. Use this context to:
-- Reference what has worked before ("You taught a similar topic in your Photosynthesis Lab — here's what you covered...")
+You can help with:
+- Drafting learning objectives (clear, measurable, aligned to standards)
+- Designing activities and instructional sequences
+- Creating assessments (formative and summative)
+- Suggesting differentiation strategies
+- Improving pacing and flow
+- Refining language and clarity
+
+When the teacher is editing a specific lesson plan, its current content will be provided. Use it to give targeted, contextual suggestions rather than generic advice.
+
+You also have access to the teacher's lesson plan history via RAG. When relevant plans are found, they will be provided as additional context. Use this to:
+- Reference what has worked before
 - Suggest improvements based on patterns in their teaching style
 - Help maintain consistency across their curriculum
-- Build on existing materials rather than starting from scratch
 
-Be concise, practical, and focused on actionable teaching advice. Match the teacher's style when you can see it in their history."#;
+When suggesting content for the lesson plan, format it clearly so the teacher can easily copy it into their editor. Use markdown formatting.
+
+Be concise, practical, and focused on actionable teaching advice."#;
 
 /// OpenAI chat completion request/response types.
 #[derive(Serialize)]
@@ -240,8 +255,9 @@ async fn generate_response(
     history: &[ChatMessage],
     user_message: &str,
     rag_context: &str,
+    active_plan: Option<(&str, &str)>,
 ) -> Result<String, ChalkError> {
-    let messages = build_messages(history, user_message, rag_context);
+    let messages = build_messages(history, user_message, rag_context, active_plan);
 
     let request = ChatCompletionRequest {
         model: model.to_string(),
@@ -308,14 +324,34 @@ fn build_messages(
     history: &[ChatMessage],
     user_message: &str,
     rag_context: &str,
+    active_plan: Option<(&str, &str)>, // (title, content)
 ) -> Vec<CompletionMessage> {
     let mut messages = Vec::new();
 
-    let system_content = if rag_context.is_empty() {
-        SYSTEM_PROMPT.to_string()
-    } else {
-        format!("{SYSTEM_PROMPT}\n\n{rag_context}")
-    };
+    let mut system_content = SYSTEM_PROMPT.to_string();
+
+    // Inject active plan context if available.
+    if let Some((title, content)) = active_plan {
+        if !content.is_empty() {
+            // Truncate very long plan content to stay within token budget.
+            let truncated = if content.len() > 6000 {
+                format!("{}...(truncated)", &content[..6000])
+            } else {
+                content.to_string()
+            };
+            system_content.push_str(&format!(
+                "\n\n--- CURRENT LESSON PLAN ---\nTitle: {title}\n\n{truncated}\n--- END LESSON PLAN ---"
+            ));
+        } else {
+            system_content.push_str(&format!(
+                "\n\nThe teacher is working on a new lesson plan titled \"{title}\" that is currently empty. Help them get started."
+            ));
+        }
+    }
+
+    if !rag_context.is_empty() {
+        system_content.push_str(&format!("\n\n--- TEACHING HISTORY ---\n{rag_context}\n--- END HISTORY ---"));
+    }
 
     messages.push(CompletionMessage {
         role: "system".to_string(),
@@ -355,8 +391,9 @@ async fn generate_response_stream(
     user_message: &str,
     rag_context: &str,
     conversation_id: &str,
+    active_plan: Option<(&str, &str)>,
 ) -> Result<String, ChalkError> {
-    let messages = build_messages(history, user_message, rag_context);
+    let messages = build_messages(history, user_message, rag_context, active_plan);
 
     let request = ChatCompletionRequest {
         model: model.to_string(),
@@ -519,9 +556,16 @@ pub async fn send_chat_message(
         .get_chat_messages(&conversation_id)
         .map_err(|e| format!("{e}"))?;
 
+    // Build active plan context from input fields.
+    let active_plan = match (input.plan_title.as_deref(), input.plan_content.as_deref()) {
+        (Some(title), Some(content)) => Some((title, content)),
+        (Some(title), None) => Some((title, "")),
+        _ => None,
+    };
+
     // Generate AI response.
     let ai_response =
-        generate_response(&api_key, &base_url, &model, &history, &input.message, &rag_context)
+        generate_response(&api_key, &base_url, &model, &history, &input.message, &rag_context, active_plan)
             .await
             .map_err(|e| e.message)?;
 
@@ -632,8 +676,15 @@ pub async fn send_chat_message_stream(
     let msg = input.message.clone();
     let ctx_ids = context_ids_json.clone();
     let app_clone = app.clone();
+    let plan_title_owned = input.plan_title.clone();
+    let plan_content_owned = input.plan_content.clone();
 
     tauri::async_runtime::spawn(async move {
+        let active_plan = match (plan_title_owned.as_deref(), plan_content_owned.as_deref()) {
+            (Some(title), Some(content)) => Some((title, content)),
+            (Some(title), None) => Some((title, "")),
+            _ => None,
+        };
         let state = app_clone.state::<AppState>();
         match generate_response_stream(
             &app_clone,
@@ -644,6 +695,7 @@ pub async fn send_chat_message_stream(
             &msg,
             &rag_context,
             &conv_id,
+            active_plan,
         )
         .await
         {
@@ -952,7 +1004,7 @@ mod tests {
     #[test]
     fn test_build_messages_without_context() {
         let history: Vec<ChatMessage> = vec![];
-        let messages = build_messages(&history, "Hello", "");
+        let messages = build_messages(&history, "Hello", "", None);
 
         assert_eq!(messages.len(), 2); // system + user
         assert_eq!(messages[0].role, "system");
@@ -965,7 +1017,7 @@ mod tests {
     fn test_build_messages_with_rag_context() {
         let history: Vec<ChatMessage> = vec![];
         let rag_ctx = "Relevant plan: Photosynthesis Lab";
-        let messages = build_messages(&history, "Help me", rag_ctx);
+        let messages = build_messages(&history, "Help me", rag_ctx, None);
 
         assert_eq!(messages.len(), 2);
         assert!(messages[0].content.contains(SYSTEM_PROMPT));
@@ -992,7 +1044,7 @@ mod tests {
                 created_at: "2024-01-01".into(),
             },
         ];
-        let messages = build_messages(&history, "New question", "");
+        let messages = build_messages(&history, "New question", "", None);
 
         // system + 2 history + user = 4
         assert_eq!(messages.len(), 4);
@@ -1015,7 +1067,7 @@ mod tests {
             })
             .collect();
 
-        let messages = build_messages(&history, "Final", "");
+        let messages = build_messages(&history, "Final", "", None);
         // system + 20 history + user = 22
         assert_eq!(messages.len(), 22);
         // First history message should be index 5 (25-20=5).
@@ -1042,11 +1094,46 @@ mod tests {
                 created_at: "2024-01-01".into(),
             },
         ];
-        let messages = build_messages(&history, "Hi", "");
+        let messages = build_messages(&history, "Hi", "", None);
 
         // system + 1 user from history (system skipped) + user = 3
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[1].content, "Included");
+    }
+
+    #[test]
+    fn test_build_messages_with_active_plan() {
+        let history: Vec<ChatMessage> = vec![];
+        let plan = Some(("Photosynthesis Lab", "Students will learn about..."));
+        let messages = build_messages(&history, "Help me improve this", "", plan);
+
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0].content.contains("CURRENT LESSON PLAN"));
+        assert!(messages[0].content.contains("Photosynthesis Lab"));
+        assert!(messages[0].content.contains("Students will learn about"));
+    }
+
+    #[test]
+    fn test_build_messages_with_empty_plan() {
+        let history: Vec<ChatMessage> = vec![];
+        let plan = Some(("New Plan", ""));
+        let messages = build_messages(&history, "Help me", "", plan);
+
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0].content.contains("currently empty"));
+        assert!(messages[0].content.contains("New Plan"));
+    }
+
+    #[test]
+    fn test_build_messages_with_plan_and_rag() {
+        let history: Vec<ChatMessage> = vec![];
+        let plan = Some(("My Plan", "Some content here"));
+        let messages = build_messages(&history, "Help", "Related: old plan data", plan);
+
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0].content.contains("CURRENT LESSON PLAN"));
+        assert!(messages[0].content.contains("TEACHING HISTORY"));
+        assert!(messages[0].content.contains("Related: old plan data"));
     }
 
     #[test]

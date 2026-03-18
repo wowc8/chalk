@@ -3,7 +3,7 @@ import { useParams } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { motion, AnimatePresence } from "framer-motion";
 import { TipTapEditor } from "./editor/TipTapEditor";
-import { ChatPane, ChatMessage } from "./editor/ChatPane";
+import { ChatPane } from "./editor/ChatPane";
 import "./editor/EditorStyles.css";
 
 interface LessonPlan {
@@ -29,13 +29,6 @@ interface PlanVersion {
   created_at: string;
 }
 
-const WELCOME_MESSAGE: ChatMessage = {
-  id: "welcome",
-  role: "assistant",
-  content:
-    "Tell me about the lesson you want to create. I can help you draft objectives, activities, assessments, and more.",
-  timestamp: new Date(),
-};
 
 function SplitResizer({
   onDrag,
@@ -87,9 +80,8 @@ export function PlanDetail() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saveStatus, setSaveStatus] = useState<"saved" | "saving" | "error">("saved");
-  const [messages, setMessages] = useState<ChatMessage[]>([WELCOME_MESSAGE]);
-  const [chatLoading, setChatLoading] = useState(false);
   const [editorRatio, setEditorRatio] = useState(0.667); // 2/3 by default
+  const editorContentRef = useRef<string>("");
   const containerRef = useRef<HTMLDivElement>(null);
 
   // Versioning state
@@ -179,6 +171,7 @@ export function PlanDetail() {
   const handleEditorUpdate = useCallback(
     async (content: string) => {
       if (!plan) return;
+      editorContentRef.current = content;
       setSaveStatus("saving");
       try {
         const updated = await invoke<LessonPlan>("update_plan_content", {
@@ -193,6 +186,13 @@ export function PlanDetail() {
     },
     [plan]
   );
+
+  // Keep content ref in sync when plan loads/changes.
+  useEffect(() => {
+    if (plan) {
+      editorContentRef.current = plan.content;
+    }
+  }, [plan?.id]);
 
   const handleFinalize = useCallback(async () => {
     if (!plan || finalizing) return;
@@ -227,33 +227,6 @@ export function PlanDetail() {
       setReverting(false);
     }
   }, [plan, reverting, loadVersions]);
-
-  const handleSendMessage = useCallback(
-    (content: string) => {
-      const userMsg: ChatMessage = {
-        id: `user-${Date.now()}`,
-        role: "user",
-        content,
-        timestamp: new Date(),
-      };
-      setMessages((prev) => [...prev, userMsg]);
-      setChatLoading(true);
-
-      // Simulate AI response (backend AI integration will come in a future phase)
-      setTimeout(() => {
-        const aiMsg: ChatMessage = {
-          id: `ai-${Date.now()}`,
-          role: "assistant",
-          content:
-            "I'm getting ready to help you create lesson plans! The AI backend is being set up. For now, you can start writing in the editor above, and I'll be ready to assist soon.",
-          timestamp: new Date(),
-        };
-        setMessages((prev) => [...prev, aiMsg]);
-        setChatLoading(false);
-      }, 1500);
-    },
-    [plan]
-  );
 
   const handleResize = useCallback(
     (deltaY: number) => {
@@ -440,9 +413,10 @@ export function PlanDetail() {
         {/* Chat pane */}
         <div className="flex-1 min-h-0 overflow-hidden bg-chalk-board-dark/30">
           <ChatPane
-            messages={messages}
-            onSendMessage={handleSendMessage}
-            isLoading={chatLoading}
+            planId={plan.id}
+            planTitle={plan.title}
+            planContentRef={editorContentRef}
+            onApplyToEditor={handleEditorUpdate}
           />
         </div>
       </div>
