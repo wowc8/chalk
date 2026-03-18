@@ -9,7 +9,7 @@ interface Props {
   setProcessing: (processing: boolean) => void;
 }
 
-type ScanState = "idle" | "scanning" | "success" | "empty" | "error";
+type ScanState = "idle" | "scanning" | "success" | "empty" | "error" | "success_no_key";
 
 const PROGRESS_MESSAGES = [
   "Connecting to Google Drive...",
@@ -74,14 +74,20 @@ export function StepInitialShred({
 
       // Parse document count from result message
       const countMatch = msg.match(/found (\d+) document/);
+      const extractedMatch = msg.match(/extracted (\d+) lesson/);
       const count = countMatch ? parseInt(countMatch[1], 10) : 0;
+      const extracted = extractedMatch ? parseInt(extractedMatch[1], 10) : 0;
+      const embeddingsSkipped = msg.includes("embeddings_skipped");
 
-      if (count === 0) {
+      if (count === 0 && extracted === 0) {
         setScanState("empty");
-        setResult(msg);
+        setResult(msg.split("|")[0]);
+      } else if (embeddingsSkipped) {
+        setScanState("success_no_key");
+        setResult(msg.split("|")[0]);
       } else {
         setScanState("success");
-        setResult(msg);
+        setResult(msg.split("|")[0]);
       }
     } catch (e) {
       stopProgressSimulation();
@@ -235,6 +241,45 @@ export function StepInitialShred({
           </motion.div>
         )}
 
+        {/* Success but no API key — embeddings skipped */}
+        {scanState === "success_no_key" && (
+          <motion.div
+            key="success_no_key"
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="text-center py-8"
+          >
+            <motion.div
+              initial={{ scale: 0 }}
+              animate={{ scale: 1 }}
+              transition={{ type: "spring", stiffness: 300, damping: 20 }}
+              className="w-20 h-20 mx-auto mb-6 rounded-full bg-bat-green/10 border-2 border-bat-green/40 flex items-center justify-center"
+            >
+              <svg
+                className="w-10 h-10 text-bat-green"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M5 13l4 4L19 7"
+                />
+              </svg>
+            </motion.div>
+            <p className="text-bat-green font-semibold mb-2">{result}</p>
+            <div className="mt-3 p-3 bg-bat-gold/10 border border-bat-gold/30 rounded-lg">
+              <p className="text-bat-gold text-sm">
+                AI-powered search requires an OpenAI API key. Add one in{" "}
+                <span className="font-semibold">Settings</span> to enable
+                smart search across your lesson plans.
+              </p>
+            </div>
+          </motion.div>
+        )}
+
         {/* Empty state - scan succeeded but no docs found */}
         {scanState === "empty" && (
           <motion.div
@@ -338,7 +383,7 @@ export function StepInitialShred({
         >
           Back
         </motion.button>
-        {(scanState === "success" || scanState === "empty") && (
+        {(scanState === "success" || scanState === "success_no_key" || scanState === "empty") && (
           <motion.button
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
