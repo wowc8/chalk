@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, type MutableRefObject } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useChat, type ChatMessage as BackendMessage } from "../../hooks/useChat";
 import { useTeacherName } from "../../hooks/useTeacherName";
@@ -11,8 +11,14 @@ export interface ChatMessage {
 }
 
 interface ChatPaneProps {
-  /** Optional lesson plan ID to provide context for the chat. */
+  /** Lesson plan ID to provide context for the chat. */
   planId?: string;
+  /** Title of the active plan (injected into system prompt). */
+  planTitle?: string;
+  /** Ref to current editor content (read at send time, avoids stale closures). */
+  planContentRef?: MutableRefObject<string>;
+  /** Callback to apply AI-suggested content to the editor. */
+  onApplyToEditor?: (content: string) => void;
   /** External messages (for backwards compatibility). If provided, uses these instead of the hook. */
   messages?: ChatMessage[];
   /** External send handler (for backwards compatibility). */
@@ -31,8 +37,23 @@ function toDisplayMessage(msg: BackendMessage): ChatMessage {
   };
 }
 
-function MessageBubble({ message }: { message: ChatMessage }) {
+function MessageBubble({
+  message,
+  onApply,
+}: {
+  message: ChatMessage;
+  onApply?: (content: string) => void;
+}) {
   const isUser = message.role === "user";
+  const [applied, setApplied] = useState(false);
+
+  const handleApply = () => {
+    if (onApply) {
+      onApply(message.content);
+      setApplied(true);
+      setTimeout(() => setApplied(false), 2000);
+    }
+  };
 
   return (
     <motion.div
@@ -48,15 +69,30 @@ function MessageBubble({ message }: { message: ChatMessage }) {
         }`}
       >
         <div className="whitespace-pre-wrap">{message.content}</div>
-        <div
-          className={`text-[10px] mt-1.5 ${
-            isUser ? "text-chalk-blue/40" : "text-chalk-muted/40"
-          }`}
-        >
-          {message.timestamp.toLocaleTimeString(undefined, {
-            hour: "numeric",
-            minute: "2-digit",
-          })}
+        <div className="flex items-center justify-between mt-1.5">
+          <div
+            className={`text-[10px] ${
+              isUser ? "text-chalk-blue/40" : "text-chalk-muted/40"
+            }`}
+          >
+            {message.timestamp.toLocaleTimeString(undefined, {
+              hour: "numeric",
+              minute: "2-digit",
+            })}
+          </div>
+          {!isUser && onApply && (
+            <button
+              onClick={handleApply}
+              className={`text-[10px] px-1.5 py-0.5 rounded transition-colors ${
+                applied
+                  ? "text-chalk-green/80 bg-chalk-green/10"
+                  : "text-chalk-muted/40 hover:text-chalk-blue hover:bg-chalk-blue/10"
+              }`}
+              title="Apply this content to the editor"
+            >
+              {applied ? "Applied!" : "Apply to Editor"}
+            </button>
+          )}
         </div>
       </div>
     </motion.div>
@@ -149,12 +185,15 @@ function ErrorBanner({ error, onDismiss }: { error: string; onDismiss: () => voi
 
 export function ChatPane({
   planId,
+  planTitle,
+  planContentRef,
+  onApplyToEditor,
   messages: externalMessages,
   onSendMessage: externalSendMessage,
   isLoading: externalLoading,
 }: ChatPaneProps) {
   // Use the integrated chat hook when no external messages are provided.
-  const chat = useChat(planId);
+  const chat = useChat(planId, planTitle, planContentRef);
   const isIntegrated = !externalMessages && !externalSendMessage;
   const { name: teacherName } = useTeacherName();
 
@@ -181,7 +220,7 @@ export function ChatPane({
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [displayMessages, loading]);
+  }, [displayMessages, loading, streamingContent]);
 
   const handleSendClick = () => {
     const trimmed = input.trim();
@@ -251,7 +290,7 @@ export function ChatPane({
                 : "Ask Chalk about your lesson plans"}
             </p>
             <p className="text-[11px] text-chalk-muted/30">
-              Chalk searches your teaching history to give context-aware suggestions
+              I can help draft objectives, activities, assessments, and more
             </p>
           </div>
         </div>
@@ -261,7 +300,11 @@ export function ChatPane({
       {displayMessages.length > 0 && (
         <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3">
           {displayMessages.map((msg) => (
-            <MessageBubble key={msg.id} message={msg} />
+            <MessageBubble
+              key={msg.id}
+              message={msg}
+              onApply={msg.role === "assistant" && onApplyToEditor ? onApplyToEditor : undefined}
+            />
           ))}
           {loading && streamingContent ? (
             <StreamingBubble content={streamingContent} />

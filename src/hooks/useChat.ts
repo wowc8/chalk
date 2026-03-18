@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, type MutableRefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
@@ -65,7 +65,11 @@ export interface AiConfig {
  *
  * Supports streaming responses via Tauri events for real-time token display.
  */
-export function useChat(planId?: string) {
+export function useChat(
+  planId?: string,
+  planTitle?: string,
+  planContentRef?: MutableRefObject<string>,
+) {
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -173,6 +177,8 @@ export function useChat(planId?: string) {
               conversation_id: conversationId,
               message: message.trim(),
               plan_id: planId ?? null,
+              plan_title: planTitle ?? null,
+              plan_content: planContentRef?.current ?? null,
             },
           },
         );
