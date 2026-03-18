@@ -103,10 +103,159 @@ pub async fn fetch_doc_html(
     })
 }
 
+/// Day-of-week keywords used to detect schedule-grid tables.
+const DAY_NAMES: &[&str] = &[
+    "monday", "tuesday", "wednesday", "thursday", "friday",
+    "saturday", "sunday",
+    "mon", "tue", "wed", "thu", "fri", "sat", "sun",
+];
+
+/// Check if text looks like a standalone time value (e.g., "9:00", "09:00-10:00").
+///
+/// Returns true when the string consists almost entirely of digits, colons,
+/// dots, hyphens/dashes, and whitespace — the hallmarks of a time range.
+fn is_time_like(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.len() > 30 {
+        return false;
+    }
+    let has_digit = trimmed.chars().any(|c| c.is_ascii_digit());
+    let has_separator = trimmed.chars().any(|c| c == ':' || c == '.');
+    let time_chars = trimmed
+        .chars()
+        .filter(|c| c.is_ascii_digit() || ":.-–—/ ".contains(*c))
+        .count();
+    has_digit && has_separator && time_chars * 4 >= trimmed.len() * 3
+}
+
+/// Check if text is a structural or section header rather than lesson content.
+///
+/// Catches entries like "Additional Ideas:", "Notes:", "LP 2022-2023", etc.
+fn is_structural_text(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // Short text ending with a colon is typically a section label.
+    if trimmed.ends_with(':') && trimmed.split_whitespace().count() <= 5 {
+        return true;
+    }
+    false
+}
+
+/// Detect which header columns correspond to days of the week.
+///
+/// If at least two columns match day names this is likely a weekly schedule grid.
+/// Returns `(time_column_index, Vec<(column_index, day_label)>)`.
+fn detect_schedule_columns(headers: &[String]) -> Option<(usize, Vec<(usize, String)>)> {
+    let mut day_columns: Vec<(usize, String)> = Vec::new();
+    let mut time_col: Option<usize> = None;
+
+    for (i, header) in headers.iter().enumerate() {
+        let h = header.trim().to_lowercase();
+        // Detect time/day column (usually first).
+        if time_col.is_none()
+            && (h.contains("time") || h.contains("hour") || h.contains("hora") || h == "day/time")
+        {
+            time_col = Some(i);
+            continue;
+        }
+        if DAY_NAMES.iter().any(|d| h.contains(d)) {
+            day_columns.push((i, capitalize_header(header.trim())));
+        }
+    }
+
+    if day_columns.len() >= 2 {
+        Some((time_col.unwrap_or(0), day_columns))
+    } else {
+        None
+    }
+}
+
+/// Extract lesson plans from a schedule-grid table.
+///
+/// For each data row, reads the time slot from `time_col` and creates one
+/// lesson per non-empty day column cell. The day and time become context in
+/// the plan body, and the activity text becomes the title.
+fn extract_lessons_from_schedule(
+    table: &parser::ParsedTable,
+    headers: &[String],
+    time_col: usize,
+    day_columns: &[(usize, String)],
+) -> Vec<ExtractedLesson> {
+    let mut lessons = Vec::new();
+
+    for row in &table.rows[1..] {
+        let cells: Vec<String> = row.cells.iter().map(|c| c.text.trim().to_string()).collect();
+
+        let time_slot = cells.get(time_col).map(|s| s.as_str()).unwrap_or("");
+
+        // Skip rows that are purely structural.
+        if is_structural_text(time_slot) {
+            continue;
+        }
+
+        for (col_idx, day_label) in day_columns {
+            let activity = match cells.get(*col_idx) {
+                Some(text) if !text.is_empty() => text,
+                _ => continue,
+            };
+
+            // Skip cells that are just time values echoed into day columns.
+            if is_time_like(activity) {
+                continue;
+            }
+
+            // Skip structural text in cells.
+            if is_structural_text(activity) {
+                continue;
+            }
+
+            // Build a meaningful title and body.
+            let title = activity.clone();
+            let mut body_parts = Vec::new();
+            if !day_label.is_empty() {
+                body_parts.push(format!("Day: {}", day_label));
+            }
+            if !time_slot.is_empty() && !is_time_like(time_slot) {
+                // If the time slot has text that isn't a pure time, include as-is.
+                body_parts.push(format!("Time: {}", time_slot));
+            } else if !time_slot.is_empty() {
+                body_parts.push(format!("Time: {}", time_slot));
+            }
+
+            // Gather any extra context from non-day, non-time columns.
+            for (j, cell_val) in cells.iter().enumerate() {
+                if j == time_col || day_columns.iter().any(|(ci, _)| *ci == j) {
+                    continue;
+                }
+                if !cell_val.is_empty() && !is_time_like(cell_val) && !is_structural_text(cell_val) {
+                    let header_label = headers.get(j).map(|h| h.trim()).unwrap_or("Note");
+                    body_parts.push(format!("{}: {}", capitalize_header(header_label), cell_val));
+                }
+            }
+
+            let content = body_parts.join("\n\n");
+
+            lessons.push(ExtractedLesson {
+                title,
+                content,
+                learning_objectives: None,
+                subject_hint: None,
+                grade_hint: None,
+            });
+        }
+    }
+
+    lessons
+}
+
 /// Extract lesson plans from a Google Doc exported as HTML.
 ///
 /// Parses HTML tables, uses the first row as headers, and converts subsequent
-/// rows into lesson plan entries.
+/// rows into lesson plan entries. Detects weekly schedule grids (days as
+/// columns, time slots as rows) and extracts activities with day/time context
+/// instead of creating one plan per row.
 pub fn extract_lessons_from_doc(html: &str) -> Vec<ExtractedLesson> {
     let tables = parser::extract_tables(html);
     if tables.is_empty() {
@@ -127,6 +276,14 @@ pub fn extract_lessons_from_doc(html: &str) -> Vec<ExtractedLesson> {
             .map(|c| c.text.trim().to_lowercase())
             .collect();
 
+        // Check if this is a weekly schedule grid.
+        if let Some((time_col, day_columns)) = detect_schedule_columns(&headers) {
+            let schedule_lessons =
+                extract_lessons_from_schedule(table, &headers, time_col, &day_columns);
+            lessons.extend(schedule_lessons);
+            continue;
+        }
+
         for row in &table.rows[1..] {
             if let Some(lesson) = extract_lesson_from_row(&headers, row) {
                 lessons.push(lesson);
@@ -138,6 +295,9 @@ pub fn extract_lessons_from_doc(html: &str) -> Vec<ExtractedLesson> {
 }
 
 /// Try to extract a lesson plan from a single table row using the header mapping.
+///
+/// Returns `None` for rows that have no substantive content: time-only cells,
+/// structural headers, or entries where the body would be empty.
 fn extract_lesson_from_row(
     headers: &[String],
     row: &parser::TableRow,
@@ -157,9 +317,15 @@ fn extract_lesson_from_row(
     if title.is_empty() {
         // If no title column, try using the first non-empty cell as the title.
         if let Some(first_non_empty) = cells.iter().find(|c| !c.is_empty()) {
+            // Skip time-only and structural entries.
+            if is_time_like(first_non_empty) || is_structural_text(first_non_empty) {
+                return None;
+            }
+
             let content = cells
                 .iter()
                 .filter(|c| !c.is_empty() && *c != first_non_empty)
+                .filter(|c| !is_time_like(c))
                 .cloned()
                 .collect::<Vec<_>>()
                 .join("\n\n");
@@ -179,6 +345,11 @@ fn extract_lesson_from_row(
         return None;
     }
 
+    // Skip plans whose title is just a time range or structural header.
+    if is_time_like(&title) || is_structural_text(&title) {
+        return None;
+    }
+
     // Build rich content from all non-title columns.
     let mut content_parts: Vec<String> = Vec::new();
     for (header, value) in &field_map {
@@ -193,7 +364,10 @@ fn extract_lesson_from_row(
     }
 
     let content = content_parts.join("\n\n");
-    if content.is_empty() && title.is_empty() {
+
+    // A plan with a title but no body content is not useful — the user would
+    // see an empty editor when clicking it.
+    if content.is_empty() {
         return None;
     }
 
@@ -1130,5 +1304,194 @@ mod tests {
         });
 
         assert!(result.is_ok());
+    }
+
+    // ── Schedule-grid detection and extraction tests ──────────────────
+
+    #[test]
+    fn test_is_time_like() {
+        assert!(is_time_like("9:00"));
+        assert!(is_time_like("09:00-10:00"));
+        assert!(is_time_like("9:00 - 9:30"));
+        assert!(is_time_like("9.00-9.30"));
+        assert!(is_time_like("  9:10  "));
+        assert!(!is_time_like(""));
+        assert!(!is_time_like("Math"));
+        assert!(!is_time_like("Photosynthesis Lab"));
+        assert!(!is_time_like("Assembly"));
+    }
+
+    #[test]
+    fn test_is_structural_text() {
+        assert!(is_structural_text("Additional Ideas:"));
+        assert!(is_structural_text("Notes:"));
+        assert!(is_structural_text("Section Header:"));
+        assert!(!is_structural_text("Photosynthesis Lab"));
+        assert!(!is_structural_text(""));
+        assert!(!is_structural_text("This is a longer sentence that happens to end with a colon:"));
+    }
+
+    #[test]
+    fn test_detect_schedule_columns() {
+        let headers: Vec<String> = vec![
+            "day/time".into(), "monday".into(), "tuesday".into(),
+            "wednesday".into(), "thursday".into(), "friday".into(),
+        ];
+        let result = detect_schedule_columns(&headers);
+        assert!(result.is_some());
+        let (time_col, day_cols) = result.unwrap();
+        assert_eq!(time_col, 0);
+        assert_eq!(day_cols.len(), 5);
+    }
+
+    #[test]
+    fn test_detect_schedule_columns_not_a_schedule() {
+        let headers: Vec<String> = vec![
+            "title".into(), "subject".into(), "duration".into(),
+        ];
+        assert!(detect_schedule_columns(&headers).is_none());
+    }
+
+    #[test]
+    fn test_detect_schedule_columns_minimum_two_days() {
+        // Only one day column — not enough to be a schedule.
+        let headers: Vec<String> = vec!["time".into(), "monday".into(), "notes".into()];
+        assert!(detect_schedule_columns(&headers).is_none());
+    }
+
+    #[test]
+    fn test_schedule_grid_extracts_activities() {
+        let html = r#"<html><body>
+            <table>
+                <tr><th>Day/Time</th><th>Monday</th><th>Tuesday</th><th>Wednesday</th></tr>
+                <tr><td>9:00-9:30</td><td>Math</td><td>Reading</td><td>Math</td></tr>
+                <tr><td>9:30-10:00</td><td>Science</td><td></td><td>Art</td></tr>
+            </table>
+        </body></html>"#;
+
+        let lessons = extract_lessons_from_doc(html);
+        // Row 1: 3 activities (Math, Reading, Math). Row 2: 2 activities (Science, Art).
+        assert_eq!(lessons.len(), 5);
+
+        // Each lesson title is the activity, not the time slot.
+        let titles: Vec<&str> = lessons.iter().map(|l| l.title.as_str()).collect();
+        assert!(titles.contains(&"Math"));
+        assert!(titles.contains(&"Reading"));
+        assert!(titles.contains(&"Science"));
+        assert!(titles.contains(&"Art"));
+
+        // Each lesson body includes the day and time context.
+        let reading = lessons.iter().find(|l| l.title == "Reading").unwrap();
+        assert!(reading.content.contains("Day: Tuesday"));
+        assert!(reading.content.contains("Time: 9:00-9:30"));
+    }
+
+    #[test]
+    fn test_schedule_grid_skips_empty_cells() {
+        let html = r#"<html><body>
+            <table>
+                <tr><th>Time</th><th>Monday</th><th>Tuesday</th></tr>
+                <tr><td>8:00-8:30</td><td></td><td></td></tr>
+                <tr><td>8:30-9:00</td><td>PE</td><td></td></tr>
+            </table>
+        </body></html>"#;
+
+        let lessons = extract_lessons_from_doc(html);
+        assert_eq!(lessons.len(), 1);
+        assert_eq!(lessons[0].title, "PE");
+    }
+
+    #[test]
+    fn test_schedule_grid_skips_structural_rows() {
+        let html = r#"<html><body>
+            <table>
+                <tr><th>Day/Time</th><th>Monday</th><th>Tuesday</th></tr>
+                <tr><td>Additional Ideas:</td><td></td><td></td></tr>
+                <tr><td>9:00-9:30</td><td>History</td><td>Geography</td></tr>
+            </table>
+        </body></html>"#;
+
+        let lessons = extract_lessons_from_doc(html);
+        assert_eq!(lessons.len(), 2);
+        assert!(lessons.iter().all(|l| l.title != "Additional Ideas:"));
+    }
+
+    #[test]
+    fn test_regular_table_skips_time_only_title() {
+        let headers = vec!["date".into(), "notes".into()];
+        let row = parser::TableRow {
+            cells: vec![
+                parser::TableCell { text: "9:00-9:30".into() },
+                parser::TableCell { text: "".into() },
+            ],
+        };
+        assert!(extract_lesson_from_row(&headers, &row).is_none());
+    }
+
+    #[test]
+    fn test_regular_table_skips_structural_title() {
+        let headers = vec!["section".into(), "details".into()];
+        let row = parser::TableRow {
+            cells: vec![
+                parser::TableCell { text: "Notes:".into() },
+                parser::TableCell { text: "".into() },
+            ],
+        };
+        assert!(extract_lesson_from_row(&headers, &row).is_none());
+    }
+
+    #[test]
+    fn test_regular_table_title_only_no_content_skipped() {
+        // A plan with a title but empty body should be filtered out.
+        let headers = vec!["title".into()];
+        let row = parser::TableRow {
+            cells: vec![parser::TableCell { text: "Lonely Title".into() }],
+        };
+        assert!(extract_lesson_from_row(&headers, &row).is_none());
+    }
+
+    #[test]
+    fn test_realistic_weekly_schedule_grid() {
+        // Simulates the real-world scenario from the bug report: a weekly
+        // schedule with time slots as rows and days as columns.
+        let html = r#"<html><body>
+            <table>
+                <tr>
+                    <th>Day/Time LP 2022-2023</th>
+                    <th>Monday</th><th>Tuesday</th><th>Wednesday</th>
+                    <th>Thursday</th><th>Friday</th>
+                </tr>
+                <tr><td>9:00-9:10</td><td>Assembly</td><td>Assembly</td><td>Assembly</td><td>Assembly</td><td>Assembly</td></tr>
+                <tr><td>9:10-9:30</td><td>Math Warm-up</td><td>Reading Group</td><td>Math Warm-up</td><td>Reading Group</td><td>Math Review</td></tr>
+                <tr><td>9:30-10:00</td><td></td><td>Science Lab</td><td></td><td>Science Lab</td><td></td></tr>
+                <tr><td>Additional Ideas:</td><td></td><td></td><td></td><td></td><td></td></tr>
+            </table>
+        </body></html>"#;
+
+        let lessons = extract_lessons_from_doc(html);
+
+        // Should NOT create plans for time slots or "Additional Ideas:".
+        for lesson in &lessons {
+            assert!(!is_time_like(&lesson.title), "Time slot '{}' should not be a plan title", lesson.title);
+            assert!(!is_structural_text(&lesson.title), "Structural text '{}' should not be a plan title", lesson.title);
+        }
+
+        // Should create plans for actual activities.
+        let titles: Vec<&str> = lessons.iter().map(|l| l.title.as_str()).collect();
+        assert!(titles.contains(&"Assembly"));
+        assert!(titles.contains(&"Math Warm-up"));
+        assert!(titles.contains(&"Reading Group"));
+        assert!(titles.contains(&"Science Lab"));
+        assert!(titles.contains(&"Math Review"));
+
+        // Every plan should have non-empty content.
+        for lesson in &lessons {
+            assert!(!lesson.content.is_empty(), "Plan '{}' should have body content", lesson.title);
+        }
+
+        // Fewer than 660 garbage plans — should be a reasonable count.
+        // 5 Assembly + 5 (row2) + 2 (row3) = 12 meaningful activities.
+        assert!(lessons.len() <= 20, "Expected ~12 plans, got {}", lessons.len());
+        assert!(lessons.len() >= 10, "Expected ~12 plans, got {}", lessons.len());
     }
 }
