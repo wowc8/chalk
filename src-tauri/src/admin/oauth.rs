@@ -573,43 +573,128 @@ pub async fn list_scanned_documents(
         .map_err(|e| e.to_string())?;
 
     let reqwest_client = reqwest::Client::new();
-    let query = format!(
-        "'{}' in parents and trashed=false and mimeType='application/vnd.google-apps.document'",
-        folder_id
-    );
-    let response = reqwest_client
-        .get("https://www.googleapis.com/drive/v3/files")
-        .query(&[
-            ("q", query.as_str()),
-            ("fields", "files(id,name,modifiedTime)"),
-            ("pageSize", "100"),
-            ("orderBy", "modifiedTime desc"),
-        ])
-        .header("Authorization", format!("Bearer {}", access_token))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
 
-    let body: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+    // Check if the stored ID is a single document rather than a folder.
+    if let Ok(Some((doc_id, doc_name))) =
+        crate::shredder::check_if_document(&access_token, &folder_id).await
+    {
+        return Ok(vec![ScannedDocument {
+            id: doc_id,
+            name: doc_name,
+            modified_time: None,
+        }]);
+    }
 
-    let documents: Vec<ScannedDocument> = body
-        .get("files")
-        .and_then(|f| f.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|item| {
-                    Some(ScannedDocument {
-                        id: item.get("id")?.as_str()?.to_string(),
-                        name: item.get("name")?.as_str()?.to_string(),
-                        modified_time: item
-                            .get("modifiedTime")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string()),
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    // Recursively list all Google Docs in the folder and subfolders.
+    let mut documents: Vec<ScannedDocument> = Vec::new();
+    let mut folders_to_scan = vec![folder_id.clone()];
+
+    while let Some(current_folder) = folders_to_scan.pop() {
+        // List docs in this folder (with pagination).
+        let doc_query = format!(
+            "'{}' in parents and trashed=false and mimeType='application/vnd.google-apps.document'",
+            current_folder
+        );
+        let mut page_token: Option<String> = None;
+        loop {
+            let mut params: Vec<(&str, String)> = vec![
+                ("q", doc_query.clone()),
+                ("fields", "nextPageToken,files(id,name,modifiedTime)".into()),
+                ("pageSize", "100".into()),
+                ("orderBy", "modifiedTime desc".into()),
+                ("supportsAllDrives", "true".into()),
+                ("includeItemsFromAllDrives", "true".into()),
+            ];
+            if let Some(ref token) = page_token {
+                params.push(("pageToken", token.clone()));
+            }
+
+            let response = reqwest_client
+                .get("https://www.googleapis.com/drive/v3/files")
+                .query(&params)
+                .header("Authorization", format!("Bearer {}", access_token))
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                return Err(format!("Drive API returned {} listing folder: {}", status, body));
+            }
+
+            let body: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+
+            if let Some(files) = body.get("files").and_then(|f| f.as_array()) {
+                for item in files {
+                    if let (Some(id), Some(name)) = (
+                        item.get("id").and_then(|v| v.as_str()),
+                        item.get("name").and_then(|v| v.as_str()),
+                    ) {
+                        documents.push(ScannedDocument {
+                            id: id.to_string(),
+                            name: name.to_string(),
+                            modified_time: item
+                                .get("modifiedTime")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
+                        });
+                    }
+                }
+            }
+
+            match body.get("nextPageToken").and_then(|t| t.as_str()) {
+                Some(token) => page_token = Some(token.to_string()),
+                None => break,
+            }
+        }
+
+        // List subfolders to recurse into.
+        let subfolder_query = format!(
+            "'{}' in parents and trashed=false and mimeType='application/vnd.google-apps.folder'",
+            current_folder
+        );
+        let mut page_token: Option<String> = None;
+        loop {
+            let mut params: Vec<(&str, String)> = vec![
+                ("q", subfolder_query.clone()),
+                ("fields", "nextPageToken,files(id)".into()),
+                ("pageSize", "100".into()),
+                ("supportsAllDrives", "true".into()),
+                ("includeItemsFromAllDrives", "true".into()),
+            ];
+            if let Some(ref token) = page_token {
+                params.push(("pageToken", token.clone()));
+            }
+
+            let response = reqwest_client
+                .get("https://www.googleapis.com/drive/v3/files")
+                .query(&params)
+                .header("Authorization", format!("Bearer {}", access_token))
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+
+            if !response.status().is_success() {
+                break; // Non-fatal: skip subfolders on error.
+            }
+
+            let body: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+
+            if let Some(folders) = body.get("files").and_then(|f| f.as_array()) {
+                for folder in folders {
+                    if let Some(sub_id) = folder.get("id").and_then(|v| v.as_str()) {
+                        folders_to_scan.push(sub_id.to_string());
+                    }
+                }
+            }
+
+            match body.get("nextPageToken").and_then(|t| t.as_str()) {
+                Some(token) => page_token = Some(token.to_string()),
+                None => break,
+            }
+        }
+    }
 
     info!(count = documents.len(), "Listed scanned documents");
     Ok(documents)

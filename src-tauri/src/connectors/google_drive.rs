@@ -536,7 +536,7 @@ pub async fn test_folder_permissions(
 
     let response = client
         .get(format!(
-            "https://www.googleapis.com/drive/v3/files/{}?fields=capabilities",
+            "https://www.googleapis.com/drive/v3/files/{}?fields=capabilities&supportsAllDrives=true",
             folder_id
         ))
         .header("Authorization", format!("Bearer {}", access_token))
@@ -572,6 +572,8 @@ pub async fn list_drive_children_api(
             ("fields", "files(id,name,mimeType)"),
             ("pageSize", "100"),
             ("orderBy", "name"),
+            ("supportsAllDrives", "true"),
+            ("includeItemsFromAllDrives", "true"),
         ])
         .header("Authorization", format!("Bearer {}", access_token))
         .send()
@@ -601,6 +603,8 @@ pub async fn list_drive_items_api(
             ("fields", "files(id,name,mimeType)"),
             ("pageSize", "100"),
             ("orderBy", "folder,name"),
+            ("supportsAllDrives", "true"),
+            ("includeItemsFromAllDrives", "true"),
         ])
         .header("Authorization", format!("Bearer {}", access_token))
         .send()

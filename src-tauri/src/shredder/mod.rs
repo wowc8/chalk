@@ -353,25 +353,157 @@ fn find_or_create_subject(
     Ok(subject.id)
 }
 
-/// Shred all documents in a folder. Called by `trigger_initial_shred`.
-pub async fn shred_folder(
-    db: &Database,
+/// List all Google Docs inside a folder, including subfolders (recursive).
+/// Handles pagination via `nextPageToken` and Shared Drive files.
+async fn list_docs_recursive(
+    client: &reqwest::Client,
     access_token: &str,
     folder_id: &str,
-) -> Result<ShredSummary, ChalkError> {
-    // Discover Google Docs in the folder.
-    let client = reqwest::Client::new();
-    let query = format!(
+) -> Result<Vec<serde_json::Value>, ChalkError> {
+    let mut all_docs: Vec<serde_json::Value> = Vec::new();
+
+    // 1. List Google Docs directly in this folder (with pagination).
+    let doc_query = format!(
         "'{}' in parents and trashed=false and mimeType='application/vnd.google-apps.document'",
         folder_id
     );
+    let mut page_token: Option<String> = None;
+    loop {
+        let mut params: Vec<(&str, String)> = vec![
+            ("q", doc_query.clone()),
+            ("fields", "nextPageToken,files(id,name,modifiedTime)".into()),
+            ("pageSize", "100".into()),
+            ("supportsAllDrives", "true".into()),
+            ("includeItemsFromAllDrives", "true".into()),
+        ];
+        if let Some(ref token) = page_token {
+            params.push(("pageToken", token.clone()));
+        }
 
+        let response = client
+            .get("https://www.googleapis.com/drive/v3/files")
+            .query(&params)
+            .header("Authorization", format!("Bearer {}", access_token))
+            .send()
+            .await
+            .map_err(|e| {
+                ChalkError::new(
+                    ErrorDomain::Shredder,
+                    ErrorCode::ShredderParseFailed,
+                    format!("Failed to list folder {}: {}", folder_id, e),
+                )
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(ChalkError::new(
+                ErrorDomain::Shredder,
+                ErrorCode::ShredderParseFailed,
+                format!("Drive API returned {} listing folder {}: {}", status, folder_id, body),
+            ));
+        }
+
+        let body: serde_json::Value = response.json().await.map_err(|e| {
+            ChalkError::new(
+                ErrorDomain::Shredder,
+                ErrorCode::ShredderParseFailed,
+                format!("Failed to parse Drive file list: {}", e),
+            )
+        })?;
+
+        if let Some(files) = body.get("files").and_then(|f| f.as_array()) {
+            all_docs.extend(files.iter().cloned());
+        }
+
+        match body.get("nextPageToken").and_then(|t| t.as_str()) {
+            Some(token) => page_token = Some(token.to_string()),
+            None => break,
+        }
+    }
+
+    // 2. Find subfolders and recurse into them.
+    let subfolder_query = format!(
+        "'{}' in parents and trashed=false and mimeType='application/vnd.google-apps.folder'",
+        folder_id
+    );
+    let mut page_token: Option<String> = None;
+    loop {
+        let mut params: Vec<(&str, String)> = vec![
+            ("q", subfolder_query.clone()),
+            ("fields", "nextPageToken,files(id,name)".into()),
+            ("pageSize", "100".into()),
+            ("supportsAllDrives", "true".into()),
+            ("includeItemsFromAllDrives", "true".into()),
+        ];
+        if let Some(ref token) = page_token {
+            params.push(("pageToken", token.clone()));
+        }
+
+        let response = client
+            .get("https://www.googleapis.com/drive/v3/files")
+            .query(&params)
+            .header("Authorization", format!("Bearer {}", access_token))
+            .send()
+            .await
+            .map_err(|e| {
+                ChalkError::new(
+                    ErrorDomain::Shredder,
+                    ErrorCode::ShredderParseFailed,
+                    format!("Failed to list subfolders in {}: {}", folder_id, e),
+                )
+            })?;
+
+        if !response.status().is_success() {
+            // Non-fatal: log and skip subfolder listing.
+            warn!(folder_id, "Failed to list subfolders — skipping recursion");
+            break;
+        }
+
+        let body: serde_json::Value = response.json().await.map_err(|e| {
+            ChalkError::new(
+                ErrorDomain::Shredder,
+                ErrorCode::ShredderParseFailed,
+                format!("Failed to parse subfolder list: {}", e),
+            )
+        })?;
+
+        if let Some(folders) = body.get("files").and_then(|f| f.as_array()) {
+            for folder in folders {
+                let sub_id = folder.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                if sub_id.is_empty() {
+                    continue;
+                }
+                // Box the recursive future to avoid infinite type size.
+                let sub_docs = Box::pin(list_docs_recursive(client, access_token, sub_id)).await?;
+                all_docs.extend(sub_docs);
+            }
+        }
+
+        match body.get("nextPageToken").and_then(|t| t.as_str()) {
+            Some(token) => page_token = Some(token.to_string()),
+            None => break,
+        }
+    }
+
+    Ok(all_docs)
+}
+
+/// Check if a Drive ID refers to a Google Doc (not a folder).
+/// Returns `Some((id, name))` if it's a document, `None` if it's a folder or on error.
+pub async fn check_if_document(
+    access_token: &str,
+    file_id: &str,
+) -> Result<Option<(String, String)>, ChalkError> {
+    let client = reqwest::Client::new();
     let response = client
-        .get("https://www.googleapis.com/drive/v3/files")
+        .get(format!(
+            "https://www.googleapis.com/drive/v3/files/{}",
+            file_id
+        ))
         .query(&[
-            ("q", query.as_str()),
-            ("fields", "files(id,name,modifiedTime)"),
-            ("pageSize", "100"),
+            ("fields", "id,name,mimeType"),
+            ("supportsAllDrives", "true"),
         ])
         .header("Authorization", format!("Bearer {}", access_token))
         .send()
@@ -380,25 +512,63 @@ pub async fn shred_folder(
             ChalkError::new(
                 ErrorDomain::Shredder,
                 ErrorCode::ShredderParseFailed,
-                format!("Failed to list folder {}: {}", folder_id, e),
+                format!("Failed to check file metadata for {}: {}", file_id, e),
             )
         })?;
+
+    if !response.status().is_success() {
+        return Ok(None);
+    }
 
     let body: serde_json::Value = response.json().await.map_err(|e| {
         ChalkError::new(
             ErrorDomain::Shredder,
             ErrorCode::ShredderParseFailed,
-            format!("Failed to parse Drive file list: {}", e),
+            format!("Failed to parse file metadata: {}", e),
         )
     })?;
 
-    let files = body
-        .get("files")
-        .and_then(|f| f.as_array())
-        .cloned()
-        .unwrap_or_default();
+    let mime = body.get("mimeType").and_then(|v| v.as_str()).unwrap_or_default();
+    if mime == "application/vnd.google-apps.document" {
+        let id = body.get("id").and_then(|v| v.as_str()).unwrap_or(file_id).to_string();
+        let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("Untitled").to_string();
+        Ok(Some((id, name)))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Shred all documents in a folder (recursively). Called by `trigger_initial_shred`.
+///
+/// If `folder_id` is actually a single document ID (from `select_single_document`),
+/// this function detects it and shreds just that document.
+pub async fn shred_folder(
+    db: &Database,
+    access_token: &str,
+    folder_id: &str,
+) -> Result<ShredSummary, ChalkError> {
+    let client = reqwest::Client::new();
+
+    // Check if the "folder_id" is actually a single document (selected via select_single_document).
+    if let Some((doc_id, doc_name)) = check_if_document(access_token, folder_id).await? {
+        info!(doc_id = doc_id.as_str(), doc_name = doc_name.as_str(), "Selected item is a single document — shredding directly");
+        let default_subject_id = find_or_create_subject(db, "General", None)?;
+        return match shred_document(db, access_token, &doc_id, &doc_name, &default_subject_id).await {
+            Ok(result) => Ok(ShredSummary {
+                documents_processed: 1,
+                total_tables: result.tables_found,
+                total_lessons: result.lessons_extracted,
+                results: vec![result],
+            }),
+            Err(e) => Err(e),
+        };
+    }
+
+    // Recursively discover all Google Docs in the folder and subfolders.
+    let files = list_docs_recursive(&client, access_token, folder_id).await?;
 
     if files.is_empty() {
+        info!(folder_id, "No Google Docs found in folder or subfolders");
         return Ok(ShredSummary {
             documents_processed: 0,
             total_tables: 0,
