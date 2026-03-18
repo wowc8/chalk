@@ -259,11 +259,10 @@ export function PlanDetail() {
     (deltaY: number) => {
       if (!containerRef.current) return;
       const containerHeight = containerRef.current.getBoundingClientRect().height;
-      const newRatio = editorRatio + deltaY / containerHeight;
-      // Clamp between 30% and 85%
-      setEditorRatio(Math.max(0.3, Math.min(0.85, newRatio)));
+      // Use functional update to avoid stale closure when called from mousemove listener
+      setEditorRatio((prev) => Math.max(0.3, Math.min(0.85, prev + deltaY / containerHeight)));
     },
-    [editorRatio]
+    []
   );
 
   if (loading) {
