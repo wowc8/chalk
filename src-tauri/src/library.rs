@@ -1,5 +1,6 @@
 use crate::database::{
-    LessonPlan, LibraryPlanCard, LibraryQuery, NewLessonPlan, NewTag, PlanVersion, Tag,
+    FtsSearchResult, LessonPlan, LibraryPlanCard, LibraryQuery, NewLessonPlan, NewTag, PlanVersion,
+    Tag,
 };
 use crate::AppState;
 
@@ -93,6 +94,18 @@ pub fn list_library_plans(
             search,
             tag_ids,
         })
+        .map_err(|e| format!("{}", e))
+}
+
+#[tauri::command]
+pub fn search_plans_fts(
+    state: tauri::State<'_, AppState>,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<FtsSearchResult>, String> {
+    state
+        .db
+        .search_fts(&query, limit.unwrap_or(20))
         .map_err(|e| format!("{}", e))
 }
 
@@ -634,5 +647,80 @@ mod tests {
             .unwrap();
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].tags.len(), 2);
+    }
+
+    #[test]
+    fn test_library_query_fts_searches_content() {
+        let db = test_db();
+
+        let subject = db
+            .create_subject(&crate::database::NewSubject {
+                name: "Science".into(),
+                grade_level: None,
+                description: None,
+            })
+            .unwrap();
+        db.create_lesson_plan(&NewLessonPlan {
+            subject_id: subject.id.clone(),
+            title: "Lesson One".into(),
+            content: Some("The mitochondria is the powerhouse of the cell".into()),
+            source_doc_id: None,
+            source_table_index: None,
+            learning_objectives: None,
+        })
+        .unwrap();
+        db.create_lesson_plan(&NewLessonPlan {
+            subject_id: subject.id.clone(),
+            title: "Lesson Two".into(),
+            content: Some("Water cycle and evaporation".into()),
+            source_doc_id: None,
+            source_table_index: None,
+            learning_objectives: None,
+        })
+        .unwrap();
+
+        // Search for content keyword — should find via FTS5
+        let plans = db
+            .list_library_plans(&LibraryQuery {
+                source_type: None,
+                search: Some("mitochondria".into()),
+                tag_ids: None,
+            })
+            .unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].title, "Lesson One");
+    }
+
+    #[test]
+    fn test_library_query_fts_searches_objectives() {
+        let db = test_db();
+
+        let subject = db
+            .create_subject(&crate::database::NewSubject {
+                name: "Math".into(),
+                grade_level: None,
+                description: None,
+            })
+            .unwrap();
+        db.create_lesson_plan(&NewLessonPlan {
+            subject_id: subject.id.clone(),
+            title: "Algebra Intro".into(),
+            content: Some("Solving linear equations".into()),
+            source_doc_id: None,
+            source_table_index: None,
+            learning_objectives: Some("Students will understand quadratic equations".into()),
+        })
+        .unwrap();
+
+        // Search by learning_objectives keyword
+        let plans = db
+            .list_library_plans(&LibraryQuery {
+                source_type: None,
+                search: Some("quadratic".into()),
+                tag_ids: None,
+            })
+            .unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].title, "Algebra Intro");
     }
 }

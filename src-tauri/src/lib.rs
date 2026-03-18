@@ -310,6 +310,7 @@ pub fn run() {
             library::remove_tag_from_plan,
             library::get_tags_for_plan,
             library::list_library_plans,
+            library::search_plans_fts,
             library::create_plan,
             library::get_plan,
             library::update_plan_content,
