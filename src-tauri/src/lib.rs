@@ -13,7 +13,7 @@ pub mod privacy;
 pub mod rag;
 pub mod safety;
 pub mod sentry_integration;
-pub mod shredder;
+pub mod digest;
 pub mod updater;
 
 use database::Database;
@@ -286,7 +286,7 @@ pub fn run() {
             admin::oauth::list_drive_subfolders,
             admin::oauth::list_drive_items,
             admin::oauth::select_single_document,
-            admin::oauth::trigger_initial_shred,
+            admin::oauth::trigger_initial_digest,
             admin::oauth::list_scanned_documents,
             updater::check_for_update,
             updater::install_update,

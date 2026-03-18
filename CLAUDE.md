@@ -21,7 +21,7 @@ Chalk — a Tauri v2 desktop app for teachers to manage and generate lesson plan
 
 ## Directory Structure
 ```
-src-tauri/src/       — Rust backend (admin, connectors, shredder, database, safety)
+src-tauri/src/       — Rust backend (admin, connectors, digest, database, safety)
 src/                 — React frontend (components, editor, state, hooks)
 docs/                — Architecture docs, decision log, module specs
 ```

@@ -6,8 +6,8 @@
 //!
 //! # Channels
 //! - `connector:status_changed` — connector auth/sync status changes
-//! - `shredder:progress` — document scanning progress updates
-//! - `shredder:complete` — scan finished
+//! - `digest:progress` — document scanning progress updates
+//! - `digest:complete` — scan finished
 //! - `cache:invalidated` — a cache entry was evicted or expired
 //! - `app:error` — structured domain errors for toast/banner display
 
@@ -19,8 +19,8 @@ use crate::errors::ChalkError;
 // ── Channel constants ────────────────────────────────────────
 
 pub const CHANNEL_CONNECTOR_STATUS: &str = "connector:status_changed";
-pub const CHANNEL_SHREDDER_PROGRESS: &str = "shredder:progress";
-pub const CHANNEL_SHREDDER_COMPLETE: &str = "shredder:complete";
+pub const CHANNEL_DIGEST_PROGRESS: &str = "digest:progress";
+pub const CHANNEL_DIGEST_COMPLETE: &str = "digest:complete";
 pub const CHANNEL_CACHE_INVALIDATED: &str = "cache:invalidated";
 pub const CHANNEL_APP_ERROR: &str = "app:error";
 pub const CHANNEL_FEATURE_FLAG_CHANGED: &str = "feature_flag:changed";
@@ -48,18 +48,18 @@ pub enum ConnectorStatus {
     Error,
 }
 
-/// Shredder progress event — emitted during document scanning.
+/// Digest progress event — emitted during document scanning.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ShredderProgressPayload {
+pub struct DigestProgressPayload {
     pub current: u32,
     pub total: u32,
     pub current_document: Option<String>,
     pub tables_found: u32,
 }
 
-/// Shredder complete event — emitted when scanning finishes.
+/// Digest complete event — emitted when scanning finishes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ShredderCompletePayload {
+pub struct DigestCompletePayload {
     pub documents_processed: u32,
     pub total_tables: u32,
     pub total_plans: u32,
@@ -129,17 +129,17 @@ pub fn emit_connector_status(app: &AppHandle, payload: ConnectorStatusPayload) {
     }
 }
 
-/// Emit a shredder progress event.
-pub fn emit_shredder_progress(app: &AppHandle, payload: ShredderProgressPayload) {
-    if let Err(e) = app.emit(CHANNEL_SHREDDER_PROGRESS, &payload) {
-        tracing::warn!(error = %e, "Failed to emit shredder progress event");
+/// Emit a digest progress event.
+pub fn emit_digest_progress(app: &AppHandle, payload: DigestProgressPayload) {
+    if let Err(e) = app.emit(CHANNEL_DIGEST_PROGRESS, &payload) {
+        tracing::warn!(error = %e, "Failed to emit digest progress event");
     }
 }
 
-/// Emit a shredder complete event.
-pub fn emit_shredder_complete(app: &AppHandle, payload: ShredderCompletePayload) {
-    if let Err(e) = app.emit(CHANNEL_SHREDDER_COMPLETE, &payload) {
-        tracing::warn!(error = %e, "Failed to emit shredder complete event");
+/// Emit a digest complete event.
+pub fn emit_digest_complete(app: &AppHandle, payload: DigestCompletePayload) {
+    if let Err(e) = app.emit(CHANNEL_DIGEST_COMPLETE, &payload) {
+        tracing::warn!(error = %e, "Failed to emit digest complete event");
     }
 }
 
@@ -208,8 +208,8 @@ mod tests {
     }
 
     #[test]
-    fn test_shredder_progress_payload_serializes() {
-        let payload = ShredderProgressPayload {
+    fn test_digest_progress_payload_serializes() {
+        let payload = DigestProgressPayload {
             current: 3,
             total: 10,
             current_document: Some("Biology Unit.gdoc".into()),
@@ -222,8 +222,8 @@ mod tests {
     }
 
     #[test]
-    fn test_shredder_complete_payload_serializes() {
-        let payload = ShredderCompletePayload {
+    fn test_digest_complete_payload_serializes() {
+        let payload = DigestCompletePayload {
             documents_processed: 12,
             total_tables: 45,
             total_plans: 42,
@@ -315,8 +315,8 @@ mod tests {
     #[test]
     fn test_channel_constants() {
         assert_eq!(CHANNEL_CONNECTOR_STATUS, "connector:status_changed");
-        assert_eq!(CHANNEL_SHREDDER_PROGRESS, "shredder:progress");
-        assert_eq!(CHANNEL_SHREDDER_COMPLETE, "shredder:complete");
+        assert_eq!(CHANNEL_DIGEST_PROGRESS, "digest:progress");
+        assert_eq!(CHANNEL_DIGEST_COMPLETE, "digest:complete");
         assert_eq!(CHANNEL_CACHE_INVALIDATED, "cache:invalidated");
         assert_eq!(CHANNEL_APP_ERROR, "app:error");
         assert_eq!(CHANNEL_FEATURE_FLAG_CHANGED, "feature_flag:changed");

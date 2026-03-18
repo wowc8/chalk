@@ -43,13 +43,13 @@ function App() {
       // Check if onboarding was already completed
       try {
         const status = (await invoke("check_onboarding_status")) as {
-          initial_shred_complete: boolean;
+          initial_digest_complete: boolean;
           tokens_stored: boolean;
           folder_selected: boolean;
         };
 
         if (
-          status.initial_shred_complete &&
+          status.initial_digest_complete &&
           status.tokens_stored &&
           status.folder_selected
         ) {

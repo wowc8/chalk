@@ -16,7 +16,7 @@ pub struct OnboardingStatus {
     pub tokens_stored: bool,
     pub folder_selected: bool,
     pub folder_accessible: bool,
-    pub initial_shred_complete: bool,
+    pub initial_digest_complete: bool,
     pub selected_folder_id: Option<String>,
     pub selected_folder_name: Option<String>,
 }
@@ -28,7 +28,7 @@ impl Default for OnboardingStatus {
             tokens_stored: false,
             folder_selected: false,
             folder_accessible: false,
-            initial_shred_complete: false,
+            initial_digest_complete: false,
             selected_folder_id: None,
             selected_folder_name: None,
         }
@@ -456,7 +456,7 @@ pub async fn select_single_document(
 }
 
 #[tauri::command]
-pub async fn trigger_initial_shred(
+pub async fn trigger_initial_digest(
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     let onboarding = load_onboarding_status(&state.data_dir);
@@ -477,8 +477,8 @@ pub async fn trigger_initial_shred(
         .await
         .map_err(|e| e.to_string())?;
 
-    // Shred all documents in the selected folder.
-    let summary = crate::shredder::shred_folder(&state.db, &access_token, &folder_id)
+    // Digest all documents in the selected folder.
+    let summary = crate::digest::digest_folder(&state.db, &access_token, &folder_id)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -487,12 +487,12 @@ pub async fn trigger_initial_shred(
         documents_processed = summary.documents_processed,
         total_tables = summary.total_tables,
         total_lessons = summary.total_lessons,
-        "Initial shred complete"
+        "Initial digest complete"
     );
 
-    // Mark shred as complete.
+    // Mark digest as complete.
     let mut updated_status = load_onboarding_status(&state.data_dir);
-    updated_status.initial_shred_complete = true;
+    updated_status.initial_digest_complete = true;
     save_onboarding_status(&state.data_dir, &updated_status)?;
 
     // Attempt to vectorize imported plans for RAG search.
@@ -523,7 +523,7 @@ pub async fn trigger_initial_shred(
                         }
                     }
                 }
-                info!(vectorized, "Post-shred vectorization complete");
+                info!(vectorized, "Post-digest vectorization complete");
                 false
             }
             _ => {
@@ -576,7 +576,7 @@ pub async fn list_scanned_documents(
 
     // Check if the stored ID is a single document rather than a folder.
     if let Ok(Some((doc_id, doc_name))) =
-        crate::shredder::check_if_document(&access_token, &folder_id).await
+        crate::digest::check_if_document(&access_token, &folder_id).await
     {
         return Ok(vec![ScannedDocument {
             id: doc_id,
@@ -723,7 +723,7 @@ mod tests {
         assert!(!status.tokens_stored);
         assert!(!status.folder_selected);
         assert!(!status.folder_accessible);
-        assert!(!status.initial_shred_complete);
+        assert!(!status.initial_digest_complete);
         assert!(status.selected_folder_id.is_none());
         assert!(status.selected_folder_name.is_none());
     }
@@ -738,7 +738,7 @@ mod tests {
             tokens_stored: true,
             folder_selected: true,
             folder_accessible: true,
-            initial_shred_complete: false,
+            initial_digest_complete: false,
             selected_folder_id: Some("folder_abc".into()),
             selected_folder_name: Some("My Lessons".into()),
         };
@@ -749,7 +749,7 @@ mod tests {
         assert!(loaded.tokens_stored);
         assert!(loaded.folder_selected);
         assert!(loaded.folder_accessible);
-        assert!(!loaded.initial_shred_complete);
+        assert!(!loaded.initial_digest_complete);
         assert_eq!(loaded.selected_folder_id, Some("folder_abc".into()));
         assert_eq!(loaded.selected_folder_name, Some("My Lessons".into()));
     }
@@ -807,7 +807,7 @@ mod tests {
         status.selected_folder_name = Some("Lesson Plans".into());
         save_onboarding_status(&data_dir, &status).unwrap();
 
-        status.initial_shred_complete = true;
+        status.initial_digest_complete = true;
         save_onboarding_status(&data_dir, &status).unwrap();
 
         let final_status = load_onboarding_status(&data_dir);
@@ -815,7 +815,7 @@ mod tests {
         assert!(final_status.tokens_stored);
         assert!(final_status.folder_selected);
         assert!(final_status.folder_accessible);
-        assert!(final_status.initial_shred_complete);
+        assert!(final_status.initial_digest_complete);
         assert_eq!(final_status.selected_folder_id, Some("folder_xyz".into()));
     }
 
@@ -826,7 +826,7 @@ mod tests {
         assert!(!status.tokens_stored);
         assert!(!status.folder_selected);
         assert!(!status.folder_accessible);
-        assert!(!status.initial_shred_complete);
+        assert!(!status.initial_digest_complete);
         assert!(status.selected_folder_id.is_none());
         assert!(status.selected_folder_name.is_none());
     }
@@ -903,13 +903,13 @@ mod tests {
             "oauth_configured": true,
             "tokens_stored": true,
             "folder_selected": true,
-            "initial_shred_complete": true
+            "initial_digest_complete": true
         }"#;
         let status: OnboardingStatus = serde_json::from_str(old_json).unwrap();
         assert!(status.oauth_configured);
         assert!(status.tokens_stored);
         assert!(status.folder_selected);
-        assert!(status.initial_shred_complete);
+        assert!(status.initial_digest_complete);
         // Missing fields should get defaults
         assert!(!status.folder_accessible);
         assert!(status.selected_folder_id.is_none());
@@ -924,7 +924,7 @@ mod tests {
         assert!(status.oauth_configured);
         assert!(!status.tokens_stored);
         assert!(!status.folder_selected);
-        assert!(!status.initial_shred_complete);
+        assert!(!status.initial_digest_complete);
     }
 
     #[test]
@@ -934,7 +934,7 @@ mod tests {
         assert!(!status.oauth_configured);
         assert!(!status.tokens_stored);
         assert!(!status.folder_selected);
-        assert!(!status.initial_shred_complete);
+        assert!(!status.initial_digest_complete);
     }
 
     #[test]
@@ -947,7 +947,7 @@ mod tests {
             "oauth_configured": true,
             "tokens_stored": true,
             "folder_selected": true,
-            "initial_shred_complete": true
+            "initial_digest_complete": true
         }"#;
         let path = status_file_path(&data_dir);
         fs::write(&path, old_json).unwrap();
@@ -957,7 +957,7 @@ mod tests {
         assert!(status.oauth_configured);
         assert!(status.tokens_stored);
         assert!(status.folder_selected);
-        assert!(status.initial_shred_complete);
+        assert!(status.initial_digest_complete);
         assert!(!status.folder_accessible); // default
     }
 }

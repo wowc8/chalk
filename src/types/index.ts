@@ -16,8 +16,8 @@ export {
 export type {
   ConnectorStatus,
   ConnectorStatusPayload,
-  ShredderProgressPayload,
-  ShredderCompletePayload,
+  DigestProgressPayload,
+  DigestCompletePayload,
   CacheInvalidationReason,
   CacheInvalidatedPayload,
   FeatureFlagChangedPayload,
@@ -28,8 +28,8 @@ export type {
 
 export {
   CHANNEL_CONNECTOR_STATUS,
-  CHANNEL_SHREDDER_PROGRESS,
-  CHANNEL_SHREDDER_COMPLETE,
+  CHANNEL_DIGEST_PROGRESS,
+  CHANNEL_DIGEST_COMPLETE,
   CHANNEL_CACHE_INVALIDATED,
   CHANNEL_APP_ERROR,
   CHANNEL_FEATURE_FLAG_CHANGED,

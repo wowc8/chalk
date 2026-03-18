@@ -56,7 +56,7 @@ export const FRESH_STATUS = {
   tokens_stored: false,
   folder_selected: false,
   folder_accessible: false,
-  initial_shred_complete: false,
+  initial_digest_complete: false,
   selected_folder_id: null,
   selected_folder_name: null,
 };
@@ -79,8 +79,8 @@ export async function setupTauriMocks(
     items?: typeof MOCK_ITEMS;
     /** Folders returned by `list_drive_folders` (fallback). */
     folders?: typeof MOCK_FOLDERS;
-    /** Message returned by `trigger_initial_shred`. */
-    shredMessage?: string;
+    /** Message returned by `trigger_initial_digest`. */
+    digestMessage?: string;
     /** Whether `test_folder_permissions_command` returns true. */
     folderAccessible?: boolean;
   } = {},
@@ -88,8 +88,8 @@ export async function setupTauriMocks(
   const status = opts.initialStatus ?? { ...FRESH_STATUS };
   const items = opts.items ?? MOCK_ITEMS;
   const folders = opts.folders ?? MOCK_FOLDERS;
-  const shredMessage =
-    opts.shredMessage ?? "Found 7 documents with 14 lesson plans in 'Master Plans'.";
+  const digestMessage =
+    opts.digestMessage ?? "Found 7 documents with 14 lesson plans in 'Master Plans'.";
   const folderAccessible = opts.folderAccessible ?? true;
 
   await page.addInitScript(
@@ -97,13 +97,13 @@ export async function setupTauriMocks(
       status,
       items,
       folders,
-      shredMessage,
+      digestMessage,
       folderAccessible,
     }: {
       status: typeof FRESH_STATUS;
       items: typeof MOCK_ITEMS;
       folders: typeof MOCK_FOLDERS;
-      shredMessage: string;
+      digestMessage: string;
       folderAccessible: boolean;
     }) => {
       // Track mutable status so subsequent calls reflect wizard progress.
@@ -160,9 +160,9 @@ export async function setupTauriMocks(
           return folderAccessible;
         },
 
-        trigger_initial_shred: () => {
-          onboardingStatus.initial_shred_complete = true;
-          return shredMessage;
+        trigger_initial_digest: () => {
+          onboardingStatus.initial_digest_complete = true;
+          return digestMessage;
         },
       };
 
@@ -189,6 +189,6 @@ export async function setupTauriMocks(
         metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main" } },
       };
     },
-    { status, items, folders, shredMessage, folderAccessible },
+    { status, items, folders, digestMessage, folderAccessible },
   );
 }

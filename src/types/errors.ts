@@ -10,7 +10,7 @@ export type ErrorDomain =
   | "database"
   | "connector"
   | "oauth"
-  | "shredder"
+  | "digest"
   | "cache"
   | "feature_flag"
   | "io"
@@ -29,9 +29,9 @@ export type ErrorCode =
   | "OAUTH_TOKEN_REFRESH_FAILED"
   | "CONNECTOR_NOT_FOUND"
   | "CONNECTOR_API_ERROR"
-  // Shredder
-  | "SHREDDER_PARSE_FAILED"
-  | "SHREDDER_NO_TABLES"
+  // Digest
+  | "DIGEST_PARSE_FAILED"
+  | "DIGEST_NO_TABLES"
   // Cache
   | "CACHE_EXPIRED"
   | "CACHE_MISS"

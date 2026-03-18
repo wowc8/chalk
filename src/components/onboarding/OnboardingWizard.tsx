@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { StepWelcome } from "./StepWelcome";
 import { StepGoogleAuth } from "./StepGoogleAuth";
 import { StepFolderSelect } from "./StepFolderSelect";
-import { StepInitialShred } from "./StepInitialShred";
+import { StepInitialDigest } from "./StepInitialDigest";
 import { StepComplete } from "./StepComplete";
 import { BatmanOverlay } from "./BatmanOverlay";
 import { useTeacherName } from "../../hooks/useTeacherName";
@@ -14,7 +14,7 @@ export interface OnboardingStatus {
   tokens_stored: boolean;
   folder_selected: boolean;
   folder_accessible: boolean;
-  initial_shred_complete: boolean;
+  initial_digest_complete: boolean;
   selected_folder_id: string | null;
   selected_folder_name: string | null;
 }
@@ -26,7 +26,7 @@ const STEPS = [
   "welcome",
   "google-auth",
   "folder-select",
-  "initial-shred",
+  "initial-digest",
   "complete",
 ] as const;
 
@@ -143,13 +143,13 @@ export function OnboardingWizard({
             )}
             {step === "folder-select" && (
               <StepFolderSelect
-                onNext={() => goTo("initial-shred")}
+                onNext={() => goTo("initial-digest")}
                 onBack={() => goTo("google-auth")}
                 setError={setError}
               />
             )}
-            {step === "initial-shred" && (
-              <StepInitialShred
+            {step === "initial-digest" && (
+              <StepInitialDigest
                 onNext={() => goTo("complete")}
                 onBack={() => goTo("folder-select")}
                 setError={setError}

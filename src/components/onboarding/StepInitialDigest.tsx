@@ -20,7 +20,7 @@ const PROGRESS_MESSAGES = [
   "Processing large documents (this may take a moment)...",
 ];
 
-export function StepInitialShred({
+export function StepInitialDigest({
   onNext,
   onBack,
   setError,
@@ -65,7 +65,7 @@ export function StepInitialShred({
   // Track whether the scan was cancelled so we can ignore late results.
   const cancelledRef = useRef(false);
 
-  const handleShred = async () => {
+  const handleDigest = async () => {
     cancelledRef.current = false;
     setScanState("scanning");
     setProcessing(true);
@@ -74,7 +74,7 @@ export function StepInitialShred({
     startProgressSimulation();
 
     try {
-      const msg = await invoke<string>("trigger_initial_shred");
+      const msg = await invoke<string>("trigger_initial_digest");
       stopProgressSimulation();
 
       // If the user cancelled while we were waiting, ignore the result.
@@ -177,7 +177,7 @@ export function StepInitialShred({
             <motion.button
               whileHover={{ scale: 1.05 }}
               whileTap={{ scale: 0.95 }}
-              onClick={handleShred}
+              onClick={handleDigest}
               className="px-8 py-3 bg-gradient-to-r from-bat-gold to-bat-cyan rounded-lg font-semibold text-bat-dark shadow-lg shadow-bat-gold/20"
             >
               Start Import

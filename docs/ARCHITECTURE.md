@@ -16,7 +16,7 @@ Clean Architecture principles with Documentation-Driven Development (DDD). Busin
 │   ├── src/
 │   │   ├── admin/             # AI Admin Agent & Setup Orchestration
 │   │   ├── connectors/        # External API handlers (Google, OneDrive, LMS)
-│   │   ├── shredder/          # Semantic table parsing logic
+│   │   ├── digest/          # Semantic table parsing logic
 │   │   ├── database/          # SQLite & sqlite-vec (RAG engine)
 │   │   ├── safety/            # Backup-before-write protocols
 │   │   ├── logging.rs         # Structured JSON logging
@@ -32,11 +32,11 @@ Clean Architecture principles with Documentation-Driven Development (DDD). Busin
 
 ## 3. Data Lifecycle & Orchestration
 
-### 3.1 Ingestion & Shredding
-Fetch → Shred (identify tables/headers, split into discrete lessons) → Index (UUID + semantic vector in sqlite-vec).
+### 3.1 Ingestion & Digest
+Fetch → Digest (identify tables/headers, split into discrete lessons) → Index (UUID + semantic vector in sqlite-vec).
 
 ### 3.2 The Freshness Router
-Remote-First check: Before any RAG operation, verify `last_modified` timestamp. If remote is newer, invalidate local cache and re-shred.
+Remote-First check: Before any RAG operation, verify `last_modified` timestamp. If remote is newer, invalidate local cache and re-digest.
 
 ## 4. Safety & Integrity Protocols
 

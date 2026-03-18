@@ -7,8 +7,8 @@ import type { ChalkError } from "./errors";
 // ── Channel constants ────────────────────────────────────────
 
 export const CHANNEL_CONNECTOR_STATUS = "connector:status_changed" as const;
-export const CHANNEL_SHREDDER_PROGRESS = "shredder:progress" as const;
-export const CHANNEL_SHREDDER_COMPLETE = "shredder:complete" as const;
+export const CHANNEL_DIGEST_PROGRESS = "digest:progress" as const;
+export const CHANNEL_DIGEST_COMPLETE = "digest:complete" as const;
 export const CHANNEL_CACHE_INVALIDATED = "cache:invalidated" as const;
 export const CHANNEL_APP_ERROR = "app:error" as const;
 export const CHANNEL_FEATURE_FLAG_CHANGED = "feature_flag:changed" as const;
@@ -24,14 +24,14 @@ export interface ConnectorStatusPayload {
   message: string | null;
 }
 
-export interface ShredderProgressPayload {
+export interface DigestProgressPayload {
   current: number;
   total: number;
   current_document: string | null;
   tables_found: number;
 }
 
-export interface ShredderCompletePayload {
+export interface DigestCompletePayload {
   documents_processed: number;
   total_tables: number;
   total_plans: number;
@@ -60,8 +60,8 @@ export interface AppErrorPayload {
 
 export interface EventChannelMap {
   [CHANNEL_CONNECTOR_STATUS]: ConnectorStatusPayload;
-  [CHANNEL_SHREDDER_PROGRESS]: ShredderProgressPayload;
-  [CHANNEL_SHREDDER_COMPLETE]: ShredderCompletePayload;
+  [CHANNEL_DIGEST_PROGRESS]: DigestProgressPayload;
+  [CHANNEL_DIGEST_COMPLETE]: DigestCompletePayload;
   [CHANNEL_CACHE_INVALIDATED]: CacheInvalidatedPayload;
   [CHANNEL_APP_ERROR]: AppErrorPayload;
   [CHANNEL_FEATURE_FLAG_CHANGED]: FeatureFlagChangedPayload;

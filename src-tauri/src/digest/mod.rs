@@ -1,4 +1,4 @@
-//! Shredder module — semantic table parsing and lesson plan extraction.
+//! Digest module — semantic table parsing and lesson plan extraction.
 //!
 //! Takes Google Docs JSON (from the Documents API), identifies table structures,
 //! splits them into discrete lesson plan chunks, and stores each in the database
@@ -22,9 +22,9 @@ pub struct ExtractedLesson {
     pub grade_hint: Option<String>,
 }
 
-/// Result of shredding a single document.
+/// Result of digesting a single document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ShredResult {
+pub struct DigestResult {
     pub doc_id: String,
     pub doc_name: String,
     pub tables_found: usize,
@@ -32,13 +32,13 @@ pub struct ShredResult {
     pub plans_created: Vec<String>,
 }
 
-/// Result of shredding all documents in a folder.
+/// Result of digesting all documents in a folder.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ShredSummary {
+pub struct DigestSummary {
     pub documents_processed: usize,
     pub total_tables: usize,
     pub total_lessons: usize,
-    pub results: Vec<ShredResult>,
+    pub results: Vec<DigestResult>,
 }
 
 /// Fetch a Google Doc's structured JSON from the Documents API.
@@ -59,8 +59,8 @@ pub async fn fetch_doc_json(
         .await
         .map_err(|e| {
             ChalkError::new(
-                ErrorDomain::Shredder,
-                ErrorCode::ShredderParseFailed,
+                ErrorDomain::Digest,
+                ErrorCode::DigestParseFailed,
                 format!("Failed to fetch document {}: {}", doc_id, e),
             )
         })?;
@@ -69,16 +69,16 @@ pub async fn fetch_doc_json(
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
         return Err(ChalkError::new(
-            ErrorDomain::Shredder,
-            ErrorCode::ShredderParseFailed,
+            ErrorDomain::Digest,
+            ErrorCode::DigestParseFailed,
             format!("Google Docs API returned {}: {}", status, body),
         ));
     }
 
     response.json().await.map_err(|e| {
         ChalkError::new(
-            ErrorDomain::Shredder,
-            ErrorCode::ShredderParseFailed,
+            ErrorDomain::Digest,
+            ErrorCode::DigestParseFailed,
             format!("Failed to parse document JSON: {}", e),
         )
     })
@@ -246,14 +246,14 @@ fn capitalize_header(header: &str) -> String {
     }
 }
 
-/// Shred a single document: fetch its JSON, extract tables, store lesson plans.
-pub async fn shred_document(
+/// Digest a single document: fetch its JSON, extract tables, store lesson plans.
+pub async fn digest_document(
     db: &Database,
     access_token: &str,
     doc_id: &str,
     doc_name: &str,
     default_subject_id: &str,
-) -> Result<ShredResult, ChalkError> {
+) -> Result<DigestResult, ChalkError> {
     let doc_json = fetch_doc_json(access_token, doc_id).await?;
 
     let tables = parser::extract_tables(&doc_json);
@@ -264,7 +264,7 @@ pub async fn shred_document(
 
     if lessons.is_empty() {
         info!(doc_id, doc_name, "No lesson plans found in document");
-        return Ok(ShredResult {
+        return Ok(DigestResult {
             doc_id: doc_id.to_string(),
             doc_name: doc_name.to_string(),
             tables_found,
@@ -312,10 +312,10 @@ pub async fn shred_document(
         doc_name,
         tables_found,
         lessons_extracted,
-        "Document shredded successfully"
+        "Document digested successfully"
     );
 
-    Ok(ShredResult {
+    Ok(DigestResult {
         doc_id: doc_id.to_string(),
         doc_name: doc_name.to_string(),
         tables_found,
@@ -388,8 +388,8 @@ async fn list_docs_recursive(
             .await
             .map_err(|e| {
                 ChalkError::new(
-                    ErrorDomain::Shredder,
-                    ErrorCode::ShredderParseFailed,
+                    ErrorDomain::Digest,
+                    ErrorCode::DigestParseFailed,
                     format!("Failed to list folder {}: {}", folder_id, e),
                 )
             })?;
@@ -398,16 +398,16 @@ async fn list_docs_recursive(
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             return Err(ChalkError::new(
-                ErrorDomain::Shredder,
-                ErrorCode::ShredderParseFailed,
+                ErrorDomain::Digest,
+                ErrorCode::DigestParseFailed,
                 format!("Drive API returned {} listing folder {}: {}", status, folder_id, body),
             ));
         }
 
         let body: serde_json::Value = response.json().await.map_err(|e| {
             ChalkError::new(
-                ErrorDomain::Shredder,
-                ErrorCode::ShredderParseFailed,
+                ErrorDomain::Digest,
+                ErrorCode::DigestParseFailed,
                 format!("Failed to parse Drive file list: {}", e),
             )
         })?;
@@ -448,8 +448,8 @@ async fn list_docs_recursive(
             .await
             .map_err(|e| {
                 ChalkError::new(
-                    ErrorDomain::Shredder,
-                    ErrorCode::ShredderParseFailed,
+                    ErrorDomain::Digest,
+                    ErrorCode::DigestParseFailed,
                     format!("Failed to list subfolders in {}: {}", folder_id, e),
                 )
             })?;
@@ -462,8 +462,8 @@ async fn list_docs_recursive(
 
         let body: serde_json::Value = response.json().await.map_err(|e| {
             ChalkError::new(
-                ErrorDomain::Shredder,
-                ErrorCode::ShredderParseFailed,
+                ErrorDomain::Digest,
+                ErrorCode::DigestParseFailed,
                 format!("Failed to parse subfolder list: {}", e),
             )
         })?;
@@ -510,8 +510,8 @@ pub async fn check_if_document(
         .await
         .map_err(|e| {
             ChalkError::new(
-                ErrorDomain::Shredder,
-                ErrorCode::ShredderParseFailed,
+                ErrorDomain::Digest,
+                ErrorCode::DigestParseFailed,
                 format!("Failed to check file metadata for {}: {}", file_id, e),
             )
         })?;
@@ -522,8 +522,8 @@ pub async fn check_if_document(
 
     let body: serde_json::Value = response.json().await.map_err(|e| {
         ChalkError::new(
-            ErrorDomain::Shredder,
-            ErrorCode::ShredderParseFailed,
+            ErrorDomain::Digest,
+            ErrorCode::DigestParseFailed,
             format!("Failed to parse file metadata: {}", e),
         )
     })?;
@@ -538,23 +538,23 @@ pub async fn check_if_document(
     }
 }
 
-/// Shred all documents in a folder (recursively). Called by `trigger_initial_shred`.
+/// Digest all documents in a folder (recursively). Called by `trigger_initial_digest`.
 ///
 /// If `folder_id` is actually a single document ID (from `select_single_document`),
-/// this function detects it and shreds just that document.
-pub async fn shred_folder(
+/// this function detects it and digests just that document.
+pub async fn digest_folder(
     db: &Database,
     access_token: &str,
     folder_id: &str,
-) -> Result<ShredSummary, ChalkError> {
+) -> Result<DigestSummary, ChalkError> {
     let client = reqwest::Client::new();
 
     // Check if the "folder_id" is actually a single document (selected via select_single_document).
     if let Some((doc_id, doc_name)) = check_if_document(access_token, folder_id).await? {
-        info!(doc_id = doc_id.as_str(), doc_name = doc_name.as_str(), "Selected item is a single document — shredding directly");
+        info!(doc_id = doc_id.as_str(), doc_name = doc_name.as_str(), "Selected item is a single document — digesting directly");
         let default_subject_id = find_or_create_subject(db, "General", None)?;
-        return match shred_document(db, access_token, &doc_id, &doc_name, &default_subject_id).await {
-            Ok(result) => Ok(ShredSummary {
+        return match digest_document(db, access_token, &doc_id, &doc_name, &default_subject_id).await {
+            Ok(result) => Ok(DigestSummary {
                 documents_processed: 1,
                 total_tables: result.tables_found,
                 total_lessons: result.lessons_extracted,
@@ -569,7 +569,7 @@ pub async fn shred_folder(
 
     if files.is_empty() {
         info!(folder_id, "No Google Docs found in folder or subfolders");
-        return Ok(ShredSummary {
+        return Ok(DigestSummary {
             documents_processed: 0,
             total_tables: 0,
             total_lessons: 0,
@@ -599,14 +599,14 @@ pub async fn shred_folder(
             continue;
         }
 
-        match shred_document(db, access_token, doc_id, doc_name, &default_subject_id).await {
+        match digest_document(db, access_token, doc_id, doc_name, &default_subject_id).await {
             Ok(result) => {
                 total_tables += result.tables_found;
                 total_lessons += result.lessons_extracted;
                 results.push(result);
             }
             Err(e) => {
-                warn!(doc_id, doc_name, error = %e, "Failed to shred document — skipping");
+                warn!(doc_id, doc_name, error = %e, "Failed to digest document — skipping");
             }
         }
     }
@@ -616,10 +616,10 @@ pub async fn shred_folder(
         documents_processed = results.len(),
         total_tables,
         total_lessons,
-        "Folder shred complete"
+        "Folder digest complete"
     );
 
-    Ok(ShredSummary {
+    Ok(DigestSummary {
         documents_processed: results.len(),
         total_tables,
         total_lessons,
@@ -942,8 +942,8 @@ mod tests {
     }
 
     #[test]
-    fn test_shred_result_serialization() {
-        let result = ShredResult {
+    fn test_digest_result_serialization() {
+        let result = DigestResult {
             doc_id: "abc123".into(),
             doc_name: "Test Doc".into(),
             tables_found: 2,
@@ -957,8 +957,8 @@ mod tests {
     }
 
     #[test]
-    fn test_shred_summary_serialization() {
-        let summary = ShredSummary {
+    fn test_digest_summary_serialization() {
+        let summary = DigestSummary {
             documents_processed: 3,
             total_tables: 5,
             total_lessons: 12,

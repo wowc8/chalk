@@ -7,7 +7,7 @@
  *   2. The onboarding wizard progresses through every step.
  *   3. Mock OAuth PKCE flow completes.
  *   4. Folder selection works.
- *   5. The initial import (shred) completes.
+ *   5. The initial import (digest) completes.
  *   6. The completion screen renders.
  *
  * No real Google API calls or Rust backend required — all Tauri
@@ -216,7 +216,7 @@ test("progress indicators are displayed for each step", async ({ page }) => {
 
   // The OnboardingWizard renders 5 rounded-full indicator dots (one per step)
   const dots = page.locator(".rounded-full.w-2\\.5.h-2\\.5");
-  await expect(dots).toHaveCount(5); // welcome, google-auth, folder-select, initial-shred, complete
+  await expect(dots).toHaveCount(5); // welcome, google-auth, folder-select, initial-digest, complete
 });
 
 // ---------------------------------------------------------------------------
@@ -251,7 +251,7 @@ test("app resumes at folder step when oauth is already complete", async ({
       tokens_stored: true,
       folder_selected: false,
       folder_accessible: false,
-      initial_shred_complete: false,
+      initial_digest_complete: false,
       selected_folder_id: null,
       selected_folder_name: null,
     },
