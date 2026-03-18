@@ -476,36 +476,17 @@ pub async fn trigger_initial_shred(
         .await
         .map_err(|e| e.to_string())?;
 
-    // Fetch file list from the selected folder.
-    let reqwest_client = reqwest::Client::new();
-    let query = format!(
-        "'{}' in parents and trashed=false and mimeType='application/vnd.google-apps.document'",
-        folder_id
-    );
-    let response = reqwest_client
-        .get("https://www.googleapis.com/drive/v3/files")
-        .query(&[
-            ("q", query.as_str()),
-            ("fields", "files(id,name,modifiedTime)"),
-            ("pageSize", "50"),
-        ])
-        .header("Authorization", format!("Bearer {}", access_token))
-        .send()
+    // Shred all documents in the selected folder.
+    let summary = crate::shredder::shred_folder(&state.db, &access_token, &folder_id)
         .await
         .map_err(|e| e.to_string())?;
 
-    let body: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
-
-    let file_count = body
-        .get("files")
-        .and_then(|f| f.as_array())
-        .map(|a| a.len())
-        .unwrap_or(0);
-
     info!(
         folder_id = folder_id.as_str(),
-        file_count = file_count,
-        "Initial shred: discovered documents in folder"
+        documents_processed = summary.documents_processed,
+        total_tables = summary.total_tables,
+        total_lessons = summary.total_lessons,
+        "Initial shred complete"
     );
 
     // Mark shred as complete.
@@ -513,10 +494,12 @@ pub async fn trigger_initial_shred(
     updated_status.initial_shred_complete = true;
     save_onboarding_status(&state.data_dir, &updated_status)?;
 
-    Ok(format!(
-        "Initial shred complete — found {} document(s) to process",
-        file_count
-    ))
+    Ok(serde_json::to_string(&summary).unwrap_or_else(|_| {
+        format!(
+            "Initial shred complete — processed {} document(s), extracted {} lesson plan(s)",
+            summary.documents_processed, summary.total_lessons
+        )
+    }))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
