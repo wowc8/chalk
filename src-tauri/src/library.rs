@@ -1,6 +1,6 @@
 use crate::database::{
-    FtsSearchResult, LessonPlan, LibraryPlanCard, LibraryQuery, NewLessonPlan, NewTag, PlanVersion,
-    Tag,
+    FtsSearchResult, HybridSearchResult, LessonPlan, LibraryPlanCard, LibraryQuery, NewLessonPlan,
+    NewTag, PlanVersion, Tag,
 };
 use crate::AppState;
 
@@ -106,6 +106,21 @@ pub fn search_plans_fts(
     state
         .db
         .search_fts(&query, limit.unwrap_or(20))
+        .map_err(|e| format!("{}", e))
+}
+
+/// Hybrid search combining FTS5 keyword matching with FTS5-only fallback.
+/// When embedding support is wired up on the frontend, pass `query_embedding`
+/// for full hybrid (FTS5 + vector) search. Without it, uses FTS5-only.
+#[tauri::command]
+pub fn search_plans_hybrid(
+    state: tauri::State<'_, AppState>,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<HybridSearchResult>, String> {
+    state
+        .db
+        .search_hybrid_fts_only(&query, limit.unwrap_or(20))
         .map_err(|e| format!("{}", e))
 }
 

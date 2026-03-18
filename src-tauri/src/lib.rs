@@ -311,6 +311,7 @@ pub fn run() {
             library::get_tags_for_plan,
             library::list_library_plans,
             library::search_plans_fts,
+            library::search_plans_hybrid,
             library::create_plan,
             library::get_plan,
             library::update_plan_content,

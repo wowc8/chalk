@@ -1,6 +1,7 @@
 mod connection;
 mod crud;
 mod fts;
+mod hybrid;
 pub mod migrations;
 mod models;
 mod vectors;
