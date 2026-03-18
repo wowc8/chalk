@@ -105,7 +105,7 @@ pub fn search_plans_fts(
 ) -> Result<Vec<FtsSearchResult>, String> {
     state
         .db
-        .search_fts(&query, limit.unwrap_or(20))
+        .search_fts_with_fallback(&query, limit.unwrap_or(20))
         .map_err(|e| format!("{}", e))
 }
 

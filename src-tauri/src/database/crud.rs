@@ -584,7 +584,7 @@ impl Database {
     // ── Library queries ──────────────────────────────────────
 
     pub fn list_library_plans(&self, query: &LibraryQuery) -> Result<Vec<LibraryPlanCard>> {
-        self.with_conn(|conn| {
+        let result = self.with_conn(|conn| {
             let mut sql = String::from(
                 "SELECT DISTINCT lp.id, lp.title, lp.status, lp.source_type, lp.version, lp.created_at, lp.updated_at
                  FROM lesson_plans lp",
@@ -619,19 +619,10 @@ impl Database {
                 param_values.push(Box::new(source_type.clone()));
             }
 
-            // Full-text search via FTS5 (title, content, learning_objectives)
+            // Full-text search via FTS5 with prefix matching
             if let Some(search) = &query.search {
                 if !search.is_empty() {
-                    // Sanitize for FTS5: quote each token as a literal phrase
-                    let sanitized: String = search
-                        .split_whitespace()
-                        .filter(|t| !t.is_empty())
-                        .map(|token| {
-                            let escaped = token.replace('"', "\"\"");
-                            format!("\"{}\"", escaped)
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" ");
+                    let sanitized = super::fts::sanitize_fts_query(search);
                     if !sanitized.is_empty() {
                         sql.push_str(
                             " INNER JOIN lesson_plans_fts fts ON fts.rowid = lp.rowid",
@@ -693,7 +684,76 @@ impl Database {
             }
 
             Ok(plans)
-        })
+        })?;
+
+        // Fuzzy fallback: if FTS5 returned nothing and we had a search term,
+        // try fuzzy matching for typo tolerance.
+        if result.is_empty() {
+            if let Some(search) = &query.search {
+                if !search.trim().is_empty() && query.source_type.is_none() && query.tag_ids.is_none() {
+                    // Pure search with no other filters — use fuzzy fallback
+                    let fuzzy_results = self.search_fuzzy(search, 20)?;
+                    if !fuzzy_results.is_empty() {
+                        let fuzzy_ids: Vec<String> = fuzzy_results.iter().map(|r| r.lesson_plan_id.clone()).collect();
+                        return self.with_conn(|conn| {
+                            let placeholders: String = fuzzy_ids.iter().enumerate()
+                                .map(|(i, _)| format!("?{}", i + 1))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            let sql = format!(
+                                "SELECT lp.id, lp.title, lp.status, lp.source_type, lp.version, lp.created_at, lp.updated_at
+                                 FROM lesson_plans lp
+                                 WHERE lp.id IN ({})",
+                                placeholders
+                            );
+                            let mut stmt = conn.prepare(&sql)?;
+                            let param_refs: Vec<&dyn rusqlite::types::ToSql> = fuzzy_ids.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
+                            let rows = stmt.query_map(param_refs.as_slice(), |row| {
+                                Ok(LibraryPlanCard {
+                                    id: row.get(0)?,
+                                    title: row.get(1)?,
+                                    status: row.get(2)?,
+                                    source_type: row.get(3)?,
+                                    version: row.get(4)?,
+                                    tags: Vec::new(),
+                                    created_at: row.get(5)?,
+                                    updated_at: row.get(6)?,
+                                })
+                            })?;
+                            let mut plans: Vec<LibraryPlanCard> = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+
+                            // Sort by fuzzy result order
+                            let id_order: std::collections::HashMap<&str, usize> = fuzzy_ids.iter().enumerate().map(|(i, id)| (id.as_str(), i)).collect();
+                            plans.sort_by_key(|p| id_order.get(p.id.as_str()).copied().unwrap_or(usize::MAX));
+
+                            // Fetch tags
+                            for plan in &mut plans {
+                                let mut tag_stmt = conn.prepare(
+                                    "SELECT t.id, t.name, t.color, t.created_at
+                                     FROM tags t
+                                     INNER JOIN plan_tags pt ON pt.tag_id = t.id
+                                     WHERE pt.plan_id = ?1
+                                     ORDER BY t.name",
+                                )?;
+                                let tag_rows = tag_stmt.query_map(params![plan.id], |row| {
+                                    Ok(Tag {
+                                        id: row.get(0)?,
+                                        name: row.get(1)?,
+                                        color: row.get(2)?,
+                                        created_at: row.get(3)?,
+                                    })
+                                })?;
+                                plan.tags = tag_rows.collect::<std::result::Result<Vec<_>, _>>()?;
+                            }
+
+                            Ok(plans)
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(result)
     }
 
     // ── App Settings ──────────────────────────────────────────
