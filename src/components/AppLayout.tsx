@@ -22,7 +22,7 @@ export function AppLayout({ onReconnect }: { onReconnect: () => void }) {
             : undefined
         }
       />
-      <main className="flex-1 overflow-y-auto">
+      <main className={`flex-1 ${isPlanDetail ? "flex flex-col min-h-0 overflow-hidden" : "overflow-y-auto"}`}>
         <Outlet />
       </main>
 
