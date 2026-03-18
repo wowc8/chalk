@@ -253,12 +253,8 @@ pub fn run() {
 
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_dialog::init());
-
-    // Only register the updater plugin in release builds — it requires a
-    // signing pubkey that isn't available during development.
-    #[cfg(not(debug_assertions))]
-    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build());
 
     builder
         .manage(AppState {
