@@ -4,12 +4,13 @@ use std::path::PathBuf;
 use tauri::State;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::connectors::google_drive::{self, DriveFolder, DriveItem, GoogleDriveConnector, OAuthConfig};
 use crate::AppState;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct OnboardingStatus {
     pub oauth_configured: bool,
     pub tokens_stored: bool,
@@ -494,12 +495,55 @@ pub async fn trigger_initial_shred(
     updated_status.initial_shred_complete = true;
     save_onboarding_status(&state.data_dir, &updated_status)?;
 
-    Ok(serde_json::to_string(&summary).unwrap_or_else(|_| {
-        format!(
-            "Initial shred complete — processed {} document(s), extracted {} lesson plan(s)",
-            summary.documents_processed, summary.total_lessons
-        )
-    }))
+    // Attempt to vectorize imported plans for RAG search.
+    // If no OpenAI API key is configured, skip gracefully.
+    let embeddings_skipped = if summary.total_lessons > 0 {
+        match state.db.get_setting("openai_api_key") {
+            Ok(Some(api_key)) if !api_key.is_empty() => {
+                let client = crate::rag::embeddings::EmbeddingClient::new(api_key);
+                let plans = state
+                    .db
+                    .list_plans_without_embeddings()
+                    .unwrap_or_default();
+                let mut vectorized = 0u32;
+                for plan in &plans {
+                    let text = crate::rag::chunker::create_embedding_text(
+                        &plan.title,
+                        &plan.content,
+                        plan.learning_objectives.as_deref(),
+                    );
+                    match client.embed_one(&text).await {
+                        Ok(embedding) => {
+                            if state.db.upsert_embedding(&plan.id, &embedding).is_ok() {
+                                vectorized += 1;
+                            }
+                        }
+                        Err(e) => {
+                            warn!(plan_id = %plan.id, error = %e, "Failed to vectorize plan — skipping");
+                        }
+                    }
+                }
+                info!(vectorized, "Post-shred vectorization complete");
+                false
+            }
+            _ => {
+                info!("No OpenAI API key configured — skipping embeddings. Configure in Settings.");
+                true
+            }
+        }
+    } else {
+        false
+    };
+
+    let mut message = format!(
+        "found {} document(s), extracted {} lesson plan(s)",
+        summary.documents_processed, summary.total_lessons
+    );
+    if embeddings_skipped {
+        message.push_str("|embeddings_skipped");
+    }
+
+    Ok(message)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -764,5 +808,71 @@ mod tests {
         let loaded = load_onboarding_status(&data_dir);
         assert!(loaded.oauth_configured);
         assert!(loaded.tokens_stored);
+    }
+
+    #[test]
+    fn test_onboarding_status_deserializes_with_missing_fields() {
+        // Simulate an old status file that doesn't have newer fields
+        // (e.g., folder_accessible, selected_folder_id, selected_folder_name).
+        let old_json = r#"{
+            "oauth_configured": true,
+            "tokens_stored": true,
+            "folder_selected": true,
+            "initial_shred_complete": true
+        }"#;
+        let status: OnboardingStatus = serde_json::from_str(old_json).unwrap();
+        assert!(status.oauth_configured);
+        assert!(status.tokens_stored);
+        assert!(status.folder_selected);
+        assert!(status.initial_shred_complete);
+        // Missing fields should get defaults
+        assert!(!status.folder_accessible);
+        assert!(status.selected_folder_id.is_none());
+        assert!(status.selected_folder_name.is_none());
+    }
+
+    #[test]
+    fn test_onboarding_status_survives_minimal_json() {
+        // Even with just one field, deserialization should succeed
+        let minimal_json = r#"{"oauth_configured": true}"#;
+        let status: OnboardingStatus = serde_json::from_str(minimal_json).unwrap();
+        assert!(status.oauth_configured);
+        assert!(!status.tokens_stored);
+        assert!(!status.folder_selected);
+        assert!(!status.initial_shred_complete);
+    }
+
+    #[test]
+    fn test_onboarding_status_empty_json_object() {
+        let empty_json = "{}";
+        let status: OnboardingStatus = serde_json::from_str(empty_json).unwrap();
+        assert!(!status.oauth_configured);
+        assert!(!status.tokens_stored);
+        assert!(!status.folder_selected);
+        assert!(!status.initial_shred_complete);
+    }
+
+    #[test]
+    fn test_onboarding_status_persists_across_schema_changes() {
+        let dir = TempDir::new().unwrap();
+        let data_dir = setup_data_dir(&dir);
+
+        // Write an "old" status file missing newer fields
+        let old_json = r#"{
+            "oauth_configured": true,
+            "tokens_stored": true,
+            "folder_selected": true,
+            "initial_shred_complete": true
+        }"#;
+        let path = status_file_path(&data_dir);
+        fs::write(&path, old_json).unwrap();
+
+        // load_onboarding_status should still return the correct values
+        let status = load_onboarding_status(&data_dir);
+        assert!(status.oauth_configured);
+        assert!(status.tokens_stored);
+        assert!(status.folder_selected);
+        assert!(status.initial_shred_complete);
+        assert!(!status.folder_accessible); // default
     }
 }
