@@ -1,6 +1,9 @@
 //! AI Chat module — manages conversations, message persistence, and
 //! context-aware generation via RAG.
 
+pub mod openai;
+pub mod provider;
+
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
@@ -10,6 +13,8 @@ use crate::events;
 use crate::rag::embeddings::EmbeddingClient;
 use crate::rag::retrieval;
 use crate::AppState;
+
+use provider::{AiProviderConfig, AiProviderFactory, CompletionMessage};
 
 // ── Models ──────────────────────────────────────────────────
 
@@ -220,103 +225,20 @@ When suggesting content for the lesson plan, format it clearly so the teacher ca
 
 Be concise, practical, and focused on actionable teaching advice."#;
 
-/// OpenAI chat completion request/response types.
-#[derive(Serialize)]
-struct ChatCompletionRequest {
-    model: String,
-    messages: Vec<CompletionMessage>,
-    max_tokens: u32,
-    temperature: f32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    stream: Option<bool>,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-struct CompletionMessage {
-    role: String,
-    content: String,
-}
-
-#[derive(Deserialize)]
-struct ChatCompletionResponse {
-    choices: Vec<CompletionChoice>,
-}
-
-#[derive(Deserialize)]
-struct CompletionChoice {
-    message: CompletionMessage,
-}
-
-/// Send a chat message with RAG context to the AI (non-streaming).
-async fn generate_response(
+/// Create an AI provider from the current app settings.
+fn create_provider_from_settings(
     api_key: &str,
     base_url: &str,
     model: &str,
-    history: &[ChatMessage],
-    user_message: &str,
-    rag_context: &str,
-    active_plan: Option<(&str, &str)>,
-) -> Result<String, ChalkError> {
-    let messages = build_messages(history, user_message, rag_context, active_plan);
-
-    let request = ChatCompletionRequest {
+    provider_type: &str,
+) -> Result<Box<dyn provider::AiProvider>, ChalkError> {
+    let config = AiProviderConfig {
+        provider_type: provider_type.to_string(),
+        api_key: api_key.to_string(),
+        base_url: base_url.to_string(),
         model: model.to_string(),
-        messages,
-        max_tokens: 2048,
-        temperature: 0.7,
-        stream: None,
     };
-
-    let url = format!("{base_url}/chat/completions");
-    let client = reqwest::Client::new();
-
-    let response = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {api_key}"))
-        .header("Content-Type", "application/json")
-        .json(&request)
-        .send()
-        .await
-        .map_err(|e| ChalkError::connector_api(format!("Chat API request failed: {e}")))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "unknown".to_string());
-        return Err(ChalkError::connector_api(format!(
-            "Chat API returned {status}: {body}"
-        )));
-    }
-
-    let result: ChatCompletionResponse = response
-        .json()
-        .await
-        .map_err(|e| ChalkError::connector_api(format!("Failed to parse chat response: {e}")))?;
-
-    result
-        .choices
-        .into_iter()
-        .next()
-        .map(|c| c.message.content)
-        .ok_or_else(|| ChalkError::connector_api("Empty response from chat API"))
-}
-
-/// SSE streaming delta types for OpenAI streaming responses.
-#[derive(Deserialize)]
-struct StreamChoice {
-    delta: StreamDelta,
-}
-
-#[derive(Deserialize)]
-struct StreamDelta {
-    content: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct StreamChunk {
-    choices: Vec<StreamChoice>,
+    AiProviderFactory::create(&config)
 }
 
 /// Build the messages array for a chat completion request.
@@ -381,12 +303,22 @@ fn build_messages(
     messages
 }
 
-/// Stream a chat completion response, emitting tokens via Tauri events.
+/// Generate a non-streaming response using the provider abstraction.
+async fn generate_response(
+    provider: &dyn provider::AiProvider,
+    history: &[ChatMessage],
+    user_message: &str,
+    rag_context: &str,
+    active_plan: Option<(&str, &str)>,
+) -> Result<String, ChalkError> {
+    let messages = build_messages(history, user_message, rag_context, active_plan);
+    provider.complete(&messages, 2048, 0.7).await
+}
+
+/// Stream a response using the provider abstraction, emitting tokens via Tauri events.
 async fn generate_response_stream(
     app: &tauri::AppHandle,
-    api_key: &str,
-    base_url: &str,
-    model: &str,
+    provider: &dyn provider::AiProvider,
     history: &[ChatMessage],
     user_message: &str,
     rag_context: &str,
@@ -394,89 +326,20 @@ async fn generate_response_stream(
     active_plan: Option<(&str, &str)>,
 ) -> Result<String, ChalkError> {
     let messages = build_messages(history, user_message, rag_context, active_plan);
+    let conv_id = conversation_id.to_string();
+    let app_handle = app.clone();
 
-    let request = ChatCompletionRequest {
-        model: model.to_string(),
-        messages,
-        max_tokens: 2048,
-        temperature: 0.7,
-        stream: Some(true),
-    };
-
-    let url = format!("{base_url}/chat/completions");
-    let client = reqwest::Client::new();
-
-    let response = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {api_key}"))
-        .header("Content-Type", "application/json")
-        .json(&request)
-        .send()
+    provider
+        .complete_stream(&messages, 2048, 0.7, Box::new(move |token| {
+            events::emit_chat_stream_token(
+                &app_handle,
+                events::ChatStreamTokenPayload {
+                    conversation_id: conv_id.clone(),
+                    token: token.to_string(),
+                },
+            );
+        }))
         .await
-        .map_err(|e| ChalkError::connector_api(format!("Chat API request failed: {e}")))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "unknown".to_string());
-        return Err(ChalkError::connector_api(format!(
-            "Chat API returned {status}: {body}"
-        )));
-    }
-
-    // Read SSE stream line by line.
-    let mut full_content = String::new();
-    let mut stream = response.bytes_stream();
-
-    use futures_util::StreamExt;
-    let mut buffer = String::new();
-
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| {
-            ChalkError::connector_api(format!("Stream read error: {e}"))
-        })?;
-
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-        // Process complete SSE lines from buffer.
-        while let Some(line_end) = buffer.find('\n') {
-            let line = buffer[..line_end].trim_end_matches('\r').to_string();
-            buffer = buffer[line_end + 1..].to_string();
-
-            if line.is_empty() {
-                continue;
-            }
-
-            if let Some(data) = line.strip_prefix("data: ") {
-                if data.trim() == "[DONE]" {
-                    break;
-                }
-
-                if let Ok(chunk) = serde_json::from_str::<StreamChunk>(data) {
-                    for choice in &chunk.choices {
-                        if let Some(content) = &choice.delta.content {
-                            full_content.push_str(content);
-                            events::emit_chat_stream_token(
-                                app,
-                                events::ChatStreamTokenPayload {
-                                    conversation_id: conversation_id.to_string(),
-                                    token: content.clone(),
-                                },
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if full_content.is_empty() {
-        return Err(ChalkError::connector_api("Empty streaming response from chat API"));
-    }
-
-    Ok(full_content)
 }
 
 // ── Tauri Commands ──────────────────────────────────────────
@@ -563,9 +426,11 @@ pub async fn send_chat_message(
         _ => None,
     };
 
-    // Generate AI response.
+    // Create provider and generate AI response.
+    let ai_provider = create_provider_from_settings(&api_key, &base_url, &model, "openai")
+        .map_err(|e| e.message)?;
     let ai_response =
-        generate_response(&api_key, &base_url, &model, &history, &input.message, &rag_context, active_plan)
+        generate_response(ai_provider.as_ref(), &history, &input.message, &rag_context, active_plan)
             .await
             .map_err(|e| e.message)?;
 
@@ -671,6 +536,10 @@ pub async fn send_chat_message_stream(
         context_plans,
     };
 
+    // Create provider before spawning so we get early config errors.
+    let ai_provider = create_provider_from_settings(&api_key, &base_url, &model, "openai")
+        .map_err(|e| e.message)?;
+
     // Spawn the streaming generation in the background so we return immediately.
     let conv_id = conversation_id.clone();
     let msg = input.message.clone();
@@ -688,9 +557,7 @@ pub async fn send_chat_message_stream(
         let state = app_clone.state::<AppState>();
         match generate_response_stream(
             &app_clone,
-            &api_key,
-            &base_url,
-            &model,
+            ai_provider.as_ref(),
             &history,
             &msg,
             &rag_context,
@@ -1136,49 +1003,7 @@ mod tests {
         assert!(messages[0].content.contains("Related: old plan data"));
     }
 
-    #[test]
-    fn test_stream_chunk_deserialization() {
-        let json = r#"{"id":"chatcmpl-abc","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}"#;
-        let chunk: StreamChunk = serde_json::from_str(json).unwrap();
-        assert_eq!(chunk.choices.len(), 1);
-        assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("Hello"));
-    }
-
-    #[test]
-    fn test_stream_chunk_empty_delta() {
-        let json = r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
-        let chunk: StreamChunk = serde_json::from_str(json).unwrap();
-        assert!(chunk.choices[0].delta.content.is_none());
-    }
-
-    #[test]
-    fn test_chat_completion_request_serialization_no_stream() {
-        let req = ChatCompletionRequest {
-            model: "gpt-4o-mini".into(),
-            messages: vec![CompletionMessage {
-                role: "user".into(),
-                content: "Hello".into(),
-            }],
-            max_tokens: 2048,
-            temperature: 0.7,
-            stream: None,
-        };
-        let json = serde_json::to_value(&req).unwrap();
-        assert!(json.get("stream").is_none());
-    }
-
-    #[test]
-    fn test_chat_completion_request_serialization_with_stream() {
-        let req = ChatCompletionRequest {
-            model: "gpt-4o".into(),
-            messages: vec![],
-            max_tokens: 2048,
-            temperature: 0.7,
-            stream: Some(true),
-        };
-        let json = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["stream"], true);
-    }
+    // NOTE: Stream chunk and request serialization tests moved to openai.rs
 
     #[test]
     fn test_cascade_delete_messages() {
