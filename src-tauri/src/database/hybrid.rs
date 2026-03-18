@@ -92,7 +92,7 @@ impl Database {
         query: &str,
         limit: usize,
     ) -> Result<Vec<HybridSearchResult>> {
-        let fts_results = self.search_fts(query, limit)?;
+        let fts_results = self.search_fts_with_fallback(query, limit)?;
         Ok(fts_results
             .into_iter()
             .map(|r| HybridSearchResult {
