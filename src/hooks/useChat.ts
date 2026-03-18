@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 // ── Types ───────────────────────────────────────────────────
 
@@ -28,11 +29,27 @@ interface RetrievedContext {
   distance: number;
 }
 
-interface SendMessageResponse {
+interface StreamStartResponse {
   conversation_id: string;
   user_message: ChatMessage;
-  assistant_message: ChatMessage;
   context_plans: RetrievedContext[];
+}
+
+interface StreamTokenPayload {
+  conversation_id: string;
+  token: string;
+}
+
+interface StreamDonePayload {
+  conversation_id: string;
+  message_id: string;
+  full_content: string;
+  context_plan_ids: string | null;
+}
+
+interface StreamErrorPayload {
+  conversation_id: string;
+  error: string;
 }
 
 export interface AiConfig {
@@ -46,7 +63,7 @@ export interface AiConfig {
 /**
  * Hook for managing AI chat conversations with RAG-enhanced context.
  *
- * Handles conversation lifecycle, message sending, and state management.
+ * Supports streaming responses via Tauri events for real-time token display.
  */
 export function useChat(planId?: string) {
   const [conversationId, setConversationId] = useState<string | null>(null);
@@ -56,6 +73,10 @@ export function useChat(planId?: string) {
   const [lastContextPlans, setLastContextPlans] = useState<RetrievedContext[]>(
     [],
   );
+  const [streamingContent, setStreamingContent] = useState<string | null>(null);
+
+  // Track the conversation ID for stream event filtering.
+  const activeConvRef = useRef<string | null>(null);
 
   // Load messages when conversation changes.
   useEffect(() => {
@@ -71,16 +92,82 @@ export function useChat(planId?: string) {
       .catch((e) => setError(`Failed to load messages: ${e}`));
   }, [conversationId]);
 
+  // Subscribe to streaming events.
+  useEffect(() => {
+    const unlisteners: UnlistenFn[] = [];
+
+    const setup = async () => {
+      const unlisten1 = await listen<StreamTokenPayload>(
+        "chat:stream_token",
+        (event) => {
+          if (
+            activeConvRef.current &&
+            event.payload.conversation_id === activeConvRef.current
+          ) {
+            setStreamingContent((prev) => (prev ?? "") + event.payload.token);
+          }
+        },
+      );
+      unlisteners.push(unlisten1);
+
+      const unlisten2 = await listen<StreamDonePayload>(
+        "chat:stream_done",
+        (event) => {
+          if (
+            activeConvRef.current &&
+            event.payload.conversation_id === activeConvRef.current
+          ) {
+            // Replace streaming content with the finalized assistant message.
+            const assistantMsg: ChatMessage = {
+              id: event.payload.message_id,
+              conversation_id: event.payload.conversation_id,
+              role: "assistant",
+              content: event.payload.full_content,
+              context_plan_ids: event.payload.context_plan_ids,
+              created_at: new Date().toISOString(),
+            };
+            setMessages((prev) => [...prev, assistantMsg]);
+            setStreamingContent(null);
+            setIsLoading(false);
+          }
+        },
+      );
+      unlisteners.push(unlisten2);
+
+      const unlisten3 = await listen<StreamErrorPayload>(
+        "chat:stream_error",
+        (event) => {
+          if (
+            activeConvRef.current &&
+            event.payload.conversation_id === activeConvRef.current
+          ) {
+            setError(event.payload.error);
+            setStreamingContent(null);
+            setIsLoading(false);
+          }
+        },
+      );
+      unlisteners.push(unlisten3);
+    };
+
+    setup();
+
+    return () => {
+      unlisteners.forEach((fn) => fn());
+    };
+  }, []);
+
   const sendMessage = useCallback(
     async (message: string) => {
       if (!message.trim() || isLoading) return;
 
       setIsLoading(true);
       setError(null);
+      setStreamingContent(null);
 
       try {
-        const response = await invoke<SendMessageResponse>(
-          "send_chat_message",
+        const response = await invoke<StreamStartResponse>(
+          "send_chat_message_stream",
           {
             input: {
               conversation_id: conversationId,
@@ -95,18 +182,19 @@ export function useChat(planId?: string) {
           setConversationId(response.conversation_id);
         }
 
-        // Append both messages.
-        setMessages((prev) => [
-          ...prev,
-          response.user_message,
-          response.assistant_message,
-        ]);
+        // Track active conversation for stream filtering.
+        activeConvRef.current = response.conversation_id;
+
+        // Append user message immediately.
+        setMessages((prev) => [...prev, response.user_message]);
 
         // Track which plans were used as context.
         setLastContextPlans(response.context_plans);
+
+        // Streaming content will be populated by event listeners.
+        setStreamingContent("");
       } catch (e) {
         setError(`${e}`);
-      } finally {
         setIsLoading(false);
       }
     },
@@ -116,6 +204,7 @@ export function useChat(planId?: string) {
   const loadConversation = useCallback(async (id: string) => {
     setConversationId(id);
     setError(null);
+    setStreamingContent(null);
   }, []);
 
   const startNewConversation = useCallback(() => {
@@ -123,6 +212,8 @@ export function useChat(planId?: string) {
     setMessages([]);
     setError(null);
     setLastContextPlans([]);
+    setStreamingContent(null);
+    activeConvRef.current = null;
   }, []);
 
   return {
@@ -131,6 +222,7 @@ export function useChat(planId?: string) {
     isLoading,
     error,
     lastContextPlans,
+    streamingContent,
     sendMessage,
     loadConversation,
     startNewConversation,

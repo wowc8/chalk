@@ -320,6 +320,7 @@ pub fn run() {
             library::revert_plan_version,
             library::delete_plan,
             chat::send_chat_message,
+            chat::send_chat_message_stream,
             chat::get_chat_messages_cmd,
             chat::list_conversations,
             chat::delete_conversation,
