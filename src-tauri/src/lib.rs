@@ -16,7 +16,7 @@ pub mod sentry_integration;
 pub mod digest;
 pub mod updater;
 
-use database::Database;
+use database::{CancellationToken, Database};
 use feature_flags::{FeatureFlag, FeatureFlagInput};
 use std::sync::Mutex;
 
@@ -30,6 +30,8 @@ pub struct AppState {
     pub data_dir: std::path::PathBuf,
     pub db: Database,
     pub cache: cache::Cache,
+    /// Cancellation token for the digest operation.
+    pub digest_cancel: Mutex<CancellationToken>,
 }
 
 /// Tauri command: pipe frontend console errors to the backend structured log.
@@ -262,6 +264,7 @@ pub fn run() {
             data_dir: data_dir.clone(),
             db,
             cache,
+            digest_cancel: Mutex::new(CancellationToken::new()),
         })
         .invoke_handler(tauri::generate_handler![
             greet,
@@ -287,6 +290,7 @@ pub fn run() {
             admin::oauth::list_drive_items,
             admin::oauth::select_single_document,
             admin::oauth::trigger_initial_digest,
+            admin::oauth::cancel_digest,
             admin::oauth::list_scanned_documents,
             updater::check_for_update,
             updater::install_update,
