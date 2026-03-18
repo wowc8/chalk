@@ -619,12 +619,27 @@ impl Database {
                 param_values.push(Box::new(source_type.clone()));
             }
 
-            // Search by title
+            // Full-text search via FTS5 (title, content, learning_objectives)
             if let Some(search) = &query.search {
                 if !search.is_empty() {
-                    conditions.push(format!("lp.title LIKE ?{}", param_index));
-                    param_index += 1;
-                    param_values.push(Box::new(format!("%{}%", search)));
+                    // Sanitize for FTS5: quote each token as a literal phrase
+                    let sanitized: String = search
+                        .split_whitespace()
+                        .filter(|t| !t.is_empty())
+                        .map(|token| {
+                            let escaped = token.replace('"', "\"\"");
+                            format!("\"{}\"", escaped)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    if !sanitized.is_empty() {
+                        sql.push_str(
+                            " INNER JOIN lesson_plans_fts fts ON fts.rowid = lp.rowid",
+                        );
+                        conditions.push(format!("lesson_plans_fts MATCH ?{}", param_index));
+                        param_index += 1;
+                        param_values.push(Box::new(sanitized));
+                    }
                 }
             }
 

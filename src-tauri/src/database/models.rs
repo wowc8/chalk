@@ -106,6 +106,16 @@ pub struct LibraryQuery {
     pub tag_ids: Option<Vec<String>>,
 }
 
+// ── FTS Search ──────────────────────────────────────────────
+
+/// A full-text search result with plan ID and FTS5 rank score.
+#[derive(Debug, Clone, Serialize)]
+pub struct FtsSearchResult {
+    pub lesson_plan_id: String,
+    pub title: String,
+    pub rank: f64,
+}
+
 // ── Plan Versions ───────────────────────────────────────────
 
 /// A snapshot of a lesson plan at a particular version.
