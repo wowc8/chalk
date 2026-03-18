@@ -1,4 +1,4 @@
-//! Shredder module — semantic table parsing and lesson plan extraction.
+//! Digest module — semantic table parsing and lesson plan extraction.
 //!
 //! Takes Google Docs JSON (from the Documents API), identifies table structures,
 //! splits them into discrete lesson plan chunks, and stores each in the database
@@ -22,9 +22,9 @@ pub struct ExtractedLesson {
     pub grade_hint: Option<String>,
 }
 
-/// Result of shredding a single document.
+/// Result of digesting a single document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ShredResult {
+pub struct DigestResult {
     pub doc_id: String,
     pub doc_name: String,
     pub tables_found: usize,
@@ -32,13 +32,13 @@ pub struct ShredResult {
     pub plans_created: Vec<String>,
 }
 
-/// Result of shredding all documents in a folder.
+/// Result of digesting all documents in a folder.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ShredSummary {
+pub struct DigestSummary {
     pub documents_processed: usize,
     pub total_tables: usize,
     pub total_lessons: usize,
-    pub results: Vec<ShredResult>,
+    pub results: Vec<DigestResult>,
 }
 
 /// Fetch a Google Doc's structured JSON from the Documents API.
@@ -59,8 +59,8 @@ pub async fn fetch_doc_json(
         .await
         .map_err(|e| {
             ChalkError::new(
-                ErrorDomain::Shredder,
-                ErrorCode::ShredderParseFailed,
+                ErrorDomain::Digest,
+                ErrorCode::DigestParseFailed,
                 format!("Failed to fetch document {}: {}", doc_id, e),
             )
         })?;
@@ -69,16 +69,16 @@ pub async fn fetch_doc_json(
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
         return Err(ChalkError::new(
-            ErrorDomain::Shredder,
-            ErrorCode::ShredderParseFailed,
+            ErrorDomain::Digest,
+            ErrorCode::DigestParseFailed,
             format!("Google Docs API returned {}: {}", status, body),
         ));
     }
 
     response.json().await.map_err(|e| {
         ChalkError::new(
-            ErrorDomain::Shredder,
-            ErrorCode::ShredderParseFailed,
+            ErrorDomain::Digest,
+            ErrorCode::DigestParseFailed,
             format!("Failed to parse document JSON: {}", e),
         )
     })
@@ -246,14 +246,14 @@ fn capitalize_header(header: &str) -> String {
     }
 }
 
-/// Shred a single document: fetch its JSON, extract tables, store lesson plans.
-pub async fn shred_document(
+/// Digest a single document: fetch its JSON, extract tables, store lesson plans.
+pub async fn digest_document(
     db: &Database,
     access_token: &str,
     doc_id: &str,
     doc_name: &str,
     default_subject_id: &str,
-) -> Result<ShredResult, ChalkError> {
+) -> Result<DigestResult, ChalkError> {
     let doc_json = fetch_doc_json(access_token, doc_id).await?;
 
     let tables = parser::extract_tables(&doc_json);
@@ -264,7 +264,7 @@ pub async fn shred_document(
 
     if lessons.is_empty() {
         info!(doc_id, doc_name, "No lesson plans found in document");
-        return Ok(ShredResult {
+        return Ok(DigestResult {
             doc_id: doc_id.to_string(),
             doc_name: doc_name.to_string(),
             tables_found,
@@ -312,10 +312,10 @@ pub async fn shred_document(
         doc_name,
         tables_found,
         lessons_extracted,
-        "Document shredded successfully"
+        "Document digested successfully"
     );
 
-    Ok(ShredResult {
+    Ok(DigestResult {
         doc_id: doc_id.to_string(),
         doc_name: doc_name.to_string(),
         tables_found,
@@ -353,53 +353,223 @@ fn find_or_create_subject(
     Ok(subject.id)
 }
 
-/// Shred all documents in a folder. Called by `trigger_initial_shred`.
-pub async fn shred_folder(
-    db: &Database,
+/// List all Google Docs inside a folder, including subfolders (recursive).
+/// Handles pagination via `nextPageToken` and Shared Drive files.
+async fn list_docs_recursive(
+    client: &reqwest::Client,
     access_token: &str,
     folder_id: &str,
-) -> Result<ShredSummary, ChalkError> {
-    // Discover Google Docs in the folder.
-    let client = reqwest::Client::new();
-    let query = format!(
+) -> Result<Vec<serde_json::Value>, ChalkError> {
+    let mut all_docs: Vec<serde_json::Value> = Vec::new();
+
+    // 1. List Google Docs directly in this folder (with pagination).
+    let doc_query = format!(
         "'{}' in parents and trashed=false and mimeType='application/vnd.google-apps.document'",
         folder_id
     );
+    let mut page_token: Option<String> = None;
+    loop {
+        let mut params: Vec<(&str, String)> = vec![
+            ("q", doc_query.clone()),
+            ("fields", "nextPageToken,files(id,name,modifiedTime)".into()),
+            ("pageSize", "100".into()),
+            ("supportsAllDrives", "true".into()),
+            ("includeItemsFromAllDrives", "true".into()),
+        ];
+        if let Some(ref token) = page_token {
+            params.push(("pageToken", token.clone()));
+        }
 
+        let response = client
+            .get("https://www.googleapis.com/drive/v3/files")
+            .query(&params)
+            .header("Authorization", format!("Bearer {}", access_token))
+            .send()
+            .await
+            .map_err(|e| {
+                ChalkError::new(
+                    ErrorDomain::Digest,
+                    ErrorCode::DigestParseFailed,
+                    format!("Failed to list folder {}: {}", folder_id, e),
+                )
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(ChalkError::new(
+                ErrorDomain::Digest,
+                ErrorCode::DigestParseFailed,
+                format!("Drive API returned {} listing folder {}: {}", status, folder_id, body),
+            ));
+        }
+
+        let body: serde_json::Value = response.json().await.map_err(|e| {
+            ChalkError::new(
+                ErrorDomain::Digest,
+                ErrorCode::DigestParseFailed,
+                format!("Failed to parse Drive file list: {}", e),
+            )
+        })?;
+
+        if let Some(files) = body.get("files").and_then(|f| f.as_array()) {
+            all_docs.extend(files.iter().cloned());
+        }
+
+        match body.get("nextPageToken").and_then(|t| t.as_str()) {
+            Some(token) => page_token = Some(token.to_string()),
+            None => break,
+        }
+    }
+
+    // 2. Find subfolders and recurse into them.
+    let subfolder_query = format!(
+        "'{}' in parents and trashed=false and mimeType='application/vnd.google-apps.folder'",
+        folder_id
+    );
+    let mut page_token: Option<String> = None;
+    loop {
+        let mut params: Vec<(&str, String)> = vec![
+            ("q", subfolder_query.clone()),
+            ("fields", "nextPageToken,files(id,name)".into()),
+            ("pageSize", "100".into()),
+            ("supportsAllDrives", "true".into()),
+            ("includeItemsFromAllDrives", "true".into()),
+        ];
+        if let Some(ref token) = page_token {
+            params.push(("pageToken", token.clone()));
+        }
+
+        let response = client
+            .get("https://www.googleapis.com/drive/v3/files")
+            .query(&params)
+            .header("Authorization", format!("Bearer {}", access_token))
+            .send()
+            .await
+            .map_err(|e| {
+                ChalkError::new(
+                    ErrorDomain::Digest,
+                    ErrorCode::DigestParseFailed,
+                    format!("Failed to list subfolders in {}: {}", folder_id, e),
+                )
+            })?;
+
+        if !response.status().is_success() {
+            // Non-fatal: log and skip subfolder listing.
+            warn!(folder_id, "Failed to list subfolders — skipping recursion");
+            break;
+        }
+
+        let body: serde_json::Value = response.json().await.map_err(|e| {
+            ChalkError::new(
+                ErrorDomain::Digest,
+                ErrorCode::DigestParseFailed,
+                format!("Failed to parse subfolder list: {}", e),
+            )
+        })?;
+
+        if let Some(folders) = body.get("files").and_then(|f| f.as_array()) {
+            for folder in folders {
+                let sub_id = folder.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                if sub_id.is_empty() {
+                    continue;
+                }
+                // Box the recursive future to avoid infinite type size.
+                let sub_docs = Box::pin(list_docs_recursive(client, access_token, sub_id)).await?;
+                all_docs.extend(sub_docs);
+            }
+        }
+
+        match body.get("nextPageToken").and_then(|t| t.as_str()) {
+            Some(token) => page_token = Some(token.to_string()),
+            None => break,
+        }
+    }
+
+    Ok(all_docs)
+}
+
+/// Check if a Drive ID refers to a Google Doc (not a folder).
+/// Returns `Some((id, name))` if it's a document, `None` if it's a folder or on error.
+pub async fn check_if_document(
+    access_token: &str,
+    file_id: &str,
+) -> Result<Option<(String, String)>, ChalkError> {
+    let client = reqwest::Client::new();
     let response = client
-        .get("https://www.googleapis.com/drive/v3/files")
+        .get(format!(
+            "https://www.googleapis.com/drive/v3/files/{}",
+            file_id
+        ))
         .query(&[
-            ("q", query.as_str()),
-            ("fields", "files(id,name,modifiedTime)"),
-            ("pageSize", "100"),
+            ("fields", "id,name,mimeType"),
+            ("supportsAllDrives", "true"),
         ])
         .header("Authorization", format!("Bearer {}", access_token))
         .send()
         .await
         .map_err(|e| {
             ChalkError::new(
-                ErrorDomain::Shredder,
-                ErrorCode::ShredderParseFailed,
-                format!("Failed to list folder {}: {}", folder_id, e),
+                ErrorDomain::Digest,
+                ErrorCode::DigestParseFailed,
+                format!("Failed to check file metadata for {}: {}", file_id, e),
             )
         })?;
 
+    if !response.status().is_success() {
+        return Ok(None);
+    }
+
     let body: serde_json::Value = response.json().await.map_err(|e| {
         ChalkError::new(
-            ErrorDomain::Shredder,
-            ErrorCode::ShredderParseFailed,
-            format!("Failed to parse Drive file list: {}", e),
+            ErrorDomain::Digest,
+            ErrorCode::DigestParseFailed,
+            format!("Failed to parse file metadata: {}", e),
         )
     })?;
 
-    let files = body
-        .get("files")
-        .and_then(|f| f.as_array())
-        .cloned()
-        .unwrap_or_default();
+    let mime = body.get("mimeType").and_then(|v| v.as_str()).unwrap_or_default();
+    if mime == "application/vnd.google-apps.document" {
+        let id = body.get("id").and_then(|v| v.as_str()).unwrap_or(file_id).to_string();
+        let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("Untitled").to_string();
+        Ok(Some((id, name)))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Digest all documents in a folder (recursively). Called by `trigger_initial_digest`.
+///
+/// If `folder_id` is actually a single document ID (from `select_single_document`),
+/// this function detects it and digests just that document.
+pub async fn digest_folder(
+    db: &Database,
+    access_token: &str,
+    folder_id: &str,
+) -> Result<DigestSummary, ChalkError> {
+    let client = reqwest::Client::new();
+
+    // Check if the "folder_id" is actually a single document (selected via select_single_document).
+    if let Some((doc_id, doc_name)) = check_if_document(access_token, folder_id).await? {
+        info!(doc_id = doc_id.as_str(), doc_name = doc_name.as_str(), "Selected item is a single document — digesting directly");
+        let default_subject_id = find_or_create_subject(db, "General", None)?;
+        return match digest_document(db, access_token, &doc_id, &doc_name, &default_subject_id).await {
+            Ok(result) => Ok(DigestSummary {
+                documents_processed: 1,
+                total_tables: result.tables_found,
+                total_lessons: result.lessons_extracted,
+                results: vec![result],
+            }),
+            Err(e) => Err(e),
+        };
+    }
+
+    // Recursively discover all Google Docs in the folder and subfolders.
+    let files = list_docs_recursive(&client, access_token, folder_id).await?;
 
     if files.is_empty() {
-        return Ok(ShredSummary {
+        info!(folder_id, "No Google Docs found in folder or subfolders");
+        return Ok(DigestSummary {
             documents_processed: 0,
             total_tables: 0,
             total_lessons: 0,
@@ -429,14 +599,14 @@ pub async fn shred_folder(
             continue;
         }
 
-        match shred_document(db, access_token, doc_id, doc_name, &default_subject_id).await {
+        match digest_document(db, access_token, doc_id, doc_name, &default_subject_id).await {
             Ok(result) => {
                 total_tables += result.tables_found;
                 total_lessons += result.lessons_extracted;
                 results.push(result);
             }
             Err(e) => {
-                warn!(doc_id, doc_name, error = %e, "Failed to shred document — skipping");
+                warn!(doc_id, doc_name, error = %e, "Failed to digest document — skipping");
             }
         }
     }
@@ -446,10 +616,10 @@ pub async fn shred_folder(
         documents_processed = results.len(),
         total_tables,
         total_lessons,
-        "Folder shred complete"
+        "Folder digest complete"
     );
 
-    Ok(ShredSummary {
+    Ok(DigestSummary {
         documents_processed: results.len(),
         total_tables,
         total_lessons,
@@ -772,8 +942,8 @@ mod tests {
     }
 
     #[test]
-    fn test_shred_result_serialization() {
-        let result = ShredResult {
+    fn test_digest_result_serialization() {
+        let result = DigestResult {
             doc_id: "abc123".into(),
             doc_name: "Test Doc".into(),
             tables_found: 2,
@@ -787,8 +957,8 @@ mod tests {
     }
 
     #[test]
-    fn test_shred_summary_serialization() {
-        let summary = ShredSummary {
+    fn test_digest_summary_serialization() {
+        let summary = DigestSummary {
             documents_processed: 3,
             total_tables: 5,
             total_lessons: 12,

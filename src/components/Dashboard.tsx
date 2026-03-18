@@ -13,7 +13,7 @@ interface OnboardingStatus {
   tokens_stored: boolean;
   folder_selected: boolean;
   folder_accessible: boolean;
-  initial_shred_complete: boolean;
+  initial_digest_complete: boolean;
   selected_folder_id: string | null;
   selected_folder_name: string | null;
 }

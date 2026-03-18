@@ -6,7 +6,7 @@ export interface OnboardingStatus {
   tokens_stored: boolean;
   folder_selected: boolean;
   folder_accessible: boolean;
-  initial_shred_complete: boolean;
+  initial_digest_complete: boolean;
   selected_folder_id: string | null;
   selected_folder_name: string | null;
 }
@@ -21,7 +21,7 @@ export type SetupStep =
   | "welcome"
   | "authorize"
   | "folder"
-  | "shred"
+  | "digest"
   | "complete";
 
 export function useAdminSetup() {
@@ -36,10 +36,10 @@ export function useAdminSetup() {
       setStatus(s);
 
       // Auto-advance to the correct step based on status.
-      if (s.initial_shred_complete) {
+      if (s.initial_digest_complete) {
         setStep("complete");
       } else if (s.folder_selected && s.folder_accessible) {
-        setStep("shred");
+        setStep("digest");
       } else if (s.tokens_stored) {
         setStep("folder");
       } else if (s.oauth_configured) {
@@ -125,7 +125,7 @@ export function useAdminSetup() {
         );
         await refreshStatus();
         if (accessible) {
-          setStep("shred");
+          setStep("digest");
         } else {
           setError("Cannot access the selected folder. Check permissions.");
         }
@@ -138,11 +138,11 @@ export function useAdminSetup() {
     [refreshStatus],
   );
 
-  const triggerShred = useCallback(async () => {
+  const triggerDigest = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      await invoke<string>("trigger_initial_shred");
+      await invoke<string>("trigger_initial_digest");
       await refreshStatus();
       setStep("complete");
     } catch (e) {
@@ -163,7 +163,7 @@ export function useAdminSetup() {
     submitAuthCode,
     listFolders,
     selectFolder,
-    triggerShred,
+    triggerDigest,
     refreshStatus,
   };
 }

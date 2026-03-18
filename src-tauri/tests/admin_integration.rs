@@ -144,8 +144,8 @@ fn test_connector_expired_tokens() {
 // ── Admin + Database Integration ────────────────────────────────
 
 #[test]
-fn test_admin_with_database_post_shred_flow() {
-    // Simulate what happens after the admin agent's initial shred:
+fn test_admin_with_database_post_digest_flow() {
+    // Simulate what happens after the admin agent's initial digest:
     // lesson plans get inserted into the database.
     let db = Database::open_in_memory().unwrap();
 
@@ -158,7 +158,7 @@ fn test_admin_with_database_post_shred_flow() {
         })
         .unwrap();
 
-    // Create lesson plans (shredded from Google Doc tables).
+    // Create lesson plans (digested from Google Doc tables).
     let plan1 = db
         .create_lesson_plan(&NewLessonPlan {
             subject_id: subject.id.clone(),
@@ -192,7 +192,7 @@ fn test_admin_with_database_post_shred_flow() {
     assert_eq!(fetched.source_table_index, Some(0));
     assert_eq!(fetched.status, "draft");
 
-    // After shredding, plans get published.
+    // After digesting, plans get published.
     db.update_lesson_plan_status(&plan1.id, "published").unwrap();
     db.update_lesson_plan_status(&plan2.id, "published").unwrap();
 
@@ -202,7 +202,7 @@ fn test_admin_with_database_post_shred_flow() {
 
 #[test]
 fn test_admin_database_with_vectors() {
-    // Simulate post-shred vector embedding storage.
+    // Simulate post-digest vector embedding storage.
     let db = Database::open_in_memory().unwrap();
 
     // Recreate vec table with smaller dimension for testing.
@@ -245,7 +245,7 @@ fn test_admin_database_with_vectors() {
         })
         .unwrap();
 
-    // Store embeddings (simulating what the admin shredder would do).
+    // Store embeddings (simulating what the admin digest would do).
     db.upsert_embedding(&plan1.id, &[1.0, 0.0, 0.0, 0.0])
         .unwrap();
     db.upsert_embedding(&plan2.id, &[0.0, 1.0, 0.0, 0.0])

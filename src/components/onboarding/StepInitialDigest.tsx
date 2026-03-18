@@ -14,11 +14,13 @@ type ScanState = "idle" | "scanning" | "success" | "empty" | "error" | "success_
 const PROGRESS_MESSAGES = [
   "Connecting to Google Drive...",
   "Searching for documents...",
-  "Analyzing folder contents...",
-  "Indexing discovered files...",
+  "Scanning folder and subfolders...",
+  "Analyzing document contents...",
+  "Extracting lesson plans from tables...",
+  "Processing large documents (this may take a moment)...",
 ];
 
-export function StepInitialShred({
+export function StepInitialDigest({
   onNext,
   onBack,
   setError,
@@ -60,7 +62,11 @@ export function StepInitialShred({
     }
   };
 
-  const handleShred = async () => {
+  // Track whether the scan was cancelled so we can ignore late results.
+  const cancelledRef = useRef(false);
+
+  const handleDigest = async () => {
+    cancelledRef.current = false;
     setScanState("scanning");
     setProcessing(true);
     setError(null);
@@ -68,8 +74,12 @@ export function StepInitialShred({
     startProgressSimulation();
 
     try {
-      const msg = await invoke<string>("trigger_initial_shred");
+      const msg = await invoke<string>("trigger_initial_digest");
       stopProgressSimulation();
+
+      // If the user cancelled while we were waiting, ignore the result.
+      if (cancelledRef.current) return;
+
       setProgressPercent(100);
 
       // Parse document count from result message
@@ -91,6 +101,9 @@ export function StepInitialShred({
       }
     } catch (e) {
       stopProgressSimulation();
+
+      if (cancelledRef.current) return;
+
       const errorMsg = `${e}`;
       setScanState("error");
       setErrorDetail(errorMsg);
@@ -110,8 +123,19 @@ export function StepInitialShred({
         setError("Scan failed. You can retry or skip for now.");
       }
     } finally {
-      setProcessing(false);
+      if (!cancelledRef.current) {
+        setProcessing(false);
+      }
     }
+  };
+
+  const handleCancel = () => {
+    cancelledRef.current = true;
+    stopProgressSimulation();
+    setScanState("idle");
+    setProcessing(false);
+    setError(null);
+    setErrorDetail(null);
   };
 
   return (
@@ -153,7 +177,7 @@ export function StepInitialShred({
             <motion.button
               whileHover={{ scale: 1.05 }}
               whileTap={{ scale: 0.95 }}
-              onClick={handleShred}
+              onClick={handleDigest}
               className="px-8 py-3 bg-gradient-to-r from-bat-gold to-bat-cyan rounded-lg font-semibold text-bat-dark shadow-lg shadow-bat-gold/20"
             >
               Start Import
@@ -203,6 +227,17 @@ export function StepInitialShred({
                 {PROGRESS_MESSAGES[progressIndex]}
               </motion.p>
             </AnimatePresence>
+
+            <div className="flex justify-center mt-4">
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={handleCancel}
+                className="px-4 py-2 border border-gray-600 rounded-lg text-gray-400 text-sm hover:text-white hover:border-gray-400 transition-colors"
+              >
+                Cancel
+              </motion.button>
+            </div>
           </motion.div>
         )}
 
@@ -377,9 +412,11 @@ export function StepInitialShred({
         <motion.button
           whileHover={{ scale: 1.05 }}
           whileTap={{ scale: 0.95 }}
-          onClick={onBack}
-          disabled={scanState === "scanning"}
-          className="px-6 py-2.5 border border-gray-600 rounded-lg text-gray-400 hover:text-white hover:border-gray-400 transition-colors disabled:opacity-50"
+          onClick={() => {
+            if (scanState === "scanning") handleCancel();
+            onBack();
+          }}
+          className="px-6 py-2.5 border border-gray-600 rounded-lg text-gray-400 hover:text-white hover:border-gray-400 transition-colors"
         >
           Back
         </motion.button>

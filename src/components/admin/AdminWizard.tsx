@@ -10,7 +10,7 @@ const STEP_LABELS: Record<SetupStep, string> = {
   welcome: "Welcome",
   authorize: "Sign In",
   folder: "Select Folder",
-  shred: "Initial Scan",
+  digest: "Initial Scan",
   complete: "All Set",
 };
 
@@ -18,7 +18,7 @@ const STEP_ORDER: SetupStep[] = [
   "welcome",
   "authorize",
   "folder",
-  "shred",
+  "digest",
   "complete",
 ];
 
@@ -33,7 +33,7 @@ export function AdminWizard() {
     submitAuthCode,
     listFolders,
     selectFolder,
-    triggerShred,
+    triggerDigest,
   } = useAdminSetup();
 
   return (
@@ -76,10 +76,10 @@ export function AdminWizard() {
             loading={loading}
           />
         )}
-        {step === "shred" && (
-          <ShredStep
+        {step === "digest" && (
+          <DigestStep
             folderName={status?.selected_folder_name ?? "your folder"}
-            onTrigger={triggerShred}
+            onTrigger={triggerDigest}
             loading={loading}
           />
         )}
@@ -213,7 +213,7 @@ function FolderStep({
   );
 }
 
-function ShredStep({
+function DigestStep({
   folderName,
   onTrigger,
   loading,

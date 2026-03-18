@@ -1,7 +1,7 @@
 import { motion } from "framer-motion";
 import { useState, useEffect } from "react";
 
-const ONOMATOPOEIAS = ["BAM!", "ZERP!", "BEEP-BOOP!", "SHRED!", "ZAP!", "WHIRR!"];
+const ONOMATOPOEIAS = ["BAM!", "ZERP!", "BEEP-BOOP!", "DIGEST!", "ZAP!", "WHIRR!"];
 
 export function BatmanOverlay() {
   const [words, setWords] = useState<

@@ -14,7 +14,7 @@ pub enum ErrorDomain {
     Connector,
     #[serde(rename = "oauth")]
     OAuth,
-    Shredder,
+    Digest,
     Rag,
     Chat,
     Cache,
@@ -40,9 +40,9 @@ pub enum ErrorCode {
     ConnectorNotFound,
     ConnectorApiError,
 
-    // Shredder
-    ShredderParseFailed,
-    ShredderNoTables,
+    // Digest
+    DigestParseFailed,
+    DigestNoTables,
 
     // RAG / Chat
     RagEmbeddingFailed,

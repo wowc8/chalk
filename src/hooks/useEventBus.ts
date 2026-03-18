@@ -10,7 +10,7 @@ import type { EventChannelMap, EventChannel } from "../types/events";
  *
  * @example
  * ```tsx
- * useEventBus("shredder:progress", (payload) => {
+ * useEventBus("digest:progress", (payload) => {
  *   setProgress(payload.current / payload.total);
  * });
  * ```
