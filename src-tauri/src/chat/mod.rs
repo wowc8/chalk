@@ -2,9 +2,11 @@
 //! context-aware generation via RAG.
 
 use serde::{Deserialize, Serialize};
+use tauri::Manager;
 
 use crate::database::Database;
 use crate::errors::ChalkError;
+use crate::events;
 use crate::rag::embeddings::EmbeddingClient;
 use crate::rag::retrieval;
 use crate::AppState;
@@ -210,6 +212,8 @@ struct ChatCompletionRequest {
     messages: Vec<CompletionMessage>,
     max_tokens: u32,
     temperature: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -228,7 +232,7 @@ struct CompletionChoice {
     message: CompletionMessage,
 }
 
-/// Send a chat message with RAG context to the AI.
+/// Send a chat message with RAG context to the AI (non-streaming).
 async fn generate_response(
     api_key: &str,
     base_url: &str,
@@ -237,47 +241,14 @@ async fn generate_response(
     user_message: &str,
     rag_context: &str,
 ) -> Result<String, ChalkError> {
-    let mut messages = Vec::new();
-
-    // System prompt with optional RAG context.
-    let system_content = if rag_context.is_empty() {
-        SYSTEM_PROMPT.to_string()
-    } else {
-        format!("{SYSTEM_PROMPT}\n\n{rag_context}")
-    };
-
-    messages.push(CompletionMessage {
-        role: "system".to_string(),
-        content: system_content,
-    });
-
-    // Include conversation history (last 20 messages to stay within token budget).
-    let history_slice = if history.len() > 20 {
-        &history[history.len() - 20..]
-    } else {
-        history
-    };
-
-    for msg in history_slice {
-        if msg.role == "user" || msg.role == "assistant" {
-            messages.push(CompletionMessage {
-                role: msg.role.clone(),
-                content: msg.content.clone(),
-            });
-        }
-    }
-
-    // The current user message.
-    messages.push(CompletionMessage {
-        role: "user".to_string(),
-        content: user_message.to_string(),
-    });
+    let messages = build_messages(history, user_message, rag_context);
 
     let request = ChatCompletionRequest {
         model: model.to_string(),
         messages,
         max_tokens: 2048,
         temperature: 0.7,
+        stream: None,
     };
 
     let url = format!("{base_url}/chat/completions");
@@ -314,6 +285,161 @@ async fn generate_response(
         .next()
         .map(|c| c.message.content)
         .ok_or_else(|| ChalkError::connector_api("Empty response from chat API"))
+}
+
+/// SSE streaming delta types for OpenAI streaming responses.
+#[derive(Deserialize)]
+struct StreamChoice {
+    delta: StreamDelta,
+}
+
+#[derive(Deserialize)]
+struct StreamDelta {
+    content: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct StreamChunk {
+    choices: Vec<StreamChoice>,
+}
+
+/// Build the messages array for a chat completion request.
+fn build_messages(
+    history: &[ChatMessage],
+    user_message: &str,
+    rag_context: &str,
+) -> Vec<CompletionMessage> {
+    let mut messages = Vec::new();
+
+    let system_content = if rag_context.is_empty() {
+        SYSTEM_PROMPT.to_string()
+    } else {
+        format!("{SYSTEM_PROMPT}\n\n{rag_context}")
+    };
+
+    messages.push(CompletionMessage {
+        role: "system".to_string(),
+        content: system_content,
+    });
+
+    let history_slice = if history.len() > 20 {
+        &history[history.len() - 20..]
+    } else {
+        history
+    };
+
+    for msg in history_slice {
+        if msg.role == "user" || msg.role == "assistant" {
+            messages.push(CompletionMessage {
+                role: msg.role.clone(),
+                content: msg.content.clone(),
+            });
+        }
+    }
+
+    messages.push(CompletionMessage {
+        role: "user".to_string(),
+        content: user_message.to_string(),
+    });
+
+    messages
+}
+
+/// Stream a chat completion response, emitting tokens via Tauri events.
+async fn generate_response_stream(
+    app: &tauri::AppHandle,
+    api_key: &str,
+    base_url: &str,
+    model: &str,
+    history: &[ChatMessage],
+    user_message: &str,
+    rag_context: &str,
+    conversation_id: &str,
+) -> Result<String, ChalkError> {
+    let messages = build_messages(history, user_message, rag_context);
+
+    let request = ChatCompletionRequest {
+        model: model.to_string(),
+        messages,
+        max_tokens: 2048,
+        temperature: 0.7,
+        stream: Some(true),
+    };
+
+    let url = format!("{base_url}/chat/completions");
+    let client = reqwest::Client::new();
+
+    let response = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("Content-Type", "application/json")
+        .json(&request)
+        .send()
+        .await
+        .map_err(|e| ChalkError::connector_api(format!("Chat API request failed: {e}")))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "unknown".to_string());
+        return Err(ChalkError::connector_api(format!(
+            "Chat API returned {status}: {body}"
+        )));
+    }
+
+    // Read SSE stream line by line.
+    let mut full_content = String::new();
+    let mut stream = response.bytes_stream();
+
+    use futures_util::StreamExt;
+    let mut buffer = String::new();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| {
+            ChalkError::connector_api(format!("Stream read error: {e}"))
+        })?;
+
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+        // Process complete SSE lines from buffer.
+        while let Some(line_end) = buffer.find('\n') {
+            let line = buffer[..line_end].trim_end_matches('\r').to_string();
+            buffer = buffer[line_end + 1..].to_string();
+
+            if line.is_empty() {
+                continue;
+            }
+
+            if let Some(data) = line.strip_prefix("data: ") {
+                if data.trim() == "[DONE]" {
+                    break;
+                }
+
+                if let Ok(chunk) = serde_json::from_str::<StreamChunk>(data) {
+                    for choice in &chunk.choices {
+                        if let Some(content) = &choice.delta.content {
+                            full_content.push_str(content);
+                            events::emit_chat_stream_token(
+                                app,
+                                events::ChatStreamTokenPayload {
+                                    conversation_id: conversation_id.to_string(),
+                                    token: content.clone(),
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if full_content.is_empty() {
+        return Err(ChalkError::connector_api("Empty streaming response from chat API"));
+    }
+
+    Ok(full_content)
 }
 
 // ── Tauri Commands ──────────────────────────────────────────
@@ -410,6 +536,155 @@ pub async fn send_chat_message(
         assistant_message: assistant_msg,
         context_plans,
     })
+}
+
+/// Send a message with streaming response via Tauri events.
+/// Returns the conversation_id and user message immediately; the assistant
+/// response streams via `chat:stream_token` events, with `chat:stream_done`
+/// or `chat:stream_error` emitted when complete.
+#[derive(Debug, Serialize)]
+pub struct StreamStartResponse {
+    pub conversation_id: String,
+    pub user_message: ChatMessage,
+    pub context_plans: Vec<retrieval::RetrievedContext>,
+}
+
+#[tauri::command]
+pub async fn send_chat_message_stream(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    input: SendMessageInput,
+) -> Result<StreamStartResponse, String> {
+    let db = &state.db;
+
+    // Get or create conversation.
+    let conversation_id = match input.conversation_id {
+        Some(id) => {
+            db.get_conversation(&id).map_err(|e| format!("{e}"))?;
+            id
+        }
+        None => {
+            let title = if input.message.len() > 50 {
+                format!("{}...", &input.message[..47])
+            } else {
+                input.message.clone()
+            };
+            let conv = db
+                .create_conversation(&title, input.plan_id.as_deref())
+                .map_err(|e| format!("{e}"))?;
+            conv.id
+        }
+    };
+
+    // Get API configuration.
+    let api_key = db
+        .get_setting("openai_api_key")
+        .map_err(|e| format!("{e}"))?
+        .ok_or_else(|| "OpenAI API key not configured. Set it in Settings.".to_string())?;
+
+    let base_url = db
+        .get_setting("openai_base_url")
+        .map_err(|e| format!("{e}"))?
+        .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+
+    let model = db
+        .get_setting("chat_model")
+        .map_err(|e| format!("{e}"))?
+        .unwrap_or_else(|| "gpt-4o-mini".to_string());
+
+    // RAG: retrieve relevant plans.
+    let embedding_client = EmbeddingClient::new(api_key.clone());
+    let context_plans = retrieval::retrieve_relevant_plans(db, &embedding_client, &input.message)
+        .await
+        .unwrap_or_default();
+
+    let rag_context = retrieval::format_context_for_prompt(&context_plans);
+    let context_plan_ids: Vec<&str> = context_plans.iter().map(|c| c.plan_id.as_str()).collect();
+    let context_ids_json = if context_plan_ids.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&context_plan_ids).unwrap_or_default())
+    };
+
+    // Store the user message.
+    let user_msg = db
+        .add_chat_message(
+            &conversation_id,
+            "user",
+            &input.message,
+            context_ids_json.as_deref(),
+        )
+        .map_err(|e| format!("{e}"))?;
+
+    // Get conversation history for context.
+    let history = db
+        .get_chat_messages(&conversation_id)
+        .map_err(|e| format!("{e}"))?;
+
+    let response = StreamStartResponse {
+        conversation_id: conversation_id.clone(),
+        user_message: user_msg,
+        context_plans,
+    };
+
+    // Spawn the streaming generation in the background so we return immediately.
+    let conv_id = conversation_id.clone();
+    let msg = input.message.clone();
+    let ctx_ids = context_ids_json.clone();
+    let app_clone = app.clone();
+
+    tauri::async_runtime::spawn(async move {
+        let state = app_clone.state::<AppState>();
+        match generate_response_stream(
+            &app_clone,
+            &api_key,
+            &base_url,
+            &model,
+            &history,
+            &msg,
+            &rag_context,
+            &conv_id,
+        )
+        .await
+        {
+            Ok(full_content) => {
+                // Store the completed assistant message.
+                match state.db.add_chat_message(&conv_id, "assistant", &full_content, None) {
+                    Ok(assistant_msg) => {
+                        events::emit_chat_stream_done(
+                            &app_clone,
+                            events::ChatStreamDonePayload {
+                                conversation_id: conv_id,
+                                message_id: assistant_msg.id,
+                                full_content,
+                                context_plan_ids: ctx_ids,
+                            },
+                        );
+                    }
+                    Err(e) => {
+                        events::emit_chat_stream_error(
+                            &app_clone,
+                            events::ChatStreamErrorPayload {
+                                conversation_id: conv_id,
+                                error: format!("Failed to save message: {e}"),
+                            },
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                events::emit_chat_stream_error(
+                    &app_clone,
+                    events::ChatStreamErrorPayload {
+                        conversation_id: conv_id,
+                        error: e.message,
+                    },
+                );
+            }
+        }
+    });
+
+    Ok(response)
 }
 
 /// Get all messages in a conversation.
@@ -672,6 +947,150 @@ mod tests {
         assert_eq!(messages[0].role, "user");
         assert_eq!(messages[1].role, "assistant");
         assert_eq!(messages[2].role, "user");
+    }
+
+    #[test]
+    fn test_build_messages_without_context() {
+        let history: Vec<ChatMessage> = vec![];
+        let messages = build_messages(&history, "Hello", "");
+
+        assert_eq!(messages.len(), 2); // system + user
+        assert_eq!(messages[0].role, "system");
+        assert_eq!(messages[0].content, SYSTEM_PROMPT);
+        assert_eq!(messages[1].role, "user");
+        assert_eq!(messages[1].content, "Hello");
+    }
+
+    #[test]
+    fn test_build_messages_with_rag_context() {
+        let history: Vec<ChatMessage> = vec![];
+        let rag_ctx = "Relevant plan: Photosynthesis Lab";
+        let messages = build_messages(&history, "Help me", rag_ctx);
+
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0].content.contains(SYSTEM_PROMPT));
+        assert!(messages[0].content.contains(rag_ctx));
+    }
+
+    #[test]
+    fn test_build_messages_with_history() {
+        let history = vec![
+            ChatMessage {
+                id: "1".into(),
+                conversation_id: "c1".into(),
+                role: "user".into(),
+                content: "Hi".into(),
+                context_plan_ids: None,
+                created_at: "2024-01-01".into(),
+            },
+            ChatMessage {
+                id: "2".into(),
+                conversation_id: "c1".into(),
+                role: "assistant".into(),
+                content: "Hello!".into(),
+                context_plan_ids: None,
+                created_at: "2024-01-01".into(),
+            },
+        ];
+        let messages = build_messages(&history, "New question", "");
+
+        // system + 2 history + user = 4
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[1].content, "Hi");
+        assert_eq!(messages[2].content, "Hello!");
+        assert_eq!(messages[3].content, "New question");
+    }
+
+    #[test]
+    fn test_build_messages_truncates_long_history() {
+        // Create 25 messages — should only keep last 20.
+        let history: Vec<ChatMessage> = (0..25)
+            .map(|i| ChatMessage {
+                id: format!("msg-{i}"),
+                conversation_id: "c1".into(),
+                role: if i % 2 == 0 { "user" } else { "assistant" }.into(),
+                content: format!("Message {i}"),
+                context_plan_ids: None,
+                created_at: "2024-01-01".into(),
+            })
+            .collect();
+
+        let messages = build_messages(&history, "Final", "");
+        // system + 20 history + user = 22
+        assert_eq!(messages.len(), 22);
+        // First history message should be index 5 (25-20=5).
+        assert_eq!(messages[1].content, "Message 5");
+    }
+
+    #[test]
+    fn test_build_messages_skips_system_role_in_history() {
+        let history = vec![
+            ChatMessage {
+                id: "1".into(),
+                conversation_id: "c1".into(),
+                role: "system".into(),
+                content: "Should be skipped".into(),
+                context_plan_ids: None,
+                created_at: "2024-01-01".into(),
+            },
+            ChatMessage {
+                id: "2".into(),
+                conversation_id: "c1".into(),
+                role: "user".into(),
+                content: "Included".into(),
+                context_plan_ids: None,
+                created_at: "2024-01-01".into(),
+            },
+        ];
+        let messages = build_messages(&history, "Hi", "");
+
+        // system + 1 user from history (system skipped) + user = 3
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[1].content, "Included");
+    }
+
+    #[test]
+    fn test_stream_chunk_deserialization() {
+        let json = r#"{"id":"chatcmpl-abc","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}"#;
+        let chunk: StreamChunk = serde_json::from_str(json).unwrap();
+        assert_eq!(chunk.choices.len(), 1);
+        assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("Hello"));
+    }
+
+    #[test]
+    fn test_stream_chunk_empty_delta() {
+        let json = r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
+        let chunk: StreamChunk = serde_json::from_str(json).unwrap();
+        assert!(chunk.choices[0].delta.content.is_none());
+    }
+
+    #[test]
+    fn test_chat_completion_request_serialization_no_stream() {
+        let req = ChatCompletionRequest {
+            model: "gpt-4o-mini".into(),
+            messages: vec![CompletionMessage {
+                role: "user".into(),
+                content: "Hello".into(),
+            }],
+            max_tokens: 2048,
+            temperature: 0.7,
+            stream: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(json.get("stream").is_none());
+    }
+
+    #[test]
+    fn test_chat_completion_request_serialization_with_stream() {
+        let req = ChatCompletionRequest {
+            model: "gpt-4o".into(),
+            messages: vec![],
+            max_tokens: 2048,
+            temperature: 0.7,
+            stream: Some(true),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["stream"], true);
     }
 
     #[test]

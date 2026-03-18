@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { motion } from "framer-motion";
 import { useConnectors, type ConnectionDetails, type PendingOp } from "../hooks/useConnectors";
+import { useAiConfig } from "../hooks/useChat";
 import { useToast } from "./Toast";
 
 const spring = { type: "spring" as const, stiffness: 300, damping: 30 };
@@ -185,6 +186,9 @@ export function Settings({
           )}
         </motion.section>
 
+        {/* AI Configuration Section */}
+        <AiSettingsSection />
+
         {/* Privacy & Crash Reporting Section */}
         <motion.section
           initial={{ opacity: 0, y: 20 }}
@@ -310,6 +314,212 @@ export function Settings({
         </motion.section>
       </div>
     </div>
+  );
+}
+
+// ── AI Settings Section ────────────────────────────────────────────
+
+const AVAILABLE_MODELS = [
+  { id: "gpt-4o", label: "GPT-4o", description: "Most capable" },
+  { id: "gpt-4o-mini", label: "GPT-4o Mini", description: "Fast & affordable" },
+];
+
+function AiSettingsSection() {
+  const { config, loading, saveConfig } = useAiConfig();
+  const { addToast } = useToast();
+  const [apiKeyInput, setApiKeyInput] = useState("");
+  const [baseUrlInput, setBaseUrlInput] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [showApiKey, setShowApiKey] = useState(false);
+
+  useEffect(() => {
+    if (config) {
+      setBaseUrlInput(config.base_url);
+    }
+  }, [config]);
+
+  const handleSaveApiKey = async () => {
+    if (!apiKeyInput.trim()) return;
+    setSaving(true);
+    try {
+      await saveConfig({ api_key: apiKeyInput.trim() });
+      setApiKeyInput("");
+      setShowApiKey(false);
+      addToast("API key saved", "success");
+    } catch {
+      addToast("Failed to save API key", "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleSaveBaseUrl = async () => {
+    setSaving(true);
+    try {
+      await saveConfig({ base_url: baseUrlInput.trim() || "https://api.openai.com/v1" });
+      addToast("Base URL saved", "success");
+    } catch {
+      addToast("Failed to save base URL", "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleSelectModel = async (modelId: string) => {
+    try {
+      await saveConfig({ model: modelId });
+      addToast(`Model set to ${modelId}`, "success");
+    } catch {
+      addToast("Failed to save model", "error");
+    }
+  };
+
+  if (loading) {
+    return (
+      <motion.section
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.15 }}
+        className="mb-8"
+      >
+        <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">
+          AI Assistant
+        </h2>
+        <div className="flex items-center gap-3 py-4 justify-center">
+          <div className="w-4 h-4 border-2 border-bat-cyan border-t-transparent rounded-full animate-spin" />
+        </div>
+      </motion.section>
+    );
+  }
+
+  return (
+    <motion.section
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ delay: 0.15 }}
+      className="mb-8"
+    >
+      <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">
+        AI Assistant
+      </h2>
+
+      <div className="bg-bat-charcoal/50 rounded-lg border border-gray-800 p-4 space-y-5">
+        {/* API Key */}
+        <div>
+          <label className="block text-sm text-gray-300 mb-1.5">
+            OpenAI API Key
+          </label>
+          <div className="flex items-center gap-2">
+            {config?.has_api_key && !showApiKey ? (
+              <>
+                <span className="flex-1 text-sm text-gray-500 font-mono">
+                  sk-••••••••••••
+                </span>
+                <button
+                  onClick={() => setShowApiKey(true)}
+                  className="px-3 py-1.5 text-xs border border-gray-700 rounded-lg text-gray-400 hover:text-white hover:border-gray-500 transition-colors"
+                >
+                  Change
+                </button>
+              </>
+            ) : (
+              <>
+                <input
+                  type="password"
+                  value={apiKeyInput}
+                  onChange={(e) => setApiKeyInput(e.target.value)}
+                  placeholder="sk-..."
+                  className="flex-1 bg-bat-dark/50 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-bat-cyan/50 transition-colors font-mono"
+                />
+                <motion.button
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                  disabled={!apiKeyInput.trim() || saving}
+                  onClick={handleSaveApiKey}
+                  className="px-3 py-2 bg-bat-cyan/10 border border-bat-cyan/30 rounded-lg text-bat-cyan text-xs hover:bg-bat-cyan/20 transition-colors disabled:opacity-50"
+                >
+                  {saving ? "Saving..." : "Save"}
+                </motion.button>
+                {showApiKey && (
+                  <button
+                    onClick={() => {
+                      setShowApiKey(false);
+                      setApiKeyInput("");
+                    }}
+                    className="px-2 py-2 text-xs text-gray-500 hover:text-gray-300 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+          <p className="text-xs text-gray-600 mt-1">
+            Used for chat and embeddings. Never sent to our servers.
+          </p>
+        </div>
+
+        {/* Model Picker */}
+        <div>
+          <label className="block text-sm text-gray-300 mb-1.5">
+            Model
+          </label>
+          <div className="grid grid-cols-2 gap-2">
+            {AVAILABLE_MODELS.map((m) => (
+              <button
+                key={m.id}
+                onClick={() => handleSelectModel(m.id)}
+                className={`p-3 rounded-lg border text-left transition-colors ${
+                  config?.model === m.id
+                    ? "border-bat-cyan/50 bg-bat-cyan/10"
+                    : "border-gray-700 hover:border-gray-500"
+                }`}
+              >
+                <span
+                  className={`block text-sm font-medium ${
+                    config?.model === m.id ? "text-bat-cyan" : "text-gray-300"
+                  }`}
+                >
+                  {m.label}
+                </span>
+                <span className="block text-[10px] text-gray-500 mt-0.5">
+                  {m.description}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Base URL (advanced) */}
+        <div>
+          <label className="block text-sm text-gray-300 mb-1.5">
+            API Base URL
+            <span className="text-[10px] text-gray-600 ml-1.5">(advanced)</span>
+          </label>
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={baseUrlInput}
+              onChange={(e) => setBaseUrlInput(e.target.value)}
+              placeholder="https://api.openai.com/v1"
+              className="flex-1 bg-bat-dark/50 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-bat-cyan/50 transition-colors font-mono text-xs"
+            />
+            <motion.button
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+              disabled={saving || baseUrlInput === config?.base_url}
+              onClick={handleSaveBaseUrl}
+              className="px-3 py-2 text-xs border border-gray-700 rounded-lg text-gray-400 hover:text-white hover:border-gray-500 transition-colors disabled:opacity-50"
+            >
+              Save
+            </motion.button>
+          </div>
+          <p className="text-xs text-gray-600 mt-1">
+            Override for compatible endpoints (e.g., Azure OpenAI, local proxies).
+          </p>
+        </div>
+      </div>
+    </motion.section>
   );
 }
 

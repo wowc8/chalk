@@ -24,6 +24,9 @@ pub const CHANNEL_SHREDDER_COMPLETE: &str = "shredder:complete";
 pub const CHANNEL_CACHE_INVALIDATED: &str = "cache:invalidated";
 pub const CHANNEL_APP_ERROR: &str = "app:error";
 pub const CHANNEL_FEATURE_FLAG_CHANGED: &str = "feature_flag:changed";
+pub const CHANNEL_CHAT_STREAM_TOKEN: &str = "chat:stream_token";
+pub const CHANNEL_CHAT_STREAM_DONE: &str = "chat:stream_done";
+pub const CHANNEL_CHAT_STREAM_ERROR: &str = "chat:stream_error";
 
 // ── Event Payloads ───────────────────────────────────────────
 
@@ -85,6 +88,29 @@ pub struct FeatureFlagChangedPayload {
     pub enabled: bool,
 }
 
+/// Chat stream token event — a single token/chunk from the streaming response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatStreamTokenPayload {
+    pub conversation_id: String,
+    pub token: String,
+}
+
+/// Chat stream done event — streaming response completed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatStreamDonePayload {
+    pub conversation_id: String,
+    pub message_id: String,
+    pub full_content: String,
+    pub context_plan_ids: Option<String>,
+}
+
+/// Chat stream error event — streaming response failed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatStreamErrorPayload {
+    pub conversation_id: String,
+    pub error: String,
+}
+
 /// App error event — wraps ChalkError for frontend display.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppErrorPayload {
@@ -128,6 +154,27 @@ pub fn emit_cache_invalidated(app: &AppHandle, payload: CacheInvalidatedPayload)
 pub fn emit_feature_flag_changed(app: &AppHandle, payload: FeatureFlagChangedPayload) {
     if let Err(e) = app.emit(CHANNEL_FEATURE_FLAG_CHANGED, &payload) {
         tracing::warn!(error = %e, "Failed to emit feature flag changed event");
+    }
+}
+
+/// Emit a chat stream token event.
+pub fn emit_chat_stream_token(app: &AppHandle, payload: ChatStreamTokenPayload) {
+    if let Err(e) = app.emit(CHANNEL_CHAT_STREAM_TOKEN, &payload) {
+        tracing::warn!(error = %e, "Failed to emit chat stream token event");
+    }
+}
+
+/// Emit a chat stream done event.
+pub fn emit_chat_stream_done(app: &AppHandle, payload: ChatStreamDonePayload) {
+    if let Err(e) = app.emit(CHANNEL_CHAT_STREAM_DONE, &payload) {
+        tracing::warn!(error = %e, "Failed to emit chat stream done event");
+    }
+}
+
+/// Emit a chat stream error event.
+pub fn emit_chat_stream_error(app: &AppHandle, payload: ChatStreamErrorPayload) {
+    if let Err(e) = app.emit(CHANNEL_CHAT_STREAM_ERROR, &payload) {
+        tracing::warn!(error = %e, "Failed to emit chat stream error event");
     }
 }
 
@@ -273,5 +320,43 @@ mod tests {
         assert_eq!(CHANNEL_CACHE_INVALIDATED, "cache:invalidated");
         assert_eq!(CHANNEL_APP_ERROR, "app:error");
         assert_eq!(CHANNEL_FEATURE_FLAG_CHANGED, "feature_flag:changed");
+        assert_eq!(CHANNEL_CHAT_STREAM_TOKEN, "chat:stream_token");
+        assert_eq!(CHANNEL_CHAT_STREAM_DONE, "chat:stream_done");
+        assert_eq!(CHANNEL_CHAT_STREAM_ERROR, "chat:stream_error");
+    }
+
+    #[test]
+    fn test_chat_stream_token_payload_serializes() {
+        let payload = ChatStreamTokenPayload {
+            conversation_id: "conv-1".into(),
+            token: "Hello".into(),
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["conversation_id"], "conv-1");
+        assert_eq!(json["token"], "Hello");
+    }
+
+    #[test]
+    fn test_chat_stream_done_payload_serializes() {
+        let payload = ChatStreamDonePayload {
+            conversation_id: "conv-1".into(),
+            message_id: "msg-1".into(),
+            full_content: "Hello world".into(),
+            context_plan_ids: Some(r#"["plan-1"]"#.into()),
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["conversation_id"], "conv-1");
+        assert_eq!(json["message_id"], "msg-1");
+        assert_eq!(json["full_content"], "Hello world");
+    }
+
+    #[test]
+    fn test_chat_stream_error_payload_serializes() {
+        let payload = ChatStreamErrorPayload {
+            conversation_id: "conv-1".into(),
+            error: "API rate limit exceeded".into(),
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["error"], "API rate limit exceeded");
     }
 }

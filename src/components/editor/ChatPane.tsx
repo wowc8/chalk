@@ -86,6 +86,27 @@ function TypingIndicator() {
   );
 }
 
+function StreamingBubble({ content }: { content: string }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="flex justify-start mb-3"
+    >
+      <div className="max-w-[85%] px-3.5 py-2.5 rounded-xl text-sm leading-relaxed bg-chalk-board-dark/80 border border-chalk-white/8 text-chalk-dust">
+        <div className="whitespace-pre-wrap">
+          {content}
+          <motion.span
+            animate={{ opacity: [1, 0] }}
+            transition={{ duration: 0.5, repeat: Infinity }}
+            className="inline-block w-0.5 h-4 bg-chalk-blue/60 ml-0.5 align-text-bottom"
+          />
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
 function ContextBadge({ count }: { count: number }) {
   if (count === 0) return null;
 
@@ -146,6 +167,7 @@ export function ChatPane({
   const loading = isIntegrated ? chat.isLoading : (externalLoading ?? false);
   const error = isIntegrated ? chat.error : null;
   const contextCount = isIntegrated ? chat.lastContextPlans.length : 0;
+  const streamingContent = isIntegrated ? chat.streamingContent : null;
 
   const handleSend = isIntegrated
     ? (msg: string) => chat.sendMessage(msg)
@@ -241,14 +263,22 @@ export function ChatPane({
           {displayMessages.map((msg) => (
             <MessageBubble key={msg.id} message={msg} />
           ))}
-          {loading && <TypingIndicator />}
+          {loading && streamingContent ? (
+            <StreamingBubble content={streamingContent} />
+          ) : loading ? (
+            <TypingIndicator />
+          ) : null}
         </div>
       )}
 
       {/* Spacer when empty + loading */}
       {displayMessages.length === 0 && loading && (
         <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3">
-          <TypingIndicator />
+          {streamingContent ? (
+            <StreamingBubble content={streamingContent} />
+          ) : (
+            <TypingIndicator />
+          )}
         </div>
       )}
 
