@@ -44,6 +44,7 @@ sentry = { version = "0.35", features = ["backtrace", "panic", "contexts", "reqw
 sentry-tracing = "0.35"
 tauri-plugin-dialog = "2"
 zip = "2"
+scraper = "0.21"
 
 [dev-dependencies]
 tempfile = "3"

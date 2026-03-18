@@ -1,8 +1,10 @@
 //! Digest module — semantic table parsing and lesson plan extraction.
 //!
-//! Takes Google Docs JSON (from the Documents API), identifies table structures,
-//! splits them into discrete lesson plan chunks, and stores each in the database
-//! with a UUID. Vector indexing happens separately via the RAG pipeline.
+//! Fetches Google Docs as HTML via the Drive export API
+//! (`files/{id}/export?mimeType=text/html`), parses the HTML tables with the
+//! `scraper` crate, splits them into discrete lesson plan chunks, and stores
+//! each in the database with a UUID. Vector indexing happens separately via
+//! the RAG pipeline.
 //!
 //! All database writes for a single digest run are wrapped in a transaction.
 //! If the run is cancelled or errors out, the transaction rolls back so
@@ -54,14 +56,18 @@ struct FetchedDoc {
     lessons: Vec<ExtractedLesson>,
 }
 
-/// Fetch a Google Doc's structured JSON from the Documents API.
-pub async fn fetch_doc_json(
+/// Fetch a Google Doc as HTML via the Drive export API.
+///
+/// Uses `GET files/{id}/export?mimeType=text/html` which is much smaller
+/// than the Docs API JSON for large documents (e.g. ~337 KB vs 10 MB+).
+/// The `drive.readonly` scope already covers this endpoint.
+pub async fn fetch_doc_html(
     access_token: &str,
     doc_id: &str,
-) -> Result<serde_json::Value, ChalkError> {
+) -> Result<String, ChalkError> {
     let client = reqwest::Client::new();
     let url = format!(
-        "https://docs.googleapis.com/v1/documents/{}",
+        "https://www.googleapis.com/drive/v3/files/{}/export?mimeType=text/html",
         doc_id
     );
 
@@ -84,25 +90,25 @@ pub async fn fetch_doc_json(
         return Err(ChalkError::new(
             ErrorDomain::Digest,
             ErrorCode::DigestParseFailed,
-            format!("Google Docs API returned {}: {}", status, body),
+            format!("Drive export API returned {}: {}", status, body),
         ));
     }
 
-    response.json().await.map_err(|e| {
+    response.text().await.map_err(|e| {
         ChalkError::new(
             ErrorDomain::Digest,
             ErrorCode::DigestParseFailed,
-            format!("Failed to parse document JSON: {}", e),
+            format!("Failed to read HTML response: {}", e),
         )
     })
 }
 
-/// Extract lesson plans from a Google Docs JSON document.
+/// Extract lesson plans from a Google Doc exported as HTML.
 ///
-/// Parses the document body for table structures, uses the first row as headers,
-/// and converts subsequent rows into lesson plan entries.
-pub fn extract_lessons_from_doc(doc_json: &serde_json::Value) -> Vec<ExtractedLesson> {
-    let tables = parser::extract_tables(doc_json);
+/// Parses HTML tables, uses the first row as headers, and converts subsequent
+/// rows into lesson plan entries.
+pub fn extract_lessons_from_doc(html: &str) -> Vec<ExtractedLesson> {
+    let tables = parser::extract_tables(html);
     if tables.is_empty() {
         return Vec::new();
     }
@@ -265,10 +271,10 @@ async fn fetch_document(
     doc_id: &str,
     doc_name: &str,
 ) -> Result<FetchedDoc, ChalkError> {
-    let doc_json = fetch_doc_json(access_token, doc_id).await?;
-    let tables = parser::extract_tables(&doc_json);
+    let html = fetch_doc_html(access_token, doc_id).await?;
+    let tables = parser::extract_tables(&html);
     let tables_found = tables.len();
-    let lessons = extract_lessons_from_doc(&doc_json);
+    let lessons = extract_lessons_from_doc(&html);
 
     Ok(FetchedDoc {
         doc_id: doc_id.to_string(),
@@ -767,47 +773,15 @@ mod tests {
 
     #[test]
     fn test_extract_lessons_from_doc_with_tables() {
-        let doc_json = serde_json::json!({
-            "title": "Q1 Lesson Plans",
-            "body": {
-                "content": [
-                    {
-                        "table": {
-                            "rows": 3,
-                            "columns": 4,
-                            "tableRows": [
-                                {
-                                    "tableCells": [
-                                        {"content": [{"paragraph": {"elements": [{"textRun": {"content": "Title\n"}}]}}]},
-                                        {"content": [{"paragraph": {"elements": [{"textRun": {"content": "Subject\n"}}]}}]},
-                                        {"content": [{"paragraph": {"elements": [{"textRun": {"content": "Duration\n"}}]}}]},
-                                        {"content": [{"paragraph": {"elements": [{"textRun": {"content": "Objectives\n"}}]}}]}
-                                    ]
-                                },
-                                {
-                                    "tableCells": [
-                                        {"content": [{"paragraph": {"elements": [{"textRun": {"content": "Photosynthesis Lab\n"}}]}}]},
-                                        {"content": [{"paragraph": {"elements": [{"textRun": {"content": "Biology\n"}}]}}]},
-                                        {"content": [{"paragraph": {"elements": [{"textRun": {"content": "45 minutes\n"}}]}}]},
-                                        {"content": [{"paragraph": {"elements": [{"textRun": {"content": "Students will understand photosynthesis\n"}}]}}]}
-                                    ]
-                                },
-                                {
-                                    "tableCells": [
-                                        {"content": [{"paragraph": {"elements": [{"textRun": {"content": "Cell Division\n"}}]}}]},
-                                        {"content": [{"paragraph": {"elements": [{"textRun": {"content": "Biology\n"}}]}}]},
-                                        {"content": [{"paragraph": {"elements": [{"textRun": {"content": "60 minutes\n"}}]}}]},
-                                        {"content": [{"paragraph": {"elements": [{"textRun": {"content": "Students will learn mitosis and meiosis\n"}}]}}]}
-                                    ]
-                                }
-                            ]
-                        }
-                    }
-                ]
-            }
-        });
+        let html = r#"<html><body>
+            <table>
+                <tr><th>Title</th><th>Subject</th><th>Duration</th><th>Objectives</th></tr>
+                <tr><td>Photosynthesis Lab</td><td>Biology</td><td>45 minutes</td><td>Students will understand photosynthesis</td></tr>
+                <tr><td>Cell Division</td><td>Biology</td><td>60 minutes</td><td>Students will learn mitosis and meiosis</td></tr>
+            </table>
+        </body></html>"#;
 
-        let lessons = extract_lessons_from_doc(&doc_json);
+        let lessons = extract_lessons_from_doc(html);
         assert_eq!(lessons.len(), 2);
 
         assert_eq!(lessons[0].title, "Photosynthesis Lab");
@@ -822,97 +796,45 @@ mod tests {
 
     #[test]
     fn test_extract_lessons_no_tables() {
-        let doc_json = serde_json::json!({
-            "title": "Notes",
-            "body": {
-                "content": [
-                    {"paragraph": {"elements": [{"textRun": {"content": "Just some text\n"}}]}}
-                ]
-            }
-        });
-        assert!(extract_lessons_from_doc(&doc_json).is_empty());
+        let html = "<html><body><p>Just some text</p></body></html>";
+        assert!(extract_lessons_from_doc(html).is_empty());
     }
 
     #[test]
     fn test_extract_lessons_table_with_only_header() {
-        let doc_json = serde_json::json!({
-            "title": "Empty Table",
-            "body": {
-                "content": [{
-                    "table": {
-                        "rows": 1, "columns": 2,
-                        "tableRows": [{
-                            "tableCells": [
-                                {"content": [{"paragraph": {"elements": [{"textRun": {"content": "Title\n"}}]}}]},
-                                {"content": [{"paragraph": {"elements": [{"textRun": {"content": "Content\n"}}]}}]}
-                            ]
-                        }]
-                    }
-                }]
-            }
-        });
-        assert!(extract_lessons_from_doc(&doc_json).is_empty());
+        let html = r#"<html><body>
+            <table>
+                <tr><th>Title</th><th>Content</th></tr>
+            </table>
+        </body></html>"#;
+        assert!(extract_lessons_from_doc(html).is_empty());
     }
 
     #[test]
     fn test_extract_lessons_empty_row_skipped() {
-        let doc_json = serde_json::json!({
-            "title": "With Empty Row",
-            "body": {
-                "content": [{
-                    "table": {
-                        "rows": 3, "columns": 2,
-                        "tableRows": [
-                            {"tableCells": [
-                                {"content": [{"paragraph": {"elements": [{"textRun": {"content": "Title\n"}}]}}]},
-                                {"content": [{"paragraph": {"elements": [{"textRun": {"content": "Duration\n"}}]}}]}
-                            ]},
-                            {"tableCells": [
-                                {"content": [{"paragraph": {"elements": [{"textRun": {"content": "\n"}}]}}]},
-                                {"content": [{"paragraph": {"elements": [{"textRun": {"content": "\n"}}]}}]}
-                            ]},
-                            {"tableCells": [
-                                {"content": [{"paragraph": {"elements": [{"textRun": {"content": "Algebra Review\n"}}]}}]},
-                                {"content": [{"paragraph": {"elements": [{"textRun": {"content": "30 min\n"}}]}}]}
-                            ]}
-                        ]
-                    }
-                }]
-            }
-        });
+        let html = r#"<html><body>
+            <table>
+                <tr><th>Title</th><th>Duration</th></tr>
+                <tr><td></td><td></td></tr>
+                <tr><td>Algebra Review</td><td>30 min</td></tr>
+            </table>
+        </body></html>"#;
 
-        let lessons = extract_lessons_from_doc(&doc_json);
+        let lessons = extract_lessons_from_doc(html);
         assert_eq!(lessons.len(), 1);
         assert_eq!(lessons[0].title, "Algebra Review");
     }
 
     #[test]
     fn test_extract_lessons_multi_paragraph_cell() {
-        let doc_json = serde_json::json!({
-            "title": "Multi Paragraph",
-            "body": {
-                "content": [{
-                    "table": {
-                        "rows": 2, "columns": 2,
-                        "tableRows": [
-                            {"tableCells": [
-                                {"content": [{"paragraph": {"elements": [{"textRun": {"content": "Lesson Title\n"}}]}}]},
-                                {"content": [{"paragraph": {"elements": [{"textRun": {"content": "Description\n"}}]}}]}
-                            ]},
-                            {"tableCells": [
-                                {"content": [{"paragraph": {"elements": [{"textRun": {"content": "Water Cycle\n"}}]}}]},
-                                {"content": [
-                                    {"paragraph": {"elements": [{"textRun": {"content": "Part 1: Evaporation\n"}}]}},
-                                    {"paragraph": {"elements": [{"textRun": {"content": "Part 2: Condensation\n"}}]}}
-                                ]}
-                            ]}
-                        ]
-                    }
-                }]
-            }
-        });
+        let html = r#"<html><body>
+            <table>
+                <tr><th>Lesson Title</th><th>Description</th></tr>
+                <tr><td>Water Cycle</td><td><p>Part 1: Evaporation</p><p>Part 2: Condensation</p></td></tr>
+            </table>
+        </body></html>"#;
 
-        let lessons = extract_lessons_from_doc(&doc_json);
+        let lessons = extract_lessons_from_doc(html);
         assert_eq!(lessons.len(), 1);
         assert_eq!(lessons[0].title, "Water Cycle");
         assert!(lessons[0].content.contains("Part 1: Evaporation"));
@@ -1004,37 +926,20 @@ mod tests {
 
     #[test]
     fn test_extract_lessons_multiple_tables() {
-        let doc_json = serde_json::json!({
-            "title": "Multi-Table Doc",
-            "body": {
-                "content": [
-                    {"paragraph": {"elements": [{"textRun": {"content": "Unit 1\n"}}]}},
-                    {"table": {"rows": 2, "columns": 2, "tableRows": [
-                        {"tableCells": [
-                            {"content": [{"paragraph": {"elements": [{"textRun": {"content": "Title\n"}}]}}]},
-                            {"content": [{"paragraph": {"elements": [{"textRun": {"content": "Duration\n"}}]}}]}
-                        ]},
-                        {"tableCells": [
-                            {"content": [{"paragraph": {"elements": [{"textRun": {"content": "Lesson A\n"}}]}}]},
-                            {"content": [{"paragraph": {"elements": [{"textRun": {"content": "30 min\n"}}]}}]}
-                        ]}
-                    ]}},
-                    {"paragraph": {"elements": [{"textRun": {"content": "Unit 2\n"}}]}},
-                    {"table": {"rows": 2, "columns": 2, "tableRows": [
-                        {"tableCells": [
-                            {"content": [{"paragraph": {"elements": [{"textRun": {"content": "Topic\n"}}]}}]},
-                            {"content": [{"paragraph": {"elements": [{"textRun": {"content": "Notes\n"}}]}}]}
-                        ]},
-                        {"tableCells": [
-                            {"content": [{"paragraph": {"elements": [{"textRun": {"content": "Lesson B\n"}}]}}]},
-                            {"content": [{"paragraph": {"elements": [{"textRun": {"content": "Review chapter 5\n"}}]}}]}
-                        ]}
-                    ]}}
-                ]
-            }
-        });
+        let html = r#"<html><body>
+            <p>Unit 1</p>
+            <table>
+                <tr><th>Title</th><th>Duration</th></tr>
+                <tr><td>Lesson A</td><td>30 min</td></tr>
+            </table>
+            <p>Unit 2</p>
+            <table>
+                <tr><th>Topic</th><th>Notes</th></tr>
+                <tr><td>Lesson B</td><td>Review chapter 5</td></tr>
+            </table>
+        </body></html>"#;
 
-        let lessons = extract_lessons_from_doc(&doc_json);
+        let lessons = extract_lessons_from_doc(html);
         assert_eq!(lessons.len(), 2);
         assert_eq!(lessons[0].title, "Lesson A");
         assert_eq!(lessons[1].title, "Lesson B");
@@ -1042,29 +947,14 @@ mod tests {
 
     #[test]
     fn test_extract_lessons_nested_table_in_cell() {
-        let doc_json = serde_json::json!({
-            "title": "Nested Table Doc",
-            "body": {
-                "content": [{
-                    "table": {"rows": 2, "columns": 2, "tableRows": [
-                        {"tableCells": [
-                            {"content": [{"paragraph": {"elements": [{"textRun": {"content": "Title\n"}}]}}]},
-                            {"content": [{"paragraph": {"elements": [{"textRun": {"content": "Details\n"}}]}}]}
-                        ]},
-                        {"tableCells": [
-                            {"content": [{"paragraph": {"elements": [{"textRun": {"content": "Geology Unit\n"}}]}}]},
-                            {"content": [{"table": {"rows": 1, "columns": 1, "tableRows": [
-                                {"tableCells": [
-                                    {"content": [{"paragraph": {"elements": [{"textRun": {"content": "Rock types overview\n"}}]}}]}
-                                ]}
-                            ]}}]}
-                        ]}
-                    ]}
-                }]
-            }
-        });
+        let html = r#"<html><body>
+            <table>
+                <tr><th>Title</th><th>Details</th></tr>
+                <tr><td>Geology Unit</td><td><table><tr><td>Rock types overview</td></tr></table></td></tr>
+            </table>
+        </body></html>"#;
 
-        let lessons = extract_lessons_from_doc(&doc_json);
+        let lessons = extract_lessons_from_doc(html);
         assert_eq!(lessons.len(), 1);
         assert_eq!(lessons[0].title, "Geology Unit");
         assert!(lessons[0].content.contains("Rock types overview"));
