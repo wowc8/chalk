@@ -1,7 +1,8 @@
 //! RAG retrieval: find relevant lesson plan history and assemble context
-//! for the AI chat.
+//! for the AI chat. Uses hybrid search (FTS5 + vector) when embeddings are
+//! available, falling back to FTS5-only when they are not.
 
-use crate::database::{Database, LessonPlan, VectorSearchResult};
+use crate::database::{Database, HybridSearchResult, LessonPlan};
 use crate::errors::ChalkError;
 use crate::rag::embeddings::EmbeddingClient;
 
@@ -19,25 +20,37 @@ pub struct RetrievedContext {
 const MAX_CONTEXT_PLANS: usize = 5;
 /// Maximum total characters of context to include (to stay within LLM token limits).
 const MAX_CONTEXT_CHARS: usize = 8000;
+/// Relative weight for FTS5 results in hybrid scoring.
+const FTS_WEIGHT: f64 = 1.0;
+/// Relative weight for vector results in hybrid scoring.
+const VEC_WEIGHT: f64 = 1.0;
 
-/// Retrieve the most relevant lesson plans for a given query using vector search.
+/// Retrieve the most relevant lesson plans for a given query using hybrid search.
 ///
 /// 1. Embeds the query text
-/// 2. Searches sqlite-vec for similar plan embeddings
+/// 2. Runs hybrid search (FTS5 + sqlite-vec) with RRF re-ranking
 /// 3. Fetches full plan content for the top matches
 /// 4. Trims to stay within context budget
+///
+/// Falls back to FTS5-only search if embedding generation fails.
 pub async fn retrieve_relevant_plans(
     db: &Database,
     embedding_client: &EmbeddingClient,
     query: &str,
 ) -> Result<Vec<RetrievedContext>, ChalkError> {
-    // Generate query embedding.
-    let query_embedding = embedding_client.embed_one(query).await?;
-
-    // Search for similar plans.
-    let search_results: Vec<VectorSearchResult> = db
-        .search_similar(&query_embedding, MAX_CONTEXT_PLANS)
-        .map_err(|e| ChalkError::db_query(format!("Vector search failed: {e}")))?;
+    // Try to generate query embedding for hybrid search.
+    let search_results: Vec<HybridSearchResult> = match embedding_client.embed_one(query).await {
+        Ok(query_embedding) => {
+            // Full hybrid search: FTS5 + vector.
+            db.search_hybrid(query, &query_embedding, MAX_CONTEXT_PLANS, FTS_WEIGHT, VEC_WEIGHT)
+                .map_err(|e| ChalkError::db_query(format!("Hybrid search failed: {e}")))?
+        }
+        Err(_) => {
+            // Fallback to FTS5-only when embeddings unavailable.
+            db.search_hybrid_fts_only(query, MAX_CONTEXT_PLANS)
+                .map_err(|e| ChalkError::db_query(format!("FTS search failed: {e}")))?
+        }
+    };
 
     if search_results.is_empty() {
         return Ok(Vec::new());
@@ -50,7 +63,7 @@ pub async fn retrieve_relevant_plans(
     for result in &search_results {
         let plan: LessonPlan = match db.get_lesson_plan(&result.lesson_plan_id) {
             Ok(p) => p,
-            Err(_) => continue, // Plan may have been deleted since embedding.
+            Err(_) => continue, // Plan may have been deleted since indexing.
         };
 
         let content_len = plan.content.len() + plan.title.len();
@@ -64,7 +77,7 @@ pub async fn retrieve_relevant_plans(
             title: plan.title,
             content: plan.content,
             learning_objectives: plan.learning_objectives,
-            distance: result.distance,
+            distance: 1.0 - result.score, // Convert score to distance-like metric
         });
     }
 

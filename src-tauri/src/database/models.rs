@@ -116,6 +116,17 @@ pub struct FtsSearchResult {
     pub rank: f64,
 }
 
+// ── Hybrid Search ───────────────────────────────────────────
+
+/// A hybrid search result combining FTS5 and vector search scores.
+/// Higher score = better match.
+#[derive(Debug, Clone, Serialize)]
+pub struct HybridSearchResult {
+    pub lesson_plan_id: String,
+    pub title: String,
+    pub score: f64,
+}
+
 // ── Plan Versions ───────────────────────────────────────────
 
 /// A snapshot of a lesson plan at a particular version.
