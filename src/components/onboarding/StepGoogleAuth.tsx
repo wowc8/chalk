@@ -23,6 +23,11 @@ export function StepGoogleAuth({ onNext, onBack, setError }: Props) {
     }
   };
 
+  const handleCancel = () => {
+    setSigningIn(false);
+    setError(null);
+  };
+
   return (
     <div>
       <h2 className="text-xl font-semibold text-chalk-blue mb-2">
@@ -49,24 +54,39 @@ export function StepGoogleAuth({ onNext, onBack, setError }: Props) {
             />
           </svg>
         </div>
-        <button
-          onClick={handleSignIn}
-          disabled={signingIn}
-          className="btn btn-primary px-8 py-3 text-base"
-        >
-          {signingIn ? "Waiting for Google sign-in..." : "Sign in with Google"}
-        </button>
-        <p className="mt-4 text-xs text-chalk-muted">
-          {signingIn
-            ? "Complete sign-in in your browser, then return here."
-            : "Read-only access \u00b7 No student data sent to our servers"}
-        </p>
+        {signingIn ? (
+          <>
+            <div className="text-chalk-muted text-sm mb-4">
+              Waiting for Google sign-in...
+            </div>
+            <p className="text-xs text-chalk-muted mb-4">
+              Complete sign-in in your browser, then return here.
+            </p>
+            <button
+              onClick={handleCancel}
+              className="btn btn-ghost text-sm"
+            >
+              Try Again
+            </button>
+          </>
+        ) : (
+          <>
+            <button
+              onClick={handleSignIn}
+              className="btn btn-primary px-8 py-3 text-base"
+            >
+              Sign in with Google
+            </button>
+            <p className="mt-4 text-xs text-chalk-muted">
+              Read-only access &middot; No student data sent to our servers
+            </p>
+          </>
+        )}
       </div>
 
       <div className="flex justify-between mt-8">
         <button
           onClick={onBack}
-          disabled={signingIn}
           className="btn btn-ghost"
         >
           Back
