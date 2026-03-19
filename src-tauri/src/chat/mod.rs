@@ -374,22 +374,30 @@ fn format_template_instructions(template_json: &str) -> String {
     if !schema.daily_routine.is_empty() {
         instructions.push_str("### Daily Routine Events\n");
         instructions.push_str(
-            "The following non-academic events are part of this teacher's daily routine. \
-             When generating a **weekly or daily plan**, weave these into the schedule at their \
-             usual times so the plan reflects a real school day — not just academic blocks.\n\n"
+            "The following recurring events are part of this teacher's daily routine. \
+             When generating a **weekly or daily plan**, ALWAYS include these recurring events \
+             at their designated day/time slots. Do not skip them or replace them with lesson content. \
+             Fill the REMAINING time slots with lesson content.\n\n"
         );
         for event in &schema.daily_routine {
-            if let Some(ref ts) = event.time_slot {
-                instructions.push_str(&format!("- **{}** at {}\n", event.name, ts));
+            let days_str = if event.days.is_empty() {
+                String::new()
             } else {
-                instructions.push_str(&format!("- **{}**\n", event.name));
+                format!(" ({})", event.days.join(", "))
+            };
+            if let Some(ref ts) = event.time_slot {
+                instructions.push_str(&format!("- **{}** at {}{}\n", event.name, ts, days_str));
+            } else {
+                instructions.push_str(&format!("- **{}**{}\n", event.name, days_str));
             }
         }
         instructions.push_str(
-            "\n**IMPORTANT:** Only include these routine events when generating a full weekly plan \
-             or full daily schedule. If the teacher asks for a **single lesson**, a **specific topic**, \
-             or a **lesson plan on X**, focus entirely on that academic content — do NOT insert routine \
-             events like lunch or recess into a single-lesson response.\n\n"
+            "\n**IMPORTANT:** When generating a full weekly plan or full daily schedule, \
+             ALWAYS include every recurring event listed above at its designated time slot. \
+             For a **single-day** request, include only the recurring events that happen on that \
+             specific day. If the teacher asks for a **single lesson**, a **specific topic**, \
+             or a **lesson plan on X**, focus entirely on that academic content — do NOT insert \
+             routine events into a single-lesson response.\n\n"
         );
     }
 

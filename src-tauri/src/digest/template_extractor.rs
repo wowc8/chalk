@@ -813,73 +813,17 @@ fn extract_recurring_elements(tables: &[ParsedTable]) -> RecurringElements {
     }
 }
 
-/// Known routine / non-academic event keywords.
-/// An activity whose lowercase form contains any of these is considered a routine event.
-const ROUTINE_KEYWORDS: &[&str] = &[
-    "breakfast",
-    "lunch",
-    "recess",
-    "dismissal",
-    "arrival",
-    "morning meeting",
-    "morning circle",
-    "pack up",
-    "pack-up",
-    "snack",
-    "restroom",
-    "bathroom",
-    "transition",
-    "bus",
-    "carpool",
-    "aftercare",
-    "assembly",
-    "homeroom",
-    "advisory",
-    "gym",
-    "pe ",
-    "p.e.",
-    "physical education",
-    "specials",
-    "encore",
-    "related arts",
-    "music",
-    "art",
-    "library",
-    "computer lab",
-    "technology",
-    "chapel",
-    "devotion",
-    "pledge",
-    "announcements",
-    "cleanup",
-    "clean up",
-    "clean-up",
-    "closing circle",
-    "quiet time",
-    "rest time",
-    "nap",
-];
-
-/// Returns true if the activity name matches a known routine/non-academic event.
-fn is_routine_activity(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    ROUTINE_KEYWORDS
-        .iter()
-        .any(|kw| lower.contains(kw) || lower == kw.trim())
-}
-
-/// Extract daily routine events — non-academic activities that appear consistently
+/// Extract daily routine events — recurring activities that appear consistently
 /// across most day columns at the same time slot in schedule grids.
 ///
-/// For each time slot row in a schedule grid, if the same activity appears in the
-/// majority of day columns (≥ 3 out of 5, or ≥ 60% of day columns) AND the activity
-/// matches a known routine keyword, it is captured as a `DailyRoutineEvent`.
+/// Detection is purely frequency-based: for each time slot row, if the same activity
+/// text (case-insensitive, trimmed) appears in ≥60% of day columns, it is captured as
+/// a `DailyRoutineEvent` along with which specific days it occurs on.
 ///
-/// Activities that appear at every time slot but are academic (e.g., "Math") are
-/// intentionally excluded — we only want the structural day events.
+/// No hardcoded keyword list is used — any recurring event is detected dynamically.
 fn extract_daily_routine(tables: &[ParsedTable]) -> Vec<DailyRoutineEvent> {
     let mut routine_events: Vec<DailyRoutineEvent> = Vec::new();
-    let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut seen_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for table in tables {
         if table.rows.len() < 2 {
@@ -897,8 +841,7 @@ fn extract_daily_routine(tables: &[ParsedTable]) -> Vec<DailyRoutineEvent> {
             None => continue,
         };
 
-        let day_indices: Vec<usize> = day_col_pairs.iter().map(|(idx, _)| *idx).collect();
-        let num_days = day_indices.len();
+        let num_days = day_col_pairs.len();
         // Need at least 2 day columns to detect patterns.
         if num_days < 2 {
             continue;
@@ -915,9 +858,9 @@ fn extract_daily_routine(tables: &[ParsedTable]) -> Vec<DailyRoutineEvent> {
                 .map(|c| c.text.trim().to_string())
                 .filter(|t| is_time_like(t));
 
-            // Count activity occurrences across day columns.
-            let mut activity_counts: HashMap<String, usize> = HashMap::new();
-            for &col_idx in &day_indices {
+            // Collect activity text per day column, keyed by normalized (lowercase) text.
+            let mut activity_days: HashMap<String, (String, Vec<String>)> = HashMap::new();
+            for &(col_idx, ref day_label) in &day_col_pairs {
                 if let Some(cell) = row.cells.get(col_idx) {
                     let activity = cell
                         .text
@@ -927,19 +870,25 @@ fn extract_daily_routine(tables: &[ParsedTable]) -> Vec<DailyRoutineEvent> {
                         .trim()
                         .to_string();
                     if !activity.is_empty() && activity.len() < 60 {
-                        *activity_counts.entry(activity).or_insert(0) += 1;
+                        let key = activity.to_lowercase();
+                        let entry = activity_days
+                            .entry(key)
+                            .or_insert_with(|| (activity.clone(), Vec::new()));
+                        entry.1.push(day_label.clone());
                     }
                 }
             }
 
-            // Find activities that meet the threshold and are routine.
-            for (activity, count) in &activity_counts {
-                if *count >= threshold && is_routine_activity(activity) {
-                    let name_lower = activity.to_lowercase();
-                    if seen_names.insert(name_lower) {
+            // Any activity meeting the frequency threshold is a recurring event.
+            for (_key, (display_name, days)) in &activity_days {
+                if days.len() >= threshold {
+                    // Deduplicate by lowercase name (keep first occurrence).
+                    let dedup_key = display_name.to_lowercase();
+                    if seen_keys.insert(dedup_key) {
                         routine_events.push(DailyRoutineEvent {
-                            name: activity.clone(),
+                            name: display_name.clone(),
                             time_slot: time_slot.clone(),
+                            days: days.clone(),
                         });
                     }
                 }
@@ -1189,6 +1138,7 @@ mod tests {
             daily_routine: vec![DailyRoutineEvent {
                 name: "Lunch".to_string(),
                 time_slot: Some("12:00-12:30".to_string()),
+                days: vec!["Monday".to_string(), "Tuesday".to_string(), "Wednesday".to_string(), "Thursday".to_string(), "Friday".to_string()],
             }],
         };
 
@@ -1216,36 +1166,9 @@ mod tests {
 
     // ── Daily Routine Extraction Tests ──────────────────────────
 
-    #[test]
-    fn test_is_routine_activity() {
-        // Known routine keywords.
-        assert!(is_routine_activity("Lunch"));
-        assert!(is_routine_activity("lunch"));
-        assert!(is_routine_activity("Recess"));
-        assert!(is_routine_activity("Morning Meeting"));
-        assert!(is_routine_activity("Dismissal"));
-        assert!(is_routine_activity("Breakfast"));
-        assert!(is_routine_activity("Snack Time"));
-        assert!(is_routine_activity("PE "));
-        assert!(is_routine_activity("Gym"));
-        assert!(is_routine_activity("Art"));
-        assert!(is_routine_activity("Music"));
-        assert!(is_routine_activity("Library"));
-        assert!(is_routine_activity("Assembly"));
-        assert!(is_routine_activity("Pack Up"));
-        assert!(is_routine_activity("Pack-Up"));
-        assert!(is_routine_activity("Announcements"));
-        assert!(is_routine_activity("Chapel"));
-        assert!(is_routine_activity("Closing Circle"));
-        assert!(is_routine_activity("Clean Up"));
-
-        // Academic subjects should NOT match.
-        assert!(!is_routine_activity("Math"));
-        assert!(!is_routine_activity("Reading"));
-        assert!(!is_routine_activity("Science"));
-        assert!(!is_routine_activity("Social Studies"));
-        assert!(!is_routine_activity("Writing Workshop"));
-    }
+    // Note: is_routine_activity() and ROUTINE_KEYWORDS have been removed.
+    // Detection is now purely frequency-based — any activity appearing in ≥60% of
+    // day columns at the same time slot is detected as a recurring event.
 
     #[test]
     fn test_extract_daily_routine_schedule_with_lunch_and_recess() {
@@ -1265,17 +1188,21 @@ mod tests {
 
         let template = extract_template(html);
 
-        // Should detect Recess, Lunch, Specials, Dismissal as routine events.
+        // Frequency-based detection: any activity in ≥60% of day columns is detected.
         let routine_names: Vec<&str> = template.daily_routine.iter().map(|e| e.name.as_str()).collect();
         assert!(routine_names.contains(&"Recess"), "Expected Recess in routine: {:?}", routine_names);
         assert!(routine_names.contains(&"Lunch"), "Expected Lunch in routine: {:?}", routine_names);
         assert!(routine_names.contains(&"Specials"), "Expected Specials in routine: {:?}", routine_names);
         assert!(routine_names.contains(&"Dismissal"), "Expected Dismissal in routine: {:?}", routine_names);
+        // Academic subjects appearing every day are also detected as recurring.
+        assert!(routine_names.contains(&"Math"), "Expected Math in routine: {:?}", routine_names);
+        assert!(routine_names.contains(&"Reading"), "Expected Reading in routine: {:?}", routine_names);
+        assert!(routine_names.contains(&"Social Studies"), "Expected Social Studies in routine: {:?}", routine_names);
 
-        // Academic subjects should NOT be in daily_routine.
-        assert!(!routine_names.contains(&"Math"));
-        assert!(!routine_names.contains(&"Reading"));
-        assert!(!routine_names.contains(&"Science"));
+        // Science appears 3/5 = 60% — meets threshold.
+        assert!(routine_names.contains(&"Science"), "Expected Science in routine: {:?}", routine_names);
+        // Writing appears 2/5 = 40% — below threshold.
+        assert!(!routine_names.contains(&"Writing"), "Writing should NOT meet threshold: {:?}", routine_names);
 
         // Verify time slots are captured.
         let recess = template.daily_routine.iter().find(|e| e.name == "Recess").unwrap();
@@ -1283,20 +1210,28 @@ mod tests {
 
         let lunch = template.daily_routine.iter().find(|e| e.name == "Lunch").unwrap();
         assert_eq!(lunch.time_slot, Some("11:00-11:30".to_string()));
+
+        // Verify days are tracked.
+        assert_eq!(recess.days.len(), 5, "Recess should list 5 days");
+        assert_eq!(lunch.days.len(), 5, "Lunch should list 5 days");
+
+        let science = template.daily_routine.iter().find(|e| e.name == "Science").unwrap();
+        assert_eq!(science.days.len(), 3, "Science should list 3 days");
     }
 
     #[test]
-    fn test_extract_daily_routine_no_routine_events() {
-        // A schedule grid with only academic subjects — no routine events.
+    fn test_extract_daily_routine_no_recurring_events() {
+        // A schedule grid where no activity appears in ≥60% of day columns.
         let html = r#"<html><body>
             <table>
                 <tr><th>Time</th><th>Monday</th><th>Tuesday</th><th>Wednesday</th></tr>
-                <tr><td>9:00</td><td>Math</td><td>Reading</td><td>Math</td></tr>
-                <tr><td>10:00</td><td>Science</td><td>Writing</td><td>Science</td></tr>
+                <tr><td>9:00</td><td>Math</td><td>Reading</td><td>Science</td></tr>
+                <tr><td>10:00</td><td>Art</td><td>Music</td><td>Writing</td></tr>
             </table>
         </body></html>"#;
 
         let template = extract_template(html);
+        // Each activity appears 1/3 = 33%, below 60% threshold.
         assert!(template.daily_routine.is_empty());
     }
 
@@ -1329,6 +1264,13 @@ mod tests {
         let template = extract_template(html);
         let routine_names: Vec<&str> = template.daily_routine.iter().map(|e| e.name.as_str()).collect();
         assert!(routine_names.contains(&"Recess"), "3/5 = 60% should meet threshold: {:?}", routine_names);
+
+        // Verify days are tracked correctly.
+        let recess = template.daily_routine.iter().find(|e| e.name == "Recess").unwrap();
+        assert_eq!(recess.days.len(), 3, "Recess should list 3 days");
+        assert!(recess.days.contains(&"Monday".to_string()));
+        assert!(recess.days.contains(&"Tuesday".to_string()));
+        assert!(recess.days.contains(&"Wednesday".to_string()));
     }
 
     #[test]
@@ -1417,7 +1359,7 @@ mod tests {
         let template = extract_template(html);
         let routine_names: Vec<&str> = template.daily_routine.iter().map(|e| e.name.as_str()).collect();
 
-        // All routine events should be detected.
+        // All recurring events should be detected (frequency-based, no keyword filter).
         assert!(routine_names.contains(&"Breakfast"), "Missing Breakfast: {:?}", routine_names);
         assert!(routine_names.contains(&"Morning Meeting"), "Missing Morning Meeting: {:?}", routine_names);
         assert!(routine_names.contains(&"Snack"), "Missing Snack: {:?}", routine_names);
@@ -1429,16 +1371,23 @@ mod tests {
         let recess_count = template.daily_routine.iter().filter(|e| e.name == "Recess").count();
         assert_eq!(recess_count, 1, "Recess should be deduplicated to 1 entry");
 
-        // Academic subjects should NOT be routine events.
-        assert!(!routine_names.contains(&"Math Workshop"));
-        assert!(!routine_names.contains(&"Reading Block"));
-        assert!(!routine_names.contains(&"Writing"));
-        assert!(!routine_names.contains(&"Science"));
-        assert!(!routine_names.contains(&"Social Studies"));
+        // Academic subjects appearing in ≥60% of days are also detected as recurring.
+        // Math Workshop appears 4/5 = 80%, Reading Block 5/5 = 100%, Writing 5/5 = 100%.
+        assert!(routine_names.contains(&"Math Workshop"), "Missing Math Workshop: {:?}", routine_names);
+        assert!(routine_names.contains(&"Reading Block"), "Missing Reading Block: {:?}", routine_names);
+        assert!(routine_names.contains(&"Writing"), "Missing Writing: {:?}", routine_names);
+
+        // Science appears 3/5 = 60%, Social Studies 2/5 = 40%.
+        assert!(routine_names.contains(&"Science"), "Missing Science (3/5 = 60%%): {:?}", routine_names);
+        assert!(!routine_names.contains(&"Social Studies"), "Social Studies 2/5 = 40%% should NOT meet threshold: {:?}", routine_names);
 
         // The specials row has different activities each day (Art, Music, PE, Library) —
         // each individual one appears in <60% of days, so none should be in daily_routine
-        // as individual entries. But Art appears 2/5 = 40% — below threshold.
+        // as individual entries. Art appears 2/5 = 40% — below threshold.
+
+        // Verify days are tracked on Breakfast (all 5 days).
+        let breakfast = template.daily_routine.iter().find(|e| e.name == "Breakfast").unwrap();
+        assert_eq!(breakfast.days.len(), 5, "Breakfast should list 5 days");
     }
 
     // ── Year Range Detection Tests ──────────────────────────────
