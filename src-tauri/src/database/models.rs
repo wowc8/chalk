@@ -166,7 +166,8 @@ pub struct RecurringElements {
     pub activities: Vec<String>,
 }
 
-/// A routine event that appears consistently across most days at a similar time.
+/// A recurring event that appears consistently across most days at a similar time,
+/// detected purely by frequency analysis (≥60% of day columns at the same time slot).
 /// Examples: breakfast, lunch, recess, gym, specials, dismissal, morning meeting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DailyRoutineEvent {
@@ -174,6 +175,9 @@ pub struct DailyRoutineEvent {
     pub name: String,
     /// The time slot where this event typically occurs (e.g., "11:30-12:00").
     pub time_slot: Option<String>,
+    /// Which days of the week this event occurs on (e.g., ["Monday", "Tuesday", "Wednesday"]).
+    #[serde(default)]
+    pub days: Vec<String>,
 }
 
 // ── Tags ─────────────────────────────────────────────────────
