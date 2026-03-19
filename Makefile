@@ -10,8 +10,9 @@ setup:
 dev:
 	npm run tauri dev
 
-## Remove the SQLite cache database
+## Remove all SQLite databases (main + cache)
 cleardb:
+	rm -f "$(APP_DATA)"/chalk.db*
 	rm -f "$(APP_DATA)"/cache.db*
 
 ## Full clean: remove cache DB + onboarding status for a fresh state
