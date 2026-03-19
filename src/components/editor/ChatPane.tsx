@@ -1,7 +1,8 @@
-import { useState, useRef, useEffect, type MutableRefObject } from "react";
+import { useState, useRef, useEffect, useMemo, type MutableRefObject } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useChat, type ChatMessage as BackendMessage } from "../../hooks/useChat";
 import { useTeacherName } from "../../hooks/useTeacherName";
+import { markdownToHtml } from "../../utils/markdown";
 
 export interface ChatMessage {
   id: string;
@@ -55,9 +56,14 @@ function MessageBubble({
   const isUser = message.role === "user";
   const [applied, setApplied] = useState(false);
 
+  const renderedHtml = useMemo(
+    () => (isUser ? null : markdownToHtml(message.content)),
+    [isUser, message.content]
+  );
+
   const handleApply = () => {
     if (onApply) {
-      onApply(message.content);
+      onApply(renderedHtml ?? markdownToHtml(message.content));
       setApplied(true);
       setTimeout(() => setApplied(false), 2000);
     }
@@ -76,7 +82,14 @@ function MessageBubble({
             : "bg-chalk-board-dark/80 border border-chalk-white/8 text-chalk-dust"
         }`}
       >
-        <div className="whitespace-pre-wrap">{message.content}</div>
+        {isUser ? (
+          <div className="whitespace-pre-wrap">{message.content}</div>
+        ) : (
+          <div
+            className="chat-markdown"
+            dangerouslySetInnerHTML={{ __html: renderedHtml! }}
+          />
+        )}
         <div className="flex items-center justify-between mt-1.5">
           <div
             className={`text-[10px] ${
@@ -131,6 +144,8 @@ function TypingIndicator() {
 }
 
 function StreamingBubble({ content }: { content: string }) {
+  const renderedHtml = useMemo(() => markdownToHtml(content), [content]);
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 8 }}
@@ -138,8 +153,8 @@ function StreamingBubble({ content }: { content: string }) {
       className="flex justify-start mb-3"
     >
       <div className="max-w-[85%] px-3.5 py-2.5 rounded-xl text-sm leading-relaxed bg-chalk-board-dark/80 border border-chalk-white/8 text-chalk-dust">
-        <div className="whitespace-pre-wrap">
-          {content}
+        <div className="chat-markdown">
+          <span dangerouslySetInnerHTML={{ __html: renderedHtml }} />
           <motion.span
             animate={{ opacity: [1, 0] }}
             transition={{ duration: 0.5, repeat: Infinity }}
