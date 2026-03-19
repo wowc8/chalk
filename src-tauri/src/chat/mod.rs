@@ -363,6 +363,29 @@ fn format_template_instructions(template_json: &str) -> String {
         }
     }
 
+    // ── Daily Routine Events ──
+    if !schema.daily_routine.is_empty() {
+        instructions.push_str("### Daily Routine Events\n");
+        instructions.push_str(
+            "The following non-academic events are part of this teacher's daily routine. \
+             When generating a **weekly or daily plan**, weave these into the schedule at their \
+             usual times so the plan reflects a real school day — not just academic blocks.\n\n"
+        );
+        for event in &schema.daily_routine {
+            if let Some(ref ts) = event.time_slot {
+                instructions.push_str(&format!("- **{}** at {}\n", event.name, ts));
+            } else {
+                instructions.push_str(&format!("- **{}**\n", event.name));
+            }
+        }
+        instructions.push_str(
+            "\n**IMPORTANT:** Only include these routine events when generating a full weekly plan \
+             or full daily schedule. If the teacher asks for a **single lesson**, a **specific topic**, \
+             or a **lesson plan on X**, focus entirely on that academic content — do NOT insert routine \
+             events like lunch or recess into a single-lesson response.\n\n"
+        );
+    }
+
     // ── Color Scheme ──
     let cs = &schema.color_scheme;
     if !cs.mappings.is_empty() {
@@ -1459,6 +1482,46 @@ mod tests {
         assert!(result.contains("10:00-10:30"));
         // HTML skeleton shows first 3 + ellipsis comment.
         assert!(result.contains("continue for all time slots"));
+    }
+
+    #[test]
+    fn test_format_template_instructions_daily_routine() {
+        let template = r##"{"color_scheme":{"mappings":[]},"table_structure":{"layout_type":"schedule_grid","columns":["Time","Monday","Tuesday","Wednesday","Thursday","Friday"],"row_categories":[],"column_count":6},"time_slots":["8:00-8:45","9:00-9:15","11:30-12:00","2:30-2:45"],"content_patterns":{"cell_content_types":[],"has_links":false,"has_rich_formatting":false},"recurring_elements":{"subjects":[],"activities":[]},"daily_routine":[{"name":"Breakfast","time_slot":"7:45-8:00"},{"name":"Recess","time_slot":"9:00-9:15"},{"name":"Lunch","time_slot":"11:30-12:00"},{"name":"Dismissal","time_slot":"2:30-2:45"}]}"##;
+
+        let result = format_template_instructions(template);
+
+        // Should have the daily routine section.
+        assert!(result.contains("Daily Routine Events"), "Missing Daily Routine Events header");
+        assert!(result.contains("Breakfast"), "Missing Breakfast");
+        assert!(result.contains("7:45-8:00"), "Missing Breakfast time");
+        assert!(result.contains("Recess"), "Missing Recess");
+        assert!(result.contains("Lunch"), "Missing Lunch");
+        assert!(result.contains("Dismissal"), "Missing Dismissal");
+
+        // Should contain single-lesson exclusion instruction.
+        assert!(result.contains("single lesson"), "Missing single-lesson exclusion guidance");
+    }
+
+    #[test]
+    fn test_format_template_instructions_no_daily_routine() {
+        let template = r#"{"color_scheme":{"mappings":[]},"table_structure":{"layout_type":"schedule_grid","columns":["Time","Monday"],"row_categories":[],"column_count":2},"time_slots":["9:00"],"content_patterns":{"cell_content_types":[],"has_links":false,"has_rich_formatting":false},"recurring_elements":{"subjects":[],"activities":[]},"daily_routine":[]}"#;
+
+        let result = format_template_instructions(template);
+
+        // Should NOT have the daily routine section when empty.
+        assert!(!result.contains("Daily Routine Events"));
+    }
+
+    #[test]
+    fn test_format_template_instructions_daily_routine_without_time() {
+        let template = r##"{"color_scheme":{"mappings":[]},"table_structure":{"layout_type":"","columns":[],"row_categories":[],"column_count":0},"time_slots":[],"content_patterns":{"cell_content_types":[],"has_links":false,"has_rich_formatting":false},"recurring_elements":{"subjects":[],"activities":[]},"daily_routine":[{"name":"Assembly","time_slot":null}]}"##;
+
+        let result = format_template_instructions(template);
+
+        assert!(result.contains("Daily Routine Events"));
+        assert!(result.contains("Assembly"));
+        // Without a time slot, should just list the name without "at".
+        assert!(!result.contains("at null"));
     }
 
     #[test]
