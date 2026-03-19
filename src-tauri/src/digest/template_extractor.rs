@@ -5,23 +5,215 @@
 //! patterns, content organization, and recurring elements. This schema is stored
 //! alongside reference documents and used to format AI-generated plans to match
 //! the teacher's style.
+//!
+//! When an AI provider is available, uses an LLM call to identify the correct
+//! planning template table (instead of relying on heuristic scoring). The AI
+//! call happens once per digest, not per chat message, so cost is minimal.
+//! Falls back to heuristic scoring when AI is not configured.
 
 use std::collections::HashMap;
 
 use scraper::{Html, Selector};
+use serde::{Deserialize, Serialize};
+use tracing::{info, warn};
 
+use crate::chat::provider::{AiProvider, CompletionMessage};
 use crate::database::{
     ColorMapping, ColorScheme, ContentPatterns, DailyRoutineEvent, RecurringElements,
     TableStructure, TeachingTemplateSchema,
 };
+use crate::errors::ChalkError;
 
 use super::parser::{self, ParsedTable};
 use super::{detect_schedule_columns, is_time_like};
 
+// ── AI Table Identification ──────────────────────────────────
+
+/// Structured response from the AI identifying the planning template table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiTableIdentification {
+    /// Zero-based index of the table the AI identified as the planning template.
+    pub table_index: usize,
+    /// What the columns represent (e.g., "days_of_week", "lesson_attributes").
+    pub column_semantic: String,
+    /// What the rows represent (e.g., "time_slots", "lessons", "categories").
+    pub row_semantic: String,
+    /// The type of table layout (e.g., "schedule_grid", "standard_table").
+    pub layout_type: String,
+}
+
+/// System prompt for the AI table identification call.
+const TABLE_ID_SYSTEM_PROMPT: &str = r#"You are a document analysis assistant. Your task is to identify which table in a teacher's Google Doc is the weekly lesson planning template.
+
+Teachers often have multiple tables in their documents:
+- Reference/archive tables (e.g., curriculum mapping with columns like "LP 2022-2023", "Eureka Math")
+- Weekly planning grids (days of the week as columns, time slots as rows)
+- Standard lesson plan tables (columns for title, subject, objectives, etc.)
+- Miscellaneous tables (notes, contacts, supply lists)
+
+You must identify THE planning template — the table the teacher actually uses to plan their weekly lessons.
+
+Respond with ONLY a JSON object (no markdown, no explanation) in this exact format:
+{"table_index": 0, "column_semantic": "days_of_week", "row_semantic": "time_slots", "layout_type": "schedule_grid"}
+
+Fields:
+- table_index: zero-based index of the planning template table
+- column_semantic: what the columns represent. Common values: "days_of_week", "lesson_attributes" (title/subject/duration columns), "time_periods" (semesters, quarters)
+- row_semantic: what the rows represent. Common values: "time_slots", "lessons", "categories", "subjects"
+- layout_type: either "schedule_grid" (days × time slots) or "standard_table" (any other format)"#;
+
+/// Format a summary of all tables for the AI prompt.
+///
+/// Sends headers + first few rows of each table so the AI can identify
+/// which one is the planning template without seeing the full document.
+fn format_tables_for_ai(tables: &[ParsedTable]) -> String {
+    let mut summary = String::new();
+
+    for (i, table) in tables.iter().enumerate() {
+        summary.push_str(&format!("=== Table {} ({} rows, {} columns) ===\n",
+            i,
+            table.rows.len(),
+            table.rows.first().map_or(0, |r| r.cells.len()),
+        ));
+
+        // Show headers + first 3 data rows.
+        let rows_to_show = table.rows.len().min(4);
+        for (row_idx, row) in table.rows.iter().take(rows_to_show).enumerate() {
+            let label = if row_idx == 0 { "Header" } else { "Row" };
+            let cells: Vec<&str> = row.cells.iter()
+                .map(|c| {
+                    let text = c.text.trim();
+                    if text.len() > 60 { &text[..60] } else { text }
+                })
+                .collect();
+            summary.push_str(&format!("  {}: [{}]\n", label, cells.join(" | ")));
+        }
+
+        if table.rows.len() > 4 {
+            summary.push_str(&format!("  ... ({} more rows)\n", table.rows.len() - 4));
+        }
+        summary.push('\n');
+    }
+
+    summary
+}
+
+/// Use AI to identify which table is the planning template.
+///
+/// Sends a summary of all tables to the LLM and parses the structured response.
+/// Returns `None` if the AI response cannot be parsed or the table index is out of range.
+pub async fn identify_planning_table_with_ai(
+    provider: &dyn AiProvider,
+    tables: &[ParsedTable],
+) -> Result<AiTableIdentification, ChalkError> {
+    let table_summary = format_tables_for_ai(tables);
+
+    let messages = vec![
+        CompletionMessage {
+            role: "system".to_string(),
+            content: TABLE_ID_SYSTEM_PROMPT.to_string(),
+        },
+        CompletionMessage {
+            role: "user".to_string(),
+            content: format!(
+                "Here are {} tables from a teacher's Google Doc. Which one is the weekly lesson planning template?\n\n{}",
+                tables.len(),
+                table_summary
+            ),
+        },
+    ];
+
+    let response = provider.complete(&messages, 256, 0.0).await?;
+
+    // Parse the JSON response, stripping any markdown code fences.
+    let json_str = response.trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+
+    let identification: AiTableIdentification = serde_json::from_str(json_str)
+        .map_err(|e| ChalkError::new(
+            crate::errors::ErrorDomain::Digest,
+            crate::errors::ErrorCode::DigestParseFailed,
+            format!("Failed to parse AI table identification response: {}. Raw: {}", e, response),
+        ))?;
+
+    // Validate the table index.
+    if identification.table_index >= tables.len() {
+        return Err(ChalkError::new(
+            crate::errors::ErrorDomain::Digest,
+            crate::errors::ErrorCode::DigestParseFailed,
+            format!(
+                "AI returned table_index {} but only {} tables exist",
+                identification.table_index,
+                tables.len()
+            ),
+        ));
+    }
+
+    info!(
+        table_index = identification.table_index,
+        column_semantic = identification.column_semantic.as_str(),
+        row_semantic = identification.row_semantic.as_str(),
+        layout_type = identification.layout_type.as_str(),
+        "AI identified planning template table"
+    );
+
+    Ok(identification)
+}
+
+/// Extract a teaching template schema using AI to identify the correct table.
+///
+/// This is the preferred entry point during digest when an AI provider is
+/// available. Falls back to heuristic scoring if the AI call fails.
+pub async fn extract_template_with_ai(
+    html: &str,
+    provider: &dyn AiProvider,
+) -> TeachingTemplateSchema {
+    let tables = parser::extract_tables(html);
+    if tables.is_empty() {
+        return TeachingTemplateSchema::default();
+    }
+
+    // Try AI identification first.
+    let ai_result = if tables.len() > 1 {
+        match identify_planning_table_with_ai(provider, &tables).await {
+            Ok(id) => Some(id),
+            Err(e) => {
+                warn!(error = %e, "AI table identification failed — falling back to heuristic");
+                None
+            }
+        }
+    } else {
+        // Only one table — no need to ask the AI which one.
+        None
+    };
+
+    let color_scheme = extract_colors(html);
+    let table_structure = match &ai_result {
+        Some(ai_id) => extract_table_structure_with_ai(&tables, ai_id),
+        None => extract_table_structure(&tables),
+    };
+    let time_slots = extract_time_slots(&tables);
+    let content_patterns = extract_content_patterns(html, &tables);
+    let recurring_elements = extract_recurring_elements(&tables);
+    let daily_routine = extract_daily_routine(&tables);
+
+    TeachingTemplateSchema {
+        color_scheme,
+        table_structure,
+        time_slots,
+        content_patterns,
+        recurring_elements,
+        daily_routine,
+    }
+}
+
 /// Extract a teaching template schema from the raw HTML of a Google Doc.
 ///
-/// Analyzes all tables in the document to determine the teacher's formatting
-/// patterns, color usage, table layout, time slots, and recurring content.
+/// Uses heuristic scoring to select the planning table. This is the fallback
+/// when AI is not configured.
 pub fn extract_template(html: &str) -> TeachingTemplateSchema {
     let tables = parser::extract_tables(html);
     if tables.is_empty() {
@@ -343,6 +535,53 @@ fn extract_table_structure(tables: &[ParsedTable]) -> TableStructure {
         column_count,
         column_semantic,
         row_semantic,
+    }
+}
+
+/// Determine table layout structure using AI-identified table and semantics.
+///
+/// Uses the AI's identification to select the correct table and applies the
+/// AI's semantic labels instead of inferring them from heuristics.
+fn extract_table_structure_with_ai(
+    tables: &[ParsedTable],
+    ai_id: &AiTableIdentification,
+) -> TableStructure {
+    let main_table = match tables.get(ai_id.table_index) {
+        Some(t) => t,
+        None => return extract_table_structure(tables), // fallback
+    };
+
+    if main_table.rows.is_empty() {
+        return TableStructure::default();
+    }
+
+    let headers: Vec<String> = main_table.rows[0]
+        .cells
+        .iter()
+        .map(|c| c.text.trim().to_string())
+        .collect();
+
+    // Extract row categories from the first column of data rows.
+    let mut row_categories = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for row in main_table.rows.iter().skip(1) {
+        if let Some(first_cell) = row.cells.first() {
+            let text = first_cell.text.trim().to_string();
+            if !text.is_empty() && !is_time_like(&text) && seen.insert(text.clone()) {
+                row_categories.push(text);
+            }
+        }
+    }
+
+    let column_count = headers.len();
+
+    TableStructure {
+        layout_type: ai_id.layout_type.clone(),
+        columns: headers,
+        row_categories,
+        column_count,
+        column_semantic: Some(ai_id.column_semantic.clone()),
+        row_semantic: Some(ai_id.row_semantic.clone()),
     }
 }
 
@@ -1257,5 +1496,463 @@ mod tests {
     fn test_score_planning_table_empty() {
         let empty_table = ParsedTable { rows: vec![] };
         assert_eq!(score_planning_table(&empty_table), 0);
+    }
+
+    // ── AI Table Identification Tests ────────────────────────────
+
+    use crate::chat::provider::{CompletionMessage, ProviderInfo, ModelInfo, TokenCallback};
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    /// Mock AI provider for testing. Returns pre-configured responses.
+    struct MockAiProvider {
+        response: String,
+        calls: Arc<StdMutex<Vec<Vec<CompletionMessage>>>>,
+    }
+
+    impl MockAiProvider {
+        fn new(response: &str) -> Self {
+            Self {
+                response: response.to_string(),
+                calls: Arc::new(StdMutex::new(Vec::new())),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.lock().unwrap().len()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::chat::provider::AiProvider for MockAiProvider {
+        async fn complete(
+            &self,
+            messages: &[CompletionMessage],
+            _max_tokens: u32,
+            _temperature: f32,
+        ) -> Result<String, crate::errors::ChalkError> {
+            self.calls.lock().unwrap().push(messages.to_vec());
+            Ok(self.response.clone())
+        }
+
+        async fn complete_stream(
+            &self,
+            _messages: &[CompletionMessage],
+            _max_tokens: u32,
+            _temperature: f32,
+            _on_token: TokenCallback,
+        ) -> Result<String, crate::errors::ChalkError> {
+            Ok(self.response.clone())
+        }
+
+        fn info(&self) -> ProviderInfo {
+            ProviderInfo {
+                id: "mock".into(),
+                display_name: "Mock".into(),
+                models: vec![ModelInfo {
+                    id: "mock-model".into(),
+                    display_name: "Mock Model".into(),
+                    description: "For testing".into(),
+                }],
+            }
+        }
+
+        fn model(&self) -> &str {
+            "mock-model"
+        }
+    }
+
+    /// Mock provider that returns an error.
+    struct ErrorAiProvider;
+
+    #[async_trait::async_trait]
+    impl crate::chat::provider::AiProvider for ErrorAiProvider {
+        async fn complete(
+            &self,
+            _messages: &[CompletionMessage],
+            _max_tokens: u32,
+            _temperature: f32,
+        ) -> Result<String, crate::errors::ChalkError> {
+            Err(crate::errors::ChalkError::new(
+                crate::errors::ErrorDomain::Digest,
+                crate::errors::ErrorCode::DigestParseFailed,
+                "API call failed",
+            ))
+        }
+
+        async fn complete_stream(
+            &self,
+            _messages: &[CompletionMessage],
+            _max_tokens: u32,
+            _temperature: f32,
+            _on_token: TokenCallback,
+        ) -> Result<String, crate::errors::ChalkError> {
+            Err(crate::errors::ChalkError::new(
+                crate::errors::ErrorDomain::Digest,
+                crate::errors::ErrorCode::DigestParseFailed,
+                "API call failed",
+            ))
+        }
+
+        fn info(&self) -> ProviderInfo {
+            ProviderInfo {
+                id: "error".into(),
+                display_name: "Error".into(),
+                models: vec![],
+            }
+        }
+
+        fn model(&self) -> &str {
+            "error-model"
+        }
+    }
+
+    #[test]
+    fn test_format_tables_for_ai() {
+        let html = r#"<html><body>
+            <table>
+                <tr><th>LP 2022-2023</th><th>LP 2023/2024</th><th>Eureka Math</th></tr>
+                <tr><td>Unit 1</td><td>Module 1</td><td>Chapter 1</td></tr>
+                <tr><td>Unit 2</td><td>Module 2</td><td>Chapter 2</td></tr>
+            </table>
+            <table>
+                <tr><th>Day/Time</th><th>Monday</th><th>Tuesday</th><th>Wednesday</th></tr>
+                <tr><td>9:00-9:30</td><td>Math</td><td>Reading</td><td>Math</td></tr>
+                <tr><td>9:30-10:00</td><td>PE</td><td>Art</td><td>PE</td></tr>
+            </table>
+        </body></html>"#;
+
+        let tables = parser::extract_tables(html);
+        let summary = format_tables_for_ai(&tables);
+
+        // Should reference both tables.
+        assert!(summary.contains("Table 0"), "Should list Table 0");
+        assert!(summary.contains("Table 1"), "Should list Table 1");
+
+        // Should include headers.
+        assert!(summary.contains("LP 2022-2023"), "Table 0 headers");
+        assert!(summary.contains("Monday"), "Table 1 headers");
+
+        // Should include data rows.
+        assert!(summary.contains("Unit 1"), "Table 0 data");
+        assert!(summary.contains("Math"), "Table 1 data");
+    }
+
+    #[test]
+    fn test_format_tables_for_ai_truncates_long_cells() {
+        let long_text = "A".repeat(100);
+        let html = format!(
+            r#"<html><body><table>
+                <tr><th>{}</th></tr>
+                <tr><td>Short</td></tr>
+            </table></body></html>"#,
+            long_text
+        );
+
+        let tables = parser::extract_tables(&html);
+        let summary = format_tables_for_ai(&tables);
+
+        // Long text should be truncated to 60 chars.
+        assert!(!summary.contains(&long_text));
+        assert!(summary.contains(&"A".repeat(60)));
+    }
+
+    #[test]
+    fn test_format_tables_for_ai_shows_row_count() {
+        let html = r#"<html><body>
+            <table>
+                <tr><th>A</th></tr>
+                <tr><td>1</td></tr>
+                <tr><td>2</td></tr>
+                <tr><td>3</td></tr>
+                <tr><td>4</td></tr>
+                <tr><td>5</td></tr>
+            </table>
+        </body></html>"#;
+
+        let tables = parser::extract_tables(html);
+        let summary = format_tables_for_ai(&tables);
+
+        // Should show "6 rows" and "2 more rows" (only shows 4 of 6).
+        assert!(summary.contains("6 rows"));
+        assert!(summary.contains("2 more rows"));
+    }
+
+    #[tokio::test]
+    async fn test_identify_planning_table_with_ai_valid_response() {
+        let provider = MockAiProvider::new(
+            r#"{"table_index": 1, "column_semantic": "days_of_week", "row_semantic": "time_slots", "layout_type": "schedule_grid"}"#,
+        );
+
+        let html = r#"<html><body>
+            <table><tr><th>LP 2022</th><th>LP 2023</th></tr><tr><td>A</td><td>B</td></tr></table>
+            <table><tr><th>Time</th><th>Monday</th><th>Tuesday</th></tr><tr><td>9:00</td><td>Math</td><td>Reading</td></tr></table>
+        </body></html>"#;
+        let tables = parser::extract_tables(html);
+
+        let result = identify_planning_table_with_ai(&provider, &tables).await;
+        assert!(result.is_ok());
+
+        let id = result.unwrap();
+        assert_eq!(id.table_index, 1);
+        assert_eq!(id.column_semantic, "days_of_week");
+        assert_eq!(id.row_semantic, "time_slots");
+        assert_eq!(id.layout_type, "schedule_grid");
+
+        // Should have made exactly one API call.
+        assert_eq!(provider.call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_identify_planning_table_with_ai_json_in_code_fence() {
+        let provider = MockAiProvider::new(
+            "```json\n{\"table_index\": 0, \"column_semantic\": \"lesson_attributes\", \"row_semantic\": \"lessons\", \"layout_type\": \"standard_table\"}\n```",
+        );
+
+        let html = r#"<html><body>
+            <table><tr><th>Title</th><th>Subject</th></tr><tr><td>Lesson 1</td><td>Math</td></tr></table>
+        </body></html>"#;
+        let tables = parser::extract_tables(html);
+
+        let result = identify_planning_table_with_ai(&provider, &tables).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().table_index, 0);
+    }
+
+    #[tokio::test]
+    async fn test_identify_planning_table_with_ai_invalid_json() {
+        let provider = MockAiProvider::new("I think table 1 is the planning template.");
+
+        let html = r#"<html><body>
+            <table><tr><th>A</th></tr><tr><td>B</td></tr></table>
+        </body></html>"#;
+        let tables = parser::extract_tables(html);
+
+        let result = identify_planning_table_with_ai(&provider, &tables).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_identify_planning_table_with_ai_invalid_index() {
+        let provider = MockAiProvider::new(
+            r#"{"table_index": 99, "column_semantic": "days", "row_semantic": "time", "layout_type": "schedule_grid"}"#,
+        );
+
+        let html = r#"<html><body>
+            <table><tr><th>A</th></tr><tr><td>B</td></tr></table>
+        </body></html>"#;
+        let tables = parser::extract_tables(html);
+
+        let result = identify_planning_table_with_ai(&provider, &tables).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("table_index 99"));
+    }
+
+    #[tokio::test]
+    async fn test_identify_planning_table_with_ai_api_error() {
+        let provider = ErrorAiProvider;
+
+        let html = r#"<html><body>
+            <table><tr><th>A</th></tr><tr><td>B</td></tr></table>
+        </body></html>"#;
+        let tables = parser::extract_tables(html);
+
+        let result = identify_planning_table_with_ai(&provider, &tables).await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_table_structure_with_ai() {
+        let html = r#"<html><body>
+            <table><tr><th>LP 2022-2023</th><th>LP 2023/2024</th><th>Eureka Math</th></tr>
+                <tr><td>Unit 1</td><td>Module 1</td><td>Chapter 1</td></tr></table>
+            <table><tr><th>Day/Time</th><th>Monday</th><th>Tuesday</th><th>Wednesday</th></tr>
+                <tr><td>9:00-9:30</td><td>Math</td><td>Reading</td><td>Math</td></tr>
+                <tr><td>9:30-10:00</td><td>PE</td><td>Art</td><td>PE</td></tr></table>
+        </body></html>"#;
+        let tables = parser::extract_tables(html);
+
+        let ai_id = AiTableIdentification {
+            table_index: 1,
+            column_semantic: "days_of_week".to_string(),
+            row_semantic: "time_slots".to_string(),
+            layout_type: "schedule_grid".to_string(),
+        };
+
+        let structure = extract_table_structure_with_ai(&tables, &ai_id);
+
+        assert_eq!(structure.layout_type, "schedule_grid");
+        assert_eq!(structure.column_semantic, Some("days_of_week".to_string()));
+        assert_eq!(structure.row_semantic, Some("time_slots".to_string()));
+        assert!(structure.columns.contains(&"Monday".to_string()));
+        // Should NOT contain reference table columns.
+        assert!(!structure.columns.iter().any(|c| c.contains("2022")));
+    }
+
+    #[test]
+    fn test_extract_table_structure_with_ai_out_of_range_fallback() {
+        let html = r#"<html><body>
+            <table><tr><th>Time</th><th>Monday</th><th>Tuesday</th></tr>
+                <tr><td>9:00</td><td>Math</td><td>Reading</td></tr></table>
+        </body></html>"#;
+        let tables = parser::extract_tables(html);
+
+        let ai_id = AiTableIdentification {
+            table_index: 99, // out of range
+            column_semantic: "days_of_week".to_string(),
+            row_semantic: "time_slots".to_string(),
+            layout_type: "schedule_grid".to_string(),
+        };
+
+        // Should fall back to heuristic.
+        let structure = extract_table_structure_with_ai(&tables, &ai_id);
+        assert!(!structure.columns.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_extract_template_with_ai_selects_correct_table() {
+        // AI correctly identifies table 1 as the schedule grid.
+        let provider = MockAiProvider::new(
+            r#"{"table_index": 1, "column_semantic": "days_of_week", "row_semantic": "time_slots", "layout_type": "schedule_grid"}"#,
+        );
+
+        let html = r#"<html><body>
+            <table>
+                <tr><th>LP 2022-2023</th><th>LP 2023/2024</th><th>Eureka Math</th></tr>
+                <tr><td>Unit 1</td><td>Module 1</td><td>Chapter 1</td></tr>
+                <tr><td>Unit 2</td><td>Module 2</td><td>Chapter 2</td></tr>
+                <tr><td>Unit 3</td><td>Module 3</td><td>Chapter 3</td></tr>
+                <tr><td>Unit 4</td><td>Module 4</td><td>Chapter 4</td></tr>
+                <tr><td>Unit 5</td><td>Module 5</td><td>Chapter 5</td></tr>
+                <tr><td>Unit 6</td><td>Module 6</td><td>Chapter 6</td></tr>
+            </table>
+            <table>
+                <tr><th>Day/Time</th><th>Monday</th><th>Tuesday</th><th>Wednesday</th><th>Thursday</th><th>Friday</th></tr>
+                <tr><td>8:15-9:00</td><td>Math</td><td>Reading</td><td>Math</td><td>Reading</td><td>Math</td></tr>
+                <tr><td>9:00-9:30</td><td>Centers</td><td>Writing</td><td>Centers</td><td>Writing</td><td>Centers</td></tr>
+            </table>
+        </body></html>"#;
+
+        let template = extract_template_with_ai(html, &provider).await;
+
+        // AI-selected table should be the schedule grid.
+        assert_eq!(template.table_structure.layout_type, "schedule_grid");
+        assert_eq!(template.table_structure.column_semantic, Some("days_of_week".to_string()));
+        assert_eq!(template.table_structure.row_semantic, Some("time_slots".to_string()));
+        assert!(template.table_structure.columns.contains(&"Monday".to_string()));
+        // Should NOT contain reference table columns.
+        assert!(!template.table_structure.columns.iter().any(|c| c.contains("2022")));
+    }
+
+    #[tokio::test]
+    async fn test_extract_template_with_ai_falls_back_on_error() {
+        let provider = ErrorAiProvider;
+
+        let html = r#"<html><body>
+            <table>
+                <tr><th>LP 2022-2023</th><th>LP 2023/2024</th></tr>
+                <tr><td>Unit 1</td><td>Module 1</td></tr>
+            </table>
+            <table>
+                <tr><th>Time</th><th>Monday</th><th>Tuesday</th><th>Wednesday</th></tr>
+                <tr><td>9:00-9:30</td><td>Math</td><td>Reading</td><td>Math</td></tr>
+            </table>
+        </body></html>"#;
+
+        // Should still produce a valid template using heuristic fallback.
+        let template = extract_template_with_ai(html, &provider).await;
+        assert!(!template.table_structure.columns.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_extract_template_with_ai_single_table_skips_ai() {
+        let provider = MockAiProvider::new(
+            r#"{"table_index": 0, "column_semantic": "test", "row_semantic": "test", "layout_type": "test"}"#,
+        );
+
+        let html = r#"<html><body>
+            <table>
+                <tr><th>Time</th><th>Monday</th><th>Tuesday</th></tr>
+                <tr><td>9:00</td><td>Math</td><td>Reading</td></tr>
+            </table>
+        </body></html>"#;
+
+        let template = extract_template_with_ai(html, &provider).await;
+
+        // With only one table, AI should NOT be called.
+        assert_eq!(provider.call_count(), 0);
+        // Should still extract the table using heuristic.
+        assert!(!template.table_structure.columns.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_extract_template_with_ai_empty_html() {
+        let provider = MockAiProvider::new("{}");
+        let template = extract_template_with_ai("", &provider).await;
+        assert!(template.table_structure.columns.is_empty());
+        assert_eq!(provider.call_count(), 0);
+    }
+
+    #[test]
+    fn test_ai_table_identification_serialization() {
+        let id = AiTableIdentification {
+            table_index: 1,
+            column_semantic: "days_of_week".to_string(),
+            row_semantic: "time_slots".to_string(),
+            layout_type: "schedule_grid".to_string(),
+        };
+
+        let json = serde_json::to_string(&id).unwrap();
+        let deserialized: AiTableIdentification = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.table_index, 1);
+        assert_eq!(deserialized.column_semantic, "days_of_week");
+        assert_eq!(deserialized.row_semantic, "time_slots");
+        assert_eq!(deserialized.layout_type, "schedule_grid");
+    }
+
+    #[test]
+    fn test_ai_table_identification_deserialization_from_ai_response() {
+        // Test that we can deserialize the exact format the AI is expected to return.
+        let json_str = r#"{"table_index": 0, "column_semantic": "lesson_attributes", "row_semantic": "lessons", "layout_type": "standard_table"}"#;
+        let id: AiTableIdentification = serde_json::from_str(json_str).unwrap();
+        assert_eq!(id.table_index, 0);
+        assert_eq!(id.layout_type, "standard_table");
+    }
+
+    #[tokio::test]
+    async fn test_extract_template_with_ai_preserves_other_fields() {
+        // Verify that AI table selection still extracts colors, time slots, etc.
+        let provider = MockAiProvider::new(
+            r#"{"table_index": 0, "column_semantic": "days_of_week", "row_semantic": "time_slots", "layout_type": "schedule_grid"}"#,
+        );
+
+        let html = r#"<html><body>
+            <table>
+                <tr><th style="background-color:#9900ff">Time</th><th style="background-color:#9900ff">Monday</th><th style="background-color:#9900ff">Tuesday</th><th style="background-color:#9900ff">Wednesday</th></tr>
+                <tr><td>9:00-9:30</td><td>Math</td><td>Math</td><td>Math</td></tr>
+                <tr><td>9:30-10:00</td><td>Recess</td><td>Recess</td><td>Recess</td></tr>
+                <tr><td>10:00-10:30</td><td>Reading</td><td>Reading</td><td>Reading</td></tr>
+            </table>
+            <table>
+                <tr><th>Archive</th><th>Notes</th></tr>
+                <tr><td>Old</td><td>Data</td></tr>
+            </table>
+        </body></html>"#;
+
+        let template = extract_template_with_ai(html, &provider).await;
+
+        // Time slots should still be extracted.
+        assert!(template.time_slots.contains(&"9:00-9:30".to_string()));
+        assert!(template.time_slots.contains(&"9:30-10:00".to_string()));
+
+        // Colors should still be extracted.
+        assert!(!template.color_scheme.mappings.is_empty());
+
+        // Recurring elements should still be extracted.
+        assert!(template.recurring_elements.activities.contains(&"Math".to_string()));
+
+        // Daily routine should still be extracted.
+        let routine_names: Vec<&str> = template.daily_routine.iter().map(|e| e.name.as_str()).collect();
+        assert!(routine_names.contains(&"Recess"));
     }
 }

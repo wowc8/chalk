@@ -17,7 +17,8 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use crate::database::{CancellationToken, Database};
+use crate::chat::provider::{AiProvider, AiProviderConfig, AiProviderFactory};
+use crate::database::{CancellationToken, Database, TeachingTemplateSchema};
 use crate::errors::{ChalkError, ErrorCode, ErrorDomain};
 
 /// A single lesson plan extracted from a table row.
@@ -55,8 +56,9 @@ struct FetchedDoc {
     doc_name: String,
     tables_found: usize,
     lessons: Vec<ExtractedLesson>,
-    /// Raw HTML for template extraction (formatting analysis).
-    raw_html: String,
+    /// Pre-computed template schema (via AI or heuristic). Computed during the
+    /// async fetch phase so it's ready for the synchronous DB transaction.
+    template_schema: Option<TeachingTemplateSchema>,
 }
 
 /// Fetch a Google Doc as HTML via the Drive export API.
@@ -473,23 +475,85 @@ fn capitalize_header(header: &str) -> String {
 }
 
 /// Fetch a single document's data from Google and extract lessons (no DB writes).
+///
+/// When an AI provider is available, uses it to identify the correct planning
+/// template table. The template schema is pre-computed here (async) so it's
+/// ready for the synchronous DB transaction in `write_digest_results()`.
 async fn fetch_document(
     access_token: &str,
     doc_id: &str,
     doc_name: &str,
+    ai_provider: Option<&dyn AiProvider>,
 ) -> Result<FetchedDoc, ChalkError> {
     let html = fetch_doc_html(access_token, doc_id).await?;
     let tables = parser::extract_tables(&html);
     let tables_found = tables.len();
     let lessons = extract_lessons_from_doc(&html);
 
+    // Pre-compute template schema using AI if available, otherwise heuristic.
+    let template_schema = if !html.is_empty() {
+        let schema = match ai_provider {
+            Some(provider) => {
+                info!(doc_id, doc_name, "Using AI to identify planning template table");
+                template_extractor::extract_template_with_ai(&html, provider).await
+            }
+            None => template_extractor::extract_template(&html),
+        };
+        if !schema.table_structure.columns.is_empty() {
+            Some(schema)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     Ok(FetchedDoc {
         doc_id: doc_id.to_string(),
         doc_name: doc_name.to_string(),
         tables_found,
         lessons,
-        raw_html: html,
+        template_schema,
     })
+}
+
+/// Try to create an AI provider from the database settings.
+///
+/// Returns `None` if the API key is not configured — the caller should
+/// fall back to heuristic extraction.
+fn create_ai_provider_from_db(db: &Database) -> Option<Box<dyn AiProvider>> {
+    let api_key = db.get_setting("openai_api_key").ok()??;
+    if api_key.is_empty() {
+        return None;
+    }
+
+    let base_url = db
+        .get_setting("openai_base_url")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+
+    // Use the cheaper model for table identification — it's a simple classification task.
+    let model = db
+        .get_setting("chat_model")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "gpt-4o-mini".to_string());
+
+    let config = AiProviderConfig {
+        provider_type: "openai".to_string(),
+        api_key,
+        base_url,
+        model,
+    };
+
+    match AiProviderFactory::create(&config) {
+        Ok(provider) => Some(provider),
+        Err(e) => {
+            warn!(error = %e, "Failed to create AI provider for digest — will use heuristic");
+            None
+        }
+    }
 }
 
 /// Find an existing subject by name (case-insensitive) or create a new one,
@@ -594,9 +658,8 @@ fn write_digest_results(
             ref_docs_created.push(ref_doc_id);
         }
 
-        // Extract and store the teaching template (formatting patterns).
-        let template_schema = template_extractor::extract_template(&doc.raw_html);
-        if !template_schema.table_structure.columns.is_empty() {
+        // Store the pre-computed teaching template (computed during fetch phase).
+        if let Some(ref template_schema) = doc.template_schema {
             crate::database::Database::delete_teaching_templates_by_source(conn, &doc.doc_id)
                 .map_err(|e| ChalkError::new(
                     ErrorDomain::Digest,
@@ -604,7 +667,7 @@ fn write_digest_results(
                     format!("Failed to clean old templates: {}", e),
                 ))?;
 
-            let template_json = serde_json::to_string(&template_schema).map_err(|e| {
+            let template_json = serde_json::to_string(template_schema).map_err(|e| {
                 ChalkError::new(
                     ErrorDomain::Digest,
                     ErrorCode::DigestParseFailed,
@@ -630,7 +693,7 @@ fn write_digest_results(
                 layout_type = template_schema.table_structure.layout_type.as_str(),
                 columns = template_schema.table_structure.column_count,
                 time_slots = template_schema.time_slots.len(),
-                "Teaching template extracted"
+                "Teaching template stored"
             );
         }
 
@@ -935,7 +998,16 @@ pub async fn digest_folder(
             .collect();
     }
 
+    // Create an AI provider for table identification (if API key is configured).
+    let ai_provider = create_ai_provider_from_db(db);
+    if ai_provider.is_some() {
+        info!("AI provider available — will use AI for template table identification");
+    } else {
+        info!("No AI provider configured — using heuristic table identification");
+    }
+
     // Phase 2: Fetch each document's content from Google (network I/O, no DB writes).
+    // Template extraction (including AI calls) happens here in the async phase.
     let mut fetched_docs = Vec::new();
 
     for (doc_id, doc_name) in &files_to_process {
@@ -947,7 +1019,12 @@ pub async fn digest_folder(
             ));
         }
 
-        match fetch_document(access_token, doc_id, doc_name).await {
+        match fetch_document(
+            access_token,
+            doc_id,
+            doc_name,
+            ai_provider.as_ref().map(|p| p.as_ref()),
+        ).await {
             Ok(doc) => fetched_docs.push(doc),
             Err(e) => {
                 warn!(doc_id = doc_id.as_str(), doc_name = doc_name.as_str(), error = %e, "Failed to fetch document — skipping");
@@ -1293,7 +1370,7 @@ mod tests {
                     subject_hint: None,
                     grade_hint: None,
                 }],
-                raw_html: String::new(),
+                template_schema: None,
             },
             FetchedDoc {
                 doc_id: "doc2".into(),
@@ -1306,7 +1383,7 @@ mod tests {
                     subject_hint: None,
                     grade_hint: None,
                 }],
-                raw_html: String::new(),
+                template_schema: None,
             },
         ];
 
@@ -1346,7 +1423,7 @@ mod tests {
                 subject_hint: Some("Biology".into()),
                 grade_hint: Some("9th".into()),
             }],
-            raw_html: String::new(),
+            template_schema: None,
         }];
 
         let result = db.with_transaction(|tx| {
