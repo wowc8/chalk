@@ -308,12 +308,21 @@ fn format_template_instructions(template_json: &str) -> String {
 
     // ── Table Structure ──
     let ts = &schema.table_structure;
+    // Detect whether this is a transposed schedule (days in rows, times in columns).
+    let is_transposed = ts.column_semantic.as_deref() == Some("time_slots")
+        && ts.row_semantic.as_deref() == Some("days_of_week");
     if !ts.columns.is_empty() {
         instructions.push_str("### Table Layout\n");
         if ts.layout_type == "schedule_grid" {
-            instructions.push_str(
-                "This is a **weekly schedule grid**: days of the week as columns, time slots as rows.\n\n"
-            );
+            if is_transposed {
+                instructions.push_str(
+                    "This is a **weekly schedule grid** (transposed): time slots/periods as columns, days of the week as rows.\n\n"
+                );
+            } else {
+                instructions.push_str(
+                    "This is a **weekly schedule grid**: days of the week as columns, time slots as rows.\n\n"
+                );
+            }
         }
         // Include semantic labels when available for clearer AI guidance.
         if let Some(ref col_sem) = ts.column_semantic {
@@ -338,9 +347,15 @@ fn format_template_instructions(template_json: &str) -> String {
     // ── Time Slots ──
     if !schema.time_slots.is_empty() {
         instructions.push_str("### Time Blocks\n");
-        instructions.push_str(
-            "Each row in the table corresponds to a time block. Use these EXACT time slots as the first column:\n\n"
-        );
+        if is_transposed {
+            instructions.push_str(
+                "Each column in the table corresponds to a time block. Use these EXACT time slots as column headers:\n\n"
+            );
+        } else {
+            instructions.push_str(
+                "Each row in the table corresponds to a time block. Use these EXACT time slots as the first column:\n\n"
+            );
+        }
         for slot in &schema.time_slots {
             instructions.push_str(&format!("- {slot}\n"));
         }
@@ -450,45 +465,84 @@ fn format_template_instructions(template_json: &str) -> String {
             "Generate a complete `<table>` with this structure. Here is the skeleton — \
              fill every cell with specific lesson content:\n\n```html\n<table>\n  <tr>\n"
         );
-        for col in &ts.columns {
-            // Apply header color via background-color style
-            let header_style = cs.mappings.iter()
-                .find(|m| m.category == "header")
-                .map(|m| format!(" style=\"background-color: {}\"", m.color))
-                .unwrap_or_default();
-            instructions.push_str(&format!("    <th{header_style}>{col}</th>\n"));
-        }
-        instructions.push_str("  </tr>\n");
 
-        // Show first 2-3 time slot rows as example
+        let header_style = cs.mappings.iter()
+            .find(|m| m.category == "header")
+            .map(|m| format!(" style=\"background-color: {}\"", m.color))
+            .unwrap_or_default();
         let activity_style = cs.mappings.iter()
             .find(|m| m.category == "activity")
             .map(|m| format!(" style=\"background-color: {}\"", m.color))
             .unwrap_or_default();
-        let example_slots: Vec<&String> = schema.time_slots.iter().take(3).collect();
-        for slot in &example_slots {
-            instructions.push_str("  <tr>\n");
-            instructions.push_str(&format!("    <td>{slot}</td>\n"));
-            for _ in 1..ts.columns.len() {
-                instructions.push_str(&format!(
-                    "    <td{activity_style}>\
-                     <strong>Activity Name</strong><br/>Specific details...\
-                     </td>\n"
-                ));
+
+        if is_transposed {
+            // Transposed: first header is "Day", remaining headers are time slots.
+            let first_col_label = ts.columns.first().map(|s| s.as_str()).unwrap_or("Day");
+            instructions.push_str(&format!("    <th{header_style}>{first_col_label}</th>\n"));
+            let example_slots: Vec<&String> = schema.time_slots.iter().take(5).collect();
+            for slot in &example_slots {
+                instructions.push_str(&format!("    <th{header_style}>{slot}</th>\n"));
+            }
+            if schema.time_slots.len() > 5 {
+                instructions.push_str("    <!-- ... more time slots ... -->\n");
             }
             instructions.push_str("  </tr>\n");
-        }
-        if schema.time_slots.len() > 3 {
-            instructions.push_str("  <!-- ... continue for all time slots ... -->\n");
+
+            // Show example day rows.
+            let day_names = ["Monday", "Tuesday", "Wednesday"];
+            for day in &day_names {
+                instructions.push_str("  <tr>\n");
+                instructions.push_str(&format!("    <td{header_style}>{day}</td>\n"));
+                for _ in 0..example_slots.len() {
+                    instructions.push_str(&format!(
+                        "    <td{activity_style}>\
+                         <strong>Activity Name</strong><br/>Specific details...\
+                         </td>\n"
+                    ));
+                }
+                instructions.push_str("  </tr>\n");
+            }
+            instructions.push_str("  <!-- ... continue for all days ... -->\n");
+        } else {
+            // Standard: columns are day headers, rows are time slots.
+            for col in &ts.columns {
+                instructions.push_str(&format!("    <th{header_style}>{col}</th>\n"));
+            }
+            instructions.push_str("  </tr>\n");
+
+            let example_slots: Vec<&String> = schema.time_slots.iter().take(3).collect();
+            for slot in &example_slots {
+                instructions.push_str("  <tr>\n");
+                instructions.push_str(&format!("    <td>{slot}</td>\n"));
+                for _ in 1..ts.columns.len() {
+                    instructions.push_str(&format!(
+                        "    <td{activity_style}>\
+                         <strong>Activity Name</strong><br/>Specific details...\
+                         </td>\n"
+                    ));
+                }
+                instructions.push_str("  </tr>\n");
+            }
+            if schema.time_slots.len() > 3 {
+                instructions.push_str("  <!-- ... continue for all time slots ... -->\n");
+            }
         }
         instructions.push_str("</table>\n```\n\n");
     }
 
-    instructions.push_str(
-        "**CRITICAL:** Generate ALL time slot rows, ALL day columns, and fill EVERY cell. \
-         An empty cell is better than a missing row. The output must be a complete weekly schedule, \
-         not a partial plan.\n"
-    );
+    if is_transposed {
+        instructions.push_str(
+            "**CRITICAL:** Generate ALL time slot columns, ALL day rows, and fill EVERY cell. \
+             An empty cell is better than a missing column. The output must be a complete weekly schedule, \
+             not a partial plan.\n"
+        );
+    } else {
+        instructions.push_str(
+            "**CRITICAL:** Generate ALL time slot rows, ALL day columns, and fill EVERY cell. \
+             An empty cell is better than a missing row. The output must be a complete weekly schedule, \
+             not a partial plan.\n"
+        );
+    }
 
     instructions
 }
@@ -1544,6 +1598,33 @@ mod tests {
         assert!(result.contains("Assembly"));
         // Without a time slot, should just list the name without "at".
         assert!(!result.contains("at null"));
+    }
+
+    #[test]
+    fn test_format_template_instructions_transposed_schedule() {
+        // Transposed: time_slots in columns, days_of_week in rows.
+        let template = r##"{"color_scheme":{"mappings":[{"color":"#9900ff","category":"header","frequency":6}]},"table_structure":{"layout_type":"schedule_grid","columns":["Day","8:00-8:30","8:30-9:00","9:00-9:30"],"row_categories":["Monday","Tuesday","Wednesday"],"column_count":4,"column_semantic":"time_slots","row_semantic":"days_of_week"},"time_slots":["8:00-8:30","8:30-9:00","9:00-9:30"],"content_patterns":{"cell_content_types":[],"has_links":false,"has_rich_formatting":false},"recurring_elements":{"subjects":[],"activities":["Math"]},"daily_routine":[{"name":"Recess","time_slot":"9:00-9:30","days":["Monday","Tuesday","Wednesday"]}]}"##;
+
+        let result = format_template_instructions(template);
+
+        // Should describe transposed orientation.
+        assert!(result.contains("transposed"), "Should mention transposed layout: {}", result);
+        assert!(result.contains("time slots/periods as columns"), "Should describe time as columns");
+        assert!(result.contains("days of the week as rows"), "Should describe days as rows");
+
+        // Time blocks should say "column headers" not "first column".
+        assert!(result.contains("column headers"), "Time slots should be column headers in transposed");
+
+        // HTML skeleton should have time slots in header row and days as row labels.
+        assert!(result.contains("Monday"), "Skeleton should include day names as rows");
+        assert!(result.contains("8:00-8:30"), "Skeleton should include time slots in header");
+
+        // Daily routine should still be present.
+        assert!(result.contains("Recess"));
+
+        // Critical instruction should reference columns, not rows.
+        assert!(result.contains("ALL time slot columns"));
+        assert!(result.contains("ALL day rows"));
     }
 
     #[test]

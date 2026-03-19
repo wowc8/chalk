@@ -113,7 +113,7 @@ pub async fn fetch_doc_html(
 }
 
 /// Day-of-week keywords used to detect schedule-grid tables.
-const DAY_NAMES: &[&str] = &[
+pub(crate) const DAY_NAMES: &[&str] = &[
     "monday", "tuesday", "wednesday", "thursday", "friday",
     "saturday", "sunday",
     "mon", "tue", "wed", "thu", "fri", "sat", "sun",
@@ -470,7 +470,7 @@ fn is_title_header(header: &str) -> bool {
 }
 
 /// Capitalize the first letter of a header for display.
-fn capitalize_header(header: &str) -> String {
+pub(crate) fn capitalize_header(header: &str) -> String {
     let mut chars = header.chars();
     match chars.next() {
         None => String::new(),
