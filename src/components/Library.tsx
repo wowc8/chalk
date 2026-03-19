@@ -1,6 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useNavigate } from "react-router-dom";
+import { motion, AnimatePresence } from "framer-motion";
 import { useTeacherName } from "../hooks/useTeacherName";
 import { useToast } from "./Toast";
 import { DeleteConfirmDialog } from "./DeleteConfirmDialog";
@@ -73,14 +74,20 @@ export function Library() {
   const [deletingPlan, setDeletingPlan] = useState<LibraryPlanCard | null>(null);
   const { addToast } = useToast();
 
+  // Refs to capture current filter state for the focus handler
+  const searchRef = useRef(searchQuery);
+  searchRef.current = searchQuery;
+  const tagsRef = useRef(selectedTagIds);
+  tagsRef.current = selectedTagIds;
+
   const loadPlans = async () => {
     setLoading(true);
     setError(null);
     try {
       const [fetchedPlans, fetchedTags] = await Promise.all([
         invoke<LibraryPlanCard[]>("list_library_plans", {
-          search: searchQuery || null,
-          tagIds: selectedTagIds.length > 0 ? selectedTagIds : null,
+          search: searchRef.current || null,
+          tagIds: tagsRef.current.length > 0 ? tagsRef.current : null,
         }),
         invoke<Tag[]>("list_tags"),
       ]);
@@ -105,6 +112,13 @@ export function Library() {
     }, 300);
     return () => clearTimeout(timer);
   }, [searchQuery]);
+
+  // Auto-refresh when window regains focus (e.g. returning from plan detail)
+  useEffect(() => {
+    const handleFocus = () => loadPlans();
+    window.addEventListener("focus", handleFocus);
+    return () => window.removeEventListener("focus", handleFocus);
+  }, []);
 
   function toggleTag(tagId: string) {
     setSelectedTagIds((prev) =>
@@ -262,18 +276,10 @@ export function Library() {
         {/* Plan cards */}
         {!loading && plans.length > 0 && (
           <div>
-            <div className="flex items-center justify-between mb-3">
-              <p className="text-xs text-chalk-muted">
-                {plans.length} plan{plans.length !== 1 ? "s" : ""}
-                {searchQuery && ` matching "${searchQuery}"`}
-              </p>
-              <button
-                onClick={loadPlans}
-                className="btn btn-ghost text-xs"
-              >
-                Refresh
-              </button>
-            </div>
+            <p className="text-xs text-chalk-muted mb-3">
+              {plans.length} plan{plans.length !== 1 ? "s" : ""}
+              {searchQuery && ` matching "${searchQuery}"`}
+            </p>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
               {plans.map((plan) => (
