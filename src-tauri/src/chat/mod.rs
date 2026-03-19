@@ -246,7 +246,7 @@ When you create, modify, or update lesson plan content, write it directly to the
 <table><tr><th>Time</th><th>Activity</th></tr>...</table>
 <<<END_EDITOR_UPDATE>>>
 
-- Content inside the markers MUST be valid HTML (the editor uses TipTap — supports `<h1>`–`<h3>`, `<p>`, `<strong>`, `<em>`, `<u>`, `<ul>`/`<ol>`/`<li>`, `<table>`/`<tr>`/`<th>`/`<td>`, `<blockquote>`, `<mark data-color="COLOR">` for background highlighting, `<span style="color: COLOR">` for text color)
+- Content inside the markers MUST be valid HTML (the editor uses TipTap — supports `<h1>`–`<h3>`, `<p>`, `<strong>`, `<em>`, `<u>`, `<ul>`/`<ol>`/`<li>`, `<table>`/`<tr>`/`<th>`/`<td>`, `<blockquote>`, `style="background-color: COLOR"` on `<td>`/`<th>` for cell background colors, `<mark data-color="COLOR">` for inline text highlighting, `<span style="color: COLOR">` for text color)
 - For color-coded cells, use `style="background-color: COLOR"` directly on `<td>` or `<th>` elements (e.g. `<td style="background-color: #FFFF00">content</td>`). Use `<mark data-color="COLOR">text</mark>` only for inline text highlights within a cell, not for the cell's background color
 - The editor update REPLACES the entire editor content, so include the full plan — not just the changed section
 - CRITICAL: Always base your editor update on the CURRENT LESSON PLAN content provided below. The teacher may have manually edited the plan since your last response. Never overwrite their changes — merge your updates with their current content.
