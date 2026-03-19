@@ -227,6 +227,12 @@
   font-size: 0.875rem;
 }
 
+/* When a cell has an inline background-color, let it override the default */
+.chalk-editor-content td[style*="background-color"],
+.chalk-editor-content th[style*="background-color"] {
+  background: none;
+}
+
 .chalk-editor-content .selectedCell {
   background: rgba(116, 185, 255, 0.12);
 }

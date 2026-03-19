@@ -140,6 +140,12 @@ pub struct TableStructure {
     pub row_categories: Vec<String>,
     #[serde(default)]
     pub column_count: usize,
+    /// Semantic label for what columns represent (e.g., "days_of_week", "data_columns").
+    #[serde(default)]
+    pub column_semantic: Option<String>,
+    /// Semantic label for what rows represent (e.g., "time_slots", "categories").
+    #[serde(default)]
+    pub row_semantic: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

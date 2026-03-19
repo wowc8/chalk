@@ -1602,6 +1602,8 @@ mod tests {
                 columns: vec!["Time".to_string(), "Monday".to_string()],
                 row_categories: vec!["Math".to_string()],
                 column_count: 2,
+                column_semantic: Some("days_of_week".to_string()),
+                row_semantic: Some("time_slots".to_string()),
             },
             time_slots: vec!["9:00-9:30".to_string()],
             content_patterns: ContentPatterns {
