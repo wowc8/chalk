@@ -1,12 +1,15 @@
-//! RAG retrieval: find relevant lesson plan history and assemble context
+//! RAG retrieval: find relevant reference documents and assemble context
 //! for the AI chat. Uses hybrid search (FTS5 + vector) when embeddings are
 //! available, falling back to FTS5-only when they are not.
+//!
+//! Reference documents are extracted from the teacher's Google Docs during
+//! digest and stored separately from user-created lesson plans.
 
-use crate::database::{Database, HybridSearchResult, LessonPlan};
+use crate::database::{Database, HybridSearchResult, ReferenceDoc};
 use crate::errors::ChalkError;
 use crate::rag::embeddings::EmbeddingClient;
 
-/// A retrieved lesson plan with its similarity score, ready for context injection.
+/// A retrieved reference document with its similarity score, ready for context injection.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RetrievedContext {
     pub plan_id: String,
@@ -16,8 +19,8 @@ pub struct RetrievedContext {
     pub distance: f64,
 }
 
-/// Maximum number of plans to retrieve for context.
-const MAX_CONTEXT_PLANS: usize = 5;
+/// Maximum number of reference docs to retrieve for context.
+const MAX_CONTEXT_DOCS: usize = 5;
 /// Maximum total characters of context to include (to stay within LLM token limits).
 const MAX_CONTEXT_CHARS: usize = 8000;
 /// Relative weight for FTS5 results in hybrid scoring.
@@ -25,11 +28,11 @@ const FTS_WEIGHT: f64 = 1.0;
 /// Relative weight for vector results in hybrid scoring.
 const VEC_WEIGHT: f64 = 1.0;
 
-/// Retrieve the most relevant lesson plans for a given query using hybrid search.
+/// Retrieve the most relevant reference documents for a given query using hybrid search.
 ///
 /// 1. Embeds the query text
-/// 2. Runs hybrid search (FTS5 + sqlite-vec) with RRF re-ranking
-/// 3. Fetches full plan content for the top matches
+/// 2. Runs hybrid search (FTS5 + sqlite-vec) with RRF re-ranking on reference_docs
+/// 3. Fetches full reference doc content for the top matches
 /// 4. Trims to stay within context budget
 ///
 /// Falls back to FTS5-only search if embedding generation fails.
@@ -41,13 +44,13 @@ pub async fn retrieve_relevant_plans(
     // Try to generate query embedding for hybrid search.
     let search_results: Vec<HybridSearchResult> = match embedding_client.embed_one(query).await {
         Ok(query_embedding) => {
-            // Full hybrid search: FTS5 + vector.
-            db.search_hybrid(query, &query_embedding, MAX_CONTEXT_PLANS, FTS_WEIGHT, VEC_WEIGHT)
+            // Full hybrid search: FTS5 + vector on reference_docs.
+            db.search_ref_docs_hybrid(query, &query_embedding, MAX_CONTEXT_DOCS, FTS_WEIGHT, VEC_WEIGHT)
                 .map_err(|e| ChalkError::db_query(format!("Hybrid search failed: {e}")))?
         }
         Err(_) => {
             // Fallback to FTS5-only when embeddings unavailable.
-            db.search_hybrid_fts_only(query, MAX_CONTEXT_PLANS)
+            db.search_ref_docs_hybrid_fts_only(query, MAX_CONTEXT_DOCS)
                 .map_err(|e| ChalkError::db_query(format!("FTS search failed: {e}")))?
         }
     };
@@ -56,27 +59,27 @@ pub async fn retrieve_relevant_plans(
         return Ok(Vec::new());
     }
 
-    // Fetch full plan content for each match.
+    // Fetch full reference doc content for each match.
     let mut contexts = Vec::with_capacity(search_results.len());
     let mut total_chars = 0;
 
     for result in &search_results {
-        let plan: LessonPlan = match db.get_lesson_plan(&result.lesson_plan_id) {
-            Ok(p) => p,
-            Err(_) => continue, // Plan may have been deleted since indexing.
+        let doc: ReferenceDoc = match db.get_reference_doc(&result.lesson_plan_id) {
+            Ok(d) => d,
+            Err(_) => continue, // Doc may have been deleted since indexing.
         };
 
-        let content_len = plan.content.len() + plan.title.len();
+        let content_len = doc.content_text.len() + doc.title.len();
         if total_chars + content_len > MAX_CONTEXT_CHARS && !contexts.is_empty() {
             break; // Budget exceeded; stop adding more context.
         }
 
         total_chars += content_len;
         contexts.push(RetrievedContext {
-            plan_id: plan.id,
-            title: plan.title,
-            content: plan.content,
-            learning_objectives: plan.learning_objectives,
+            plan_id: doc.id,
+            title: doc.title,
+            content: doc.content_text,
+            learning_objectives: None,
             distance: 1.0 - result.score, // Convert score to distance-like metric
         });
     }
@@ -91,10 +94,10 @@ pub fn format_context_for_prompt(contexts: &[RetrievedContext]) -> String {
     }
 
     let mut parts = Vec::with_capacity(contexts.len() + 1);
-    parts.push("Here are relevant lesson plans from your teaching history:\n".to_string());
+    parts.push("Here are relevant documents from your teaching history:\n".to_string());
 
     for (i, ctx) in contexts.iter().enumerate() {
-        let mut entry = format!("--- Plan {} ---\nTitle: {}\n", i + 1, ctx.title);
+        let mut entry = format!("--- Reference {} ---\nTitle: {}\n", i + 1, ctx.title);
         if let Some(ref obj) = ctx.learning_objectives {
             if !obj.is_empty() {
                 entry.push_str(&format!("Objectives: {obj}\n"));
@@ -133,7 +136,7 @@ mod tests {
         }];
 
         let formatted = format_context_for_prompt(&contexts);
-        assert!(formatted.contains("Plan 1"));
+        assert!(formatted.contains("Reference 1"));
         assert!(formatted.contains("Photosynthesis Lab"));
         assert!(formatted.contains("Understand photosynthesis"));
         assert!(formatted.contains("light reactions"));
@@ -176,8 +179,8 @@ mod tests {
         ];
 
         let formatted = format_context_for_prompt(&contexts);
-        assert!(formatted.contains("Plan 1"));
-        assert!(formatted.contains("Plan 2"));
+        assert!(formatted.contains("Reference 1"));
+        assert!(formatted.contains("Reference 2"));
         assert!(formatted.contains("Plan A"));
         assert!(formatted.contains("Plan B"));
         assert!(formatted.contains("Goals B"));

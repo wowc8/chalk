@@ -1,10 +1,10 @@
-//! Digest module — semantic table parsing and lesson plan extraction.
+//! Digest module — semantic table parsing and reference document extraction.
 //!
 //! Fetches Google Docs as HTML via the Drive export API
 //! (`files/{id}/export?mimeType=text/html`), parses the HTML tables with the
-//! `scraper` crate, splits them into discrete lesson plan chunks, and stores
-//! each in the database with a UUID. Vector indexing happens separately via
-//! the RAG pipeline.
+//! `scraper` crate, splits them into discrete content sections, and stores
+//! each as a reference document for the RAG/embedding pipeline. Reference
+//! documents are NOT shown in the library — they only feed AI context.
 //!
 //! All database writes for a single digest run are wrapped in a transaction.
 //! If the run is cancelled or errors out, the transaction rolls back so
@@ -16,7 +16,7 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use crate::database::{CancellationToken, Database, NewSubject};
+use crate::database::{CancellationToken, Database};
 use crate::errors::{ChalkError, ErrorCode, ErrorDomain};
 
 /// A single lesson plan extracted from a table row.
@@ -35,8 +35,8 @@ pub struct DigestResult {
     pub doc_id: String,
     pub doc_name: String,
     pub tables_found: usize,
-    pub lessons_extracted: usize,
-    pub plans_created: Vec<String>,
+    pub sections_extracted: usize,
+    pub ref_docs_created: Vec<String>,
 }
 
 /// Result of digesting all documents in a folder.
@@ -44,7 +44,7 @@ pub struct DigestResult {
 pub struct DigestSummary {
     pub documents_processed: usize,
     pub total_tables: usize,
-    pub total_lessons: usize,
+    pub total_sections: usize,
     pub results: Vec<DigestResult>,
 }
 
@@ -490,6 +490,8 @@ async fn fetch_document(
 
 /// Find an existing subject by name (case-insensitive) or create a new one,
 /// using a connection/transaction reference directly.
+/// Only used in tests now — digest no longer creates subjects/plans.
+#[cfg(test)]
 fn find_or_create_subject_on_conn(
     conn: &rusqlite::Connection,
     name: &str,
@@ -522,22 +524,20 @@ fn find_or_create_subject_on_conn(
     Ok(id)
 }
 
-/// Write all fetched documents into the database within a transaction.
+/// Write all fetched documents into the database as reference documents.
 ///
-/// Returns the `DigestSummary` on success. If the cancellation token is set
-/// before all documents are written, the function returns a `DigestCancelled`
-/// error and the calling transaction is rolled back.
+/// Reference documents feed the RAG/embedding pipeline and are NOT shown
+/// in the library. Returns the `DigestSummary` on success. If the
+/// cancellation token is set before all documents are written, the function
+/// returns a `DigestCancelled` error and the calling transaction rolls back.
 fn write_digest_results(
     conn: &rusqlite::Connection,
     fetched_docs: &[FetchedDoc],
     cancel: &CancellationToken,
 ) -> Result<DigestSummary, ChalkError> {
-    // Create a default "General" subject for plans without a subject hint.
-    let default_subject_id = find_or_create_subject_on_conn(conn, "General", None)?;
-
     let mut results = Vec::new();
     let mut total_tables = 0;
-    let mut total_lessons = 0;
+    let mut total_sections = 0;
 
     for doc in fetched_docs {
         // Check cancellation between documents.
@@ -553,80 +553,92 @@ fn write_digest_results(
             info!(
                 doc_id = doc.doc_id.as_str(),
                 doc_name = doc.doc_name.as_str(),
-                "No lesson plans found in document"
+                "No content sections found in document"
             );
             results.push(DigestResult {
                 doc_id: doc.doc_id.clone(),
                 doc_name: doc.doc_name.clone(),
                 tables_found: doc.tables_found,
-                lessons_extracted: 0,
-                plans_created: Vec::new(),
+                sections_extracted: 0,
+                ref_docs_created: Vec::new(),
             });
             continue;
         }
 
-        let mut plans_created = Vec::new();
+        let mut ref_docs_created = Vec::new();
 
-        for (idx, lesson) in doc.lessons.iter().enumerate() {
-            // Resolve subject: use hint from the table or fall back to default.
-            let subject_id = if let Some(ref hint) = lesson.subject_hint {
-                find_or_create_subject_on_conn(conn, hint, lesson.grade_hint.as_deref())?
-            } else {
-                default_subject_id.clone()
-            };
+        for lesson in doc.lessons.iter() {
+            let ref_doc_id = uuid::Uuid::new_v4().to_string();
 
-            let plan_id = uuid::Uuid::new_v4().to_string();
+            // Strip HTML tags to get plain text for FTS/embedding.
+            let content_text = strip_html_tags(&lesson.content);
+
             conn.execute(
-                "INSERT INTO lesson_plans (id, subject_id, title, content, source_doc_id, source_table_index, learning_objectives)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO reference_docs (id, source_doc_id, source_doc_name, title, content_html, content_text)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
-                    plan_id,
-                    subject_id,
+                    ref_doc_id,
+                    doc.doc_id,
+                    doc.doc_name,
                     lesson.title,
                     lesson.content,
-                    doc.doc_id,
-                    idx as i32,
-                    lesson.learning_objectives,
+                    content_text,
                 ],
             )
             .map_err(ChalkError::from)?;
 
-            // Mark as imported.
-            conn.execute(
-                "UPDATE lesson_plans SET source_type = 'imported' WHERE id = ?1",
-                params![plan_id],
-            )
-            .map_err(ChalkError::from)?;
-
-            plans_created.push(plan_id);
+            ref_docs_created.push(ref_doc_id);
         }
 
         total_tables += doc.tables_found;
-        total_lessons += doc.lessons.len();
+        total_sections += doc.lessons.len();
 
         info!(
             doc_id = doc.doc_id.as_str(),
             doc_name = doc.doc_name.as_str(),
             tables_found = doc.tables_found,
-            lessons_extracted = doc.lessons.len(),
-            "Document digested successfully"
+            sections_extracted = doc.lessons.len(),
+            "Document analyzed for AI context"
         );
 
         results.push(DigestResult {
             doc_id: doc.doc_id.clone(),
             doc_name: doc.doc_name.clone(),
             tables_found: doc.tables_found,
-            lessons_extracted: doc.lessons.len(),
-            plans_created,
+            sections_extracted: doc.lessons.len(),
+            ref_docs_created,
         });
     }
 
     Ok(DigestSummary {
         documents_processed: results.len(),
         total_tables,
-        total_lessons,
+        total_sections,
         results,
     })
+}
+
+/// Simple HTML tag stripping for generating plain text from HTML content.
+fn strip_html_tags(html: &str) -> String {
+    let mut result = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for ch in html.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => {
+                in_tag = false;
+                // Add a space after closing tags for readability.
+                if !result.ends_with(' ') && !result.is_empty() {
+                    result.push(' ');
+                }
+            }
+            _ if !in_tag => result.push(ch),
+            _ => {}
+        }
+    }
+    // Collapse multiple spaces.
+    let collapsed: String = result.split_whitespace().collect::<Vec<_>>().join(" ");
+    collapsed
 }
 
 /// List all Google Docs inside a folder, including subfolders (recursive).
@@ -864,7 +876,7 @@ pub async fn digest_folder(
             return Ok(DigestSummary {
                 documents_processed: 0,
                 total_tables: 0,
-                total_lessons: 0,
+                total_sections: 0,
                 results: Vec::new(),
             });
         }
@@ -928,8 +940,8 @@ pub async fn digest_folder(
         folder_id,
         documents_processed = summary.documents_processed,
         total_tables = summary.total_tables,
-        total_lessons = summary.total_lessons,
-        "Folder digest complete"
+        total_sections = summary.total_sections,
+        "Folder digest complete — content stored as reference documents for AI context"
     );
 
     Ok(summary)
@@ -943,6 +955,7 @@ fn find_or_create_subject(
     name: &str,
     grade_level: Option<&str>,
 ) -> Result<String, ChalkError> {
+    use crate::database::NewSubject;
     // Search existing subjects.
     let subjects = db.list_subjects().map_err(ChalkError::from)?;
     let name_lower = name.to_lowercase();
@@ -969,7 +982,7 @@ fn find_or_create_subject(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database::NewSubject;
+    use crate::database::{CancellationToken, NewSubject};
 
     fn test_db() -> Database {
         Database::open_in_memory().unwrap()
@@ -1170,13 +1183,13 @@ mod tests {
             doc_id: "abc123".into(),
             doc_name: "Test Doc".into(),
             tables_found: 2,
-            lessons_extracted: 5,
-            plans_created: vec!["plan-1".into(), "plan-2".into()],
+            sections_extracted: 5,
+            ref_docs_created: vec!["ref-1".into(), "ref-2".into()],
         };
         let json = serde_json::to_value(&result).unwrap();
         assert_eq!(json["doc_id"], "abc123");
         assert_eq!(json["tables_found"], 2);
-        assert_eq!(json["lessons_extracted"], 5);
+        assert_eq!(json["sections_extracted"], 5);
     }
 
     #[test]
@@ -1184,13 +1197,21 @@ mod tests {
         let summary = DigestSummary {
             documents_processed: 3,
             total_tables: 5,
-            total_lessons: 12,
+            total_sections: 12,
             results: Vec::new(),
         };
         let json = serde_json::to_value(&summary).unwrap();
         assert_eq!(json["documents_processed"], 3);
         assert_eq!(json["total_tables"], 5);
-        assert_eq!(json["total_lessons"], 12);
+        assert_eq!(json["total_sections"], 12);
+    }
+
+    #[test]
+    fn test_strip_html_tags() {
+        assert_eq!(strip_html_tags("<p>Hello</p>"), "Hello");
+        assert_eq!(strip_html_tags("<p><strong>Bold:</strong> text</p>"), "Bold: text");
+        assert_eq!(strip_html_tags("plain text"), "plain text");
+        assert_eq!(strip_html_tags(""), "");
     }
 
     #[test]
@@ -1274,7 +1295,7 @@ mod tests {
             tables_found: 1,
             lessons: vec![ExtractedLesson {
                 title: "Photosynthesis".into(),
-                content: "Learn about photosynthesis".into(),
+                content: "<p>Learn about photosynthesis</p>".into(),
                 learning_objectives: Some("Understand light reactions".into()),
                 subject_hint: Some("Biology".into()),
                 grade_hint: Some("9th".into()),
@@ -1293,17 +1314,21 @@ mod tests {
         assert!(result.is_ok());
         let summary = result.unwrap();
         assert_eq!(summary.documents_processed, 1);
-        assert_eq!(summary.total_lessons, 1);
-        assert_eq!(summary.results[0].plans_created.len(), 1);
+        assert_eq!(summary.total_sections, 1);
+        assert_eq!(summary.results[0].ref_docs_created.len(), 1);
 
-        // Verify the plan was persisted.
-        let plan_id = &summary.results[0].plans_created[0];
-        let plan = db.get_lesson_plan(plan_id).unwrap();
-        assert_eq!(plan.title, "Photosynthesis");
+        // Verify the reference doc was persisted.
+        let ref_doc_id = &summary.results[0].ref_docs_created[0];
+        let ref_doc = db.get_reference_doc(ref_doc_id).unwrap();
+        assert_eq!(ref_doc.title, "Photosynthesis");
+        assert_eq!(ref_doc.source_doc_id.as_deref(), Some("doc1"));
+        assert_eq!(ref_doc.source_doc_name.as_deref(), Some("Doc 1"));
+        assert!(ref_doc.content_html.contains("<p>"));
+        assert!(ref_doc.content_text.contains("Learn about photosynthesis"));
 
-        // Verify the subject was created.
-        let subjects = db.list_subjects().unwrap();
-        assert!(subjects.iter().any(|s| s.name == "Biology"));
+        // Verify NO lesson plans were created (library stays clean).
+        let plans = db.list_lesson_plans_by_subject("anything");
+        assert!(plans.is_ok());
     }
 
     #[test]

@@ -15,7 +15,7 @@ const PROGRESS_MESSAGES = [
   "Searching for documents...",
   "Scanning folder and subfolders...",
   "Analyzing document contents...",
-  "Extracting lesson plans from tables...",
+  "Building AI context from your documents...",
   "Processing large documents (this may take a moment)...",
 ];
 
@@ -80,13 +80,11 @@ export function StepInitialDigest({
       setProgressPercent(100);
 
       // Parse document count from result message
-      const countMatch = msg.match(/found (\d+) document/);
-      const extractedMatch = msg.match(/extracted (\d+) lesson/);
+      const countMatch = msg.match(/Analyzed (\d+) document/);
       const count = countMatch ? parseInt(countMatch[1], 10) : 0;
-      const extracted = extractedMatch ? parseInt(extractedMatch[1], 10) : 0;
       const embeddingsSkipped = msg.includes("embeddings_skipped");
 
-      if (count === 0 && extracted === 0) {
+      if (count === 0) {
         setScanState("empty");
         setResult(msg.split("|")[0]);
       } else if (embeddingsSkipped) {
@@ -145,8 +143,8 @@ export function StepInitialDigest({
         Import Your Archive
       </h2>
       <p className="text-gray-400 text-sm mb-6">
-        Chalk will scan your selected folder for lesson plan documents and begin
-        indexing them for the AI to learn your teaching style.
+        Chalk will scan your selected folder for documents and analyze them so
+        the AI can learn your teaching style and provide better suggestions.
       </p>
 
       <AnimatePresence mode="wait">

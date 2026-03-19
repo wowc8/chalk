@@ -243,6 +243,123 @@ impl Database {
         })
     }
 
+    // ── Reference Documents ──────────────────────────────────
+
+    pub fn create_reference_doc(
+        &self,
+        id: &str,
+        source_doc_id: Option<&str>,
+        source_doc_name: Option<&str>,
+        title: &str,
+        content_html: &str,
+        content_text: &str,
+    ) -> Result<ReferenceDoc> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO reference_docs (id, source_doc_id, source_doc_name, title, content_html, content_text)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![id, source_doc_id, source_doc_name, title, content_html, content_text],
+            )?;
+            self.get_reference_doc_inner(conn, id)
+        })
+    }
+
+    pub fn get_reference_doc(&self, id: &str) -> Result<ReferenceDoc> {
+        self.with_conn(|conn| self.get_reference_doc_inner(conn, id))
+    }
+
+    fn get_reference_doc_inner(
+        &self,
+        conn: &rusqlite::Connection,
+        id: &str,
+    ) -> Result<ReferenceDoc> {
+        conn.query_row(
+            "SELECT id, source_doc_id, source_doc_name, title, content_html, content_text, created_at
+             FROM reference_docs WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(ReferenceDoc {
+                    id: row.get(0)?,
+                    source_doc_id: row.get(1)?,
+                    source_doc_name: row.get(2)?,
+                    title: row.get(3)?,
+                    content_html: row.get(4)?,
+                    content_text: row.get(5)?,
+                    created_at: row.get(6)?,
+                })
+            },
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound,
+            other => DatabaseError::Sqlite(other),
+        })
+    }
+
+    pub fn list_reference_docs(&self) -> Result<Vec<ReferenceDoc>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, source_doc_id, source_doc_name, title, content_html, content_text, created_at
+                 FROM reference_docs ORDER BY created_at DESC",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(ReferenceDoc {
+                    id: row.get(0)?,
+                    source_doc_id: row.get(1)?,
+                    source_doc_name: row.get(2)?,
+                    title: row.get(3)?,
+                    content_html: row.get(4)?,
+                    content_text: row.get(5)?,
+                    created_at: row.get(6)?,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    /// List all reference docs that don't have embeddings in the vector table.
+    pub fn list_ref_docs_without_embeddings(&self) -> Result<Vec<ReferenceDoc>> {
+        self.with_conn(|conn| {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS _ref_doc_vec_id_map (
+                    rowid    INTEGER PRIMARY KEY AUTOINCREMENT,
+                    doc_id   TEXT NOT NULL UNIQUE
+                )",
+            )?;
+
+            let mut stmt = conn.prepare(
+                "SELECT rd.id, rd.source_doc_id, rd.source_doc_name, rd.title,
+                        rd.content_html, rd.content_text, rd.created_at
+                 FROM reference_docs rd
+                 LEFT JOIN _ref_doc_vec_id_map vm ON vm.doc_id = rd.id
+                 WHERE vm.rowid IS NULL
+                 ORDER BY rd.created_at DESC",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(ReferenceDoc {
+                    id: row.get(0)?,
+                    source_doc_id: row.get(1)?,
+                    source_doc_name: row.get(2)?,
+                    title: row.get(3)?,
+                    content_html: row.get(4)?,
+                    content_text: row.get(5)?,
+                    created_at: row.get(6)?,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    pub fn delete_reference_doc(&self, id: &str) -> Result<()> {
+        self.with_conn(|conn| {
+            let deleted =
+                conn.execute("DELETE FROM reference_docs WHERE id = ?1", params![id])?;
+            if deleted == 0 {
+                return Err(DatabaseError::NotFound);
+            }
+            Ok(())
+        })
+    }
+
     // ── Metadata ──────────────────────────────────────────────
 
     pub fn set_metadata(&self, input: &NewMetadata) -> Result<Metadata> {

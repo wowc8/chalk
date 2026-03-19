@@ -173,6 +173,14 @@ fn embedded_migrations() -> Vec<Migration> {
                 include_str!("../../migrations/007_fts5_fulltext_search.down.sql").to_string(),
             ),
         },
+        Migration {
+            version: 8,
+            description: "reference_docs".to_string(),
+            up_sql: include_str!("../../migrations/008_reference_docs.up.sql").to_string(),
+            down_sql: Some(
+                include_str!("../../migrations/008_reference_docs.down.sql").to_string(),
+            ),
+        },
     ]
 }
 
@@ -335,13 +343,13 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
     }
 
     #[test]
     fn test_embedded_migrations_match_file_count() {
         let migrations = embedded_migrations();
-        assert_eq!(migrations.len(), 7);
+        assert_eq!(migrations.len(), 8);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(migrations[0].description, "initial_schema");
         assert_eq!(migrations[1].version, 2);
@@ -356,6 +364,8 @@ mod tests {
         assert_eq!(migrations[5].description, "plan_versions");
         assert_eq!(migrations[6].version, 7);
         assert_eq!(migrations[6].description, "fts5_fulltext_search");
+        assert_eq!(migrations[7].version, 8);
+        assert_eq!(migrations[7].description, "reference_docs");
     }
 
     #[test]
@@ -365,7 +375,7 @@ mod tests {
         assert_eq!(current_version(&conn).unwrap(), 0);
 
         run_all(&conn).unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 7);
+        assert_eq!(current_version(&conn).unwrap(), 8);
     }
 
     #[test]
@@ -373,6 +383,11 @@ mod tests {
         let conn = test_conn();
 
         run_all(&conn).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 8);
+
+        // Rollback version 8 (reference_docs).
+        let rolled_back = rollback_last(&conn, None).unwrap();
+        assert_eq!(rolled_back, Some(8));
         assert_eq!(current_version(&conn).unwrap(), 7);
 
         // Rollback version 7 (fts5_fulltext_search).
@@ -420,17 +435,17 @@ mod tests {
         let conn = test_conn();
 
         run_all(&conn).unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 7);
+        assert_eq!(current_version(&conn).unwrap(), 8);
 
         // Rollback all.
-        for _ in 0..7 {
+        for _ in 0..8 {
             rollback_last(&conn, None).unwrap();
         }
         assert_eq!(current_version(&conn).unwrap(), 0);
 
         // Reapply all.
         run_all(&conn).unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 7);
+        assert_eq!(current_version(&conn).unwrap(), 8);
 
         // Verify tables exist after reapply.
         let table_count: i32 = conn
@@ -534,7 +549,7 @@ mod tests {
         let migrations =
             discover_migrations(Path::new("/nonexistent/migrations/dir")).unwrap();
         // Falls back to embedded migrations.
-        assert_eq!(migrations.len(), 7);
+        assert_eq!(migrations.len(), 8);
     }
 
     #[test]
@@ -563,6 +578,6 @@ mod tests {
 
         // Run all — should apply remaining versions.
         run_all(&conn).unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 7);
+        assert_eq!(current_version(&conn).unwrap(), 8);
     }
 }

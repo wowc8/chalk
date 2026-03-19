@@ -67,6 +67,21 @@ pub struct VectorSearchResult {
     pub distance: f64,
 }
 
+// ── Reference Documents ──────────────────────────────────────
+
+/// A reference document extracted from a Google Doc for RAG context.
+/// Not shown in the library — only feeds AI search and context.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReferenceDoc {
+    pub id: String,
+    pub source_doc_id: Option<String>,
+    pub source_doc_name: Option<String>,
+    pub title: String,
+    pub content_html: String,
+    pub content_text: String,
+    pub created_at: String,
+}
+
 // ── Tags ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
