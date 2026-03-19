@@ -446,7 +446,7 @@ export function PlanDetail() {
             planId={plan.id}
             planTitle={plan.title}
             planContentRef={editorContentRef}
-            onApplyToEditor={handleEditorUpdate}
+            onEditorUpdate={handleEditorUpdate}
           />
         </div>
       </div>

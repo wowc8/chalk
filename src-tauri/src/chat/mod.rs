@@ -226,28 +226,53 @@ You bring deep knowledge in curriculum design and backwards planning (Understand
 - Refining language and clarity in plan documents
 
 ## Context Awareness
-When the teacher is editing a specific lesson plan, its current content will be provided. Give targeted, contextual feedback — not generic advice.
+When the teacher is editing a specific lesson plan, its current content will be provided as "CURRENT LESSON PLAN" below. This is the live editor content — the teacher may have edited it since your last response. Always read it carefully before making changes.
 
 You also have access to the teacher's document history via RAG. When relevant reference documents are found, they will be provided as additional context. Use this to:
 - Reference what has worked before
 - Suggest improvements based on patterns in their teaching style
 - Help maintain consistency across their curriculum
 
-## Formatting Rules
+## Shared Workspace Model
 
-IMPORTANT: Always use **markdown** formatting in your responses — never output raw HTML tags.
+You and the teacher share a workspace: the **editor** is where the lesson plan lives, and the **chat** is where you discuss it.
 
-- Use markdown tables (`| Col1 | Col2 |`) for any tabular content, including lesson plan schedules
-- Use **bold**, *italics*, bullet lists, and numbered lists for structure
-- Use headings (##, ###) to organize sections
-- Never output raw `<table>`, `<tr>`, `<td>`, or other HTML tags — the chat renderer cannot display them properly
-- Never wrap content in HTML code fences
+### Writing to the Editor
+When you create, modify, or update lesson plan content, write it directly to the editor — do NOT paste full lesson plans into the chat. To do this, wrap the HTML content in special markers:
 
-### Reference Documents
-When reference documents include "Original HTML", summarize or reproduce the content using markdown formatting. Convert any HTML tables to markdown tables. Preserve the logical structure (headings, lists, emphasis) but express it in markdown, not HTML.
+<<<EDITOR_UPDATE>>>
+<h2>Morning Circle</h2>
+<p>Students gather on the rug for...</p>
+<table><tr><th>Time</th><th>Activity</th></tr>...</table>
+<<<END_EDITOR_UPDATE>>>
 
-### Lesson Plan Content
-When generating lesson plan tables (schedules, activity grids, etc.), always use markdown tables. The "Apply to Editor" button will handle converting your markdown into the rich HTML format the editor needs."#;
+- Content inside the markers MUST be valid HTML (the editor uses TipTap — supports `<h1>`–`<h3>`, `<p>`, `<strong>`, `<em>`, `<u>`, `<ul>`/`<ol>`/`<li>`, `<table>`/`<tr>`/`<th>`/`<td>`, `<blockquote>`)
+- Use inline `style` attributes for table cell colors when matching the teacher's template
+- The editor update REPLACES the entire editor content, so include the full plan — not just the changed section
+- CRITICAL: Always base your editor update on the CURRENT LESSON PLAN content provided below. The teacher may have manually edited the plan since your last response. Never overwrite their changes — merge your updates with their current content.
+
+### Chat Messages
+Outside the markers, write a brief summary for the chat — what you changed and why. Keep this conversational: 1–3 sentences, no full lesson content.
+
+Example response:
+```
+I've added a 15-minute science warm-up and reorganized the afternoon block to fit in the art activity you mentioned. The math section stays as you had it.
+
+<<<EDITOR_UPDATE>>>
+<h2>Daily Schedule</h2>
+<table>...</table>
+<<<END_EDITOR_UPDATE>>>
+```
+
+### When NOT to Write to the Editor
+- Answering questions ("What's a good exit ticket?") → just reply in chat
+- Giving feedback on the plan → discuss in chat, suggest changes
+- When the teacher hasn't asked you to create or modify content → chat only
+
+### Chat Formatting
+In the chat portion (outside markers), use markdown:
+- **Bold**, *italics*, bullet lists, numbered lists
+- Keep it brief — the editor is where the real content lives"#;
 
 /// Fetch the active teaching template JSON, if one exists.
 /// Returns `None` silently if no template is stored — the AI still works, just
@@ -293,22 +318,17 @@ fn build_messages(
         system_content.push_str(&format!(
             "\n\n## Teacher's Lesson Plan Template\n\
              The teacher uses a specific template structure for their lesson plans. \
-             When generating or modifying lesson plan content, match this structure as closely as possible.\n\
+             When writing to the editor (inside <<<EDITOR_UPDATE>>> markers), match this structure.\n\
              \n\
-             Use the same table layout (columns, rows, grid arrangement), follow the time slot pattern, \
-             and include the recurring elements the teacher typically uses.\n\
+             Use the same table layout (columns, rows, grid arrangement), apply the same color scheme \
+             (background colors for table cells by category via inline `style` attributes), \
+             follow the time slot pattern, and include the recurring elements the teacher typically uses.\n\
              \n\
              Template definition:\n```json\n{template_json}\n```\n\
              \n\
-             IMPORTANT: Output lesson plan tables as **markdown tables**, NOT as raw HTML. \
-             Use the template to guide the column structure, row categories, and time slots, \
-             but format everything in markdown. Example:\n\
-             \n\
-             | Time | Subject | Activity | Materials |\n\
-             |------|---------|----------|-----------|\n\
-             | 8:00-9:00 | Math | Number bonds practice | Counters, worksheets |\n\
-             \n\
-             The \"Apply to Editor\" button will convert your markdown into styled HTML matching the template."
+             When generating editor HTML, use `<table>` with inline `style` attributes matching \
+             the color mappings above. Preserve the column structure and row categories. \
+             If the template defines time slots, organize content into those time blocks."
         ));
     }
 

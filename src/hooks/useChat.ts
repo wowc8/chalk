@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef, type MutableRefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { parseAiResponse } from "../utils/markdown";
 
 // ── Types ───────────────────────────────────────────────────
 
@@ -70,6 +71,7 @@ export function useChat(
   planId?: string,
   planTitle?: string,
   planContentRef?: MutableRefObject<string>,
+  onEditorUpdate?: (html: string) => void,
 ) {
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -82,6 +84,10 @@ export function useChat(
 
   // Track the conversation ID for stream event filtering.
   const activeConvRef = useRef<string | null>(null);
+
+  // Keep callback ref fresh so the event listener never captures a stale closure.
+  const onEditorUpdateRef = useRef(onEditorUpdate);
+  onEditorUpdateRef.current = onEditorUpdate;
 
   // Load messages when conversation changes.
   useEffect(() => {
@@ -122,18 +128,24 @@ export function useChat(
             activeConvRef.current &&
             event.payload.conversation_id === activeConvRef.current
           ) {
-            // Replace streaming content with the finalized assistant message.
+            // Parse response: extract editor HTML and chat-only summary.
+            const parsed = parseAiResponse(event.payload.full_content);
+
+            // Auto-apply editor content if the AI produced an update.
+            if (parsed.editorHtml && onEditorUpdateRef.current) {
+              onEditorUpdateRef.current(parsed.editorHtml);
+            }
+
+            // Store the chat-visible portion as the assistant message.
             const assistantMsg: ChatMessage = {
               id: event.payload.message_id,
               conversation_id: event.payload.conversation_id,
               role: "assistant",
-              content: event.payload.full_content,
+              content: parsed.chatContent,
               context_plan_ids: event.payload.context_plan_ids,
               created_at: new Date().toISOString(),
             };
             setMessages((prev) => {
-              // Deduplicate: the useEffect that fetches messages on conversationId
-              // change may have already loaded this message from the backend.
               if (prev.some((m) => m.id === assistantMsg.id)) return prev;
               return [...prev, assistantMsg];
             });
