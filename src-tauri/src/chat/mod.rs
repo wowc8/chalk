@@ -235,15 +235,19 @@ You also have access to the teacher's document history via RAG. When relevant re
 
 ## Formatting Rules
 
-### Reference Documents
-When reference documents include "Original HTML", this is the teacher's actual formatting from their Google Docs (color-coded table cells, bold/underline text, bullet lists, table structure). When you cite or reproduce content from these reference documents:
-- Output the original HTML directly — do NOT convert it to markdown
-- Preserve table structures (<table>, <tr>, <td>), inline styles (colors, background-color, font-weight), and text formatting (<b>, <u>, <em>, <ul>/<li>)
-- You may wrap the HTML in a brief introduction, but the referenced content itself must retain its original HTML formatting
-- If the teacher asks you to modify or adapt the content, still output HTML to preserve the visual structure
+IMPORTANT: Always use **markdown** formatting in your responses — never output raw HTML tags.
 
-### New Content
-When suggesting NEW content (not from reference documents), use markdown formatting."#;
+- Use markdown tables (`| Col1 | Col2 |`) for any tabular content, including lesson plan schedules
+- Use **bold**, *italics*, bullet lists, and numbered lists for structure
+- Use headings (##, ###) to organize sections
+- Never output raw `<table>`, `<tr>`, `<td>`, or other HTML tags — the chat renderer cannot display them properly
+- Never wrap content in HTML code fences
+
+### Reference Documents
+When reference documents include "Original HTML", summarize or reproduce the content using markdown formatting. Convert any HTML tables to markdown tables. Preserve the logical structure (headings, lists, emphasis) but express it in markdown, not HTML.
+
+### Lesson Plan Content
+When generating lesson plan tables (schedules, activity grids, etc.), always use markdown tables. The "Apply to Editor" button will handle converting your markdown into the rich HTML format the editor needs."#;
 
 /// Fetch the active teaching template JSON, if one exists.
 /// Returns `None` silently if no template is stored — the AI still works, just
@@ -291,15 +295,20 @@ fn build_messages(
              The teacher uses a specific template structure for their lesson plans. \
              When generating or modifying lesson plan content, match this structure as closely as possible.\n\
              \n\
-             Use the same table layout (columns, rows, grid arrangement), apply the same color scheme \
-             (background colors for table cells by category), follow the time slot pattern, and include \
-             the recurring elements the teacher typically uses.\n\
+             Use the same table layout (columns, rows, grid arrangement), follow the time slot pattern, \
+             and include the recurring elements the teacher typically uses.\n\
              \n\
              Template definition:\n```json\n{template_json}\n```\n\
              \n\
-             When outputting lesson plan tables, use HTML `<table>` with inline `style` attributes \
-             matching the color mappings above. Preserve the column structure and row categories. \
-             If the template defines time slots, organize content into those time blocks."
+             IMPORTANT: Output lesson plan tables as **markdown tables**, NOT as raw HTML. \
+             Use the template to guide the column structure, row categories, and time slots, \
+             but format everything in markdown. Example:\n\
+             \n\
+             | Time | Subject | Activity | Materials |\n\
+             |------|---------|----------|-----------|\n\
+             | 8:00-9:00 | Math | Number bonds practice | Counters, worksheets |\n\
+             \n\
+             The \"Apply to Editor\" button will convert your markdown into styled HTML matching the template."
         ));
     }
 
