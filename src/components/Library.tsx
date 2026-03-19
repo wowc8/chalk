@@ -1,6 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useNavigate } from "react-router-dom";
+import { motion, AnimatePresence } from "framer-motion";
 import { useTeacherName } from "../hooks/useTeacherName";
 import { useToast } from "./Toast";
 import { DeleteConfirmDialog } from "./DeleteConfirmDialog";
@@ -71,7 +72,16 @@ export function Library() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [deletingPlan, setDeletingPlan] = useState<LibraryPlanCard | null>(null);
+  const [indexingDone, setIndexingDone] = useState<boolean | null>(null);
+  const [showComplete, setShowComplete] = useState(false);
+  const wasIndexingRef = useRef(false);
   const { addToast } = useToast();
+
+  // Refs to capture current filter state for the focus handler
+  const searchRef = useRef(searchQuery);
+  searchRef.current = searchQuery;
+  const tagsRef = useRef(selectedTagIds);
+  tagsRef.current = selectedTagIds;
 
   const loadPlans = async () => {
     setLoading(true);
@@ -79,8 +89,8 @@ export function Library() {
     try {
       const [fetchedPlans, fetchedTags] = await Promise.all([
         invoke<LibraryPlanCard[]>("list_library_plans", {
-          search: searchQuery || null,
-          tagIds: selectedTagIds.length > 0 ? selectedTagIds : null,
+          search: searchRef.current || null,
+          tagIds: tagsRef.current.length > 0 ? tagsRef.current : null,
         }),
         invoke<Tag[]>("list_tags"),
       ]);
@@ -105,6 +115,50 @@ export function Library() {
     }, 300);
     return () => clearTimeout(timer);
   }, [searchQuery]);
+
+  // Check indexing status, poll while incomplete
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+
+    async function checkIndexing() {
+      try {
+        const status = await invoke<{ initial_digest_complete: boolean }>(
+          "check_onboarding_status",
+        );
+        if (cancelled) return;
+
+        if (status.initial_digest_complete) {
+          if (wasIndexingRef.current) {
+            setShowComplete(true);
+            setTimeout(() => {
+              if (!cancelled) setShowComplete(false);
+            }, 3000);
+          }
+          setIndexingDone(true);
+        } else {
+          wasIndexingRef.current = true;
+          setIndexingDone(false);
+          timer = setTimeout(checkIndexing, 10_000);
+        }
+      } catch {
+        if (!cancelled) setIndexingDone(true);
+      }
+    }
+
+    checkIndexing();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, []);
+
+  // Auto-refresh when window regains focus (e.g. returning from plan detail)
+  useEffect(() => {
+    const handleFocus = () => loadPlans();
+    window.addEventListener("focus", handleFocus);
+    return () => window.removeEventListener("focus", handleFocus);
+  }, []);
 
   function toggleTag(tagId: string) {
     setSelectedTagIds((prev) =>
@@ -262,18 +316,10 @@ export function Library() {
         {/* Plan cards */}
         {!loading && plans.length > 0 && (
           <div>
-            <div className="flex items-center justify-between mb-3">
-              <p className="text-xs text-chalk-muted">
-                {plans.length} plan{plans.length !== 1 ? "s" : ""}
-                {searchQuery && ` matching "${searchQuery}"`}
-              </p>
-              <button
-                onClick={loadPlans}
-                className="btn btn-ghost text-xs"
-              >
-                Refresh
-              </button>
-            </div>
+            <p className="text-xs text-chalk-muted mb-3">
+              {plans.length} plan{plans.length !== 1 ? "s" : ""}
+              {searchQuery && ` matching "${searchQuery}"`}
+            </p>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
               {plans.map((plan) => (
@@ -360,15 +406,43 @@ export function Library() {
           </div>
         )}
 
-        {/* Footer */}
-        {!loading && (
-          <div className="mt-8 pt-5">
-            <hr className="chalk-line mb-3" />
-            <p className="text-xs text-chalk-muted/60 text-center">
-              Chalk is indexing your documents in the background.
-            </p>
-          </div>
-        )}
+        {/* Indexing status footer */}
+        <AnimatePresence>
+          {!loading && indexingDone === false && (
+            <motion.div
+              key="indexing"
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 8 }}
+              transition={{ duration: 0.3 }}
+              className="mt-8 pt-5"
+            >
+              <hr className="chalk-line mb-3" />
+              <p className="text-xs text-chalk-muted/60 text-center flex items-center justify-center gap-2">
+                <span
+                  className="spinner spinner-sm"
+                  style={{ width: 10, height: 10, borderWidth: 1.5 }}
+                />
+                Chalk is indexing your documents in the background.
+              </p>
+            </motion.div>
+          )}
+          {!loading && showComplete && (
+            <motion.div
+              key="complete"
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 8 }}
+              transition={{ duration: 0.3 }}
+              className="mt-8 pt-5"
+            >
+              <hr className="chalk-line mb-3" />
+              <p className="text-xs text-chalk-green/70 text-center">
+                Indexing complete.
+              </p>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
 
       {deletingPlan && (
