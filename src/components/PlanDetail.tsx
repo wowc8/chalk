@@ -1,9 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, useNavigate } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { motion, AnimatePresence } from "framer-motion";
 import { TipTapEditor } from "./editor/TipTapEditor";
 import { ChatPane } from "./editor/ChatPane";
+import { useToast } from "./Toast";
+import { DeleteConfirmDialog } from "./DeleteConfirmDialog";
 import "./editor/EditorStyles.css";
 
 interface LessonPlan {
@@ -76,6 +78,8 @@ function SplitResizer({
 
 export function PlanDetail() {
   const { planId } = useParams<{ planId: string }>();
+  const navigate = useNavigate();
+  const { addToast } = useToast();
   const [plan, setPlan] = useState<LessonPlan | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -90,6 +94,9 @@ export function PlanDetail() {
   const [showVersionHistory, setShowVersionHistory] = useState(false);
   const [reverting, setReverting] = useState(false);
   const versionDropdownRef = useRef<HTMLDivElement>(null);
+
+  // Delete state
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
 
   const isNewPlan = planId === "new";
 
@@ -238,6 +245,18 @@ export function PlanDetail() {
     []
   );
 
+  const handleDelete = useCallback(async () => {
+    if (!plan) return;
+    try {
+      await invoke("delete_plan", { id: plan.id });
+      addToast(`"${plan.title}" deleted`, "success");
+      navigate("/");
+    } catch (e) {
+      addToast(`Failed to delete plan: ${e}`, "error");
+      setShowDeleteDialog(false);
+    }
+  }, [plan, addToast, navigate]);
+
   if (loading) {
     return (
       <div className="flex-1 flex items-center justify-center">
@@ -372,6 +391,17 @@ export function PlanDetail() {
             {plan.status}
           </span>
 
+          {/* Delete button */}
+          <button
+            onClick={() => setShowDeleteDialog(true)}
+            className="flex items-center gap-1.5 text-xs px-2 py-1 rounded border border-chalk-white/8 bg-chalk-ghost text-chalk-muted hover:text-chalk-red hover:border-chalk-red/30 hover:bg-chalk-red/10 transition-colors"
+            title="Delete plan"
+          >
+            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+            </svg>
+          </button>
+
           {/* Finalize button */}
           <button
             onClick={handleFinalize}
@@ -420,6 +450,14 @@ export function PlanDetail() {
           />
         </div>
       </div>
+
+      {showDeleteDialog && plan && (
+        <DeleteConfirmDialog
+          planTitle={plan.title}
+          onConfirm={handleDelete}
+          onCancel={() => setShowDeleteDialog(false)}
+        />
+      )}
     </div>
   );
 }

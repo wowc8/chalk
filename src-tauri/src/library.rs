@@ -343,6 +343,8 @@ pub fn revert_plan_version(
 
 #[tauri::command]
 pub fn delete_plan(state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
+    // Delete associated embedding/vector data first (best-effort).
+    let _ = state.db.delete_embedding(&id);
     state
         .db
         .delete_lesson_plan(&id)

@@ -2,6 +2,8 @@ import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useNavigate } from "react-router-dom";
 import { useTeacherName } from "../hooks/useTeacherName";
+import { useToast } from "./Toast";
+import { DeleteConfirmDialog } from "./DeleteConfirmDialog";
 
 interface Tag {
   id: string;
@@ -68,6 +70,8 @@ export function Library() {
   const [searchQuery, setSearchQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [deletingPlan, setDeletingPlan] = useState<LibraryPlanCard | null>(null);
+  const { addToast } = useToast();
 
   const loadPlans = async () => {
     setLoading(true);
@@ -108,6 +112,19 @@ export function Library() {
         ? prev.filter((id) => id !== tagId)
         : [...prev, tagId]
     );
+  }
+
+  async function handleDeletePlan() {
+    if (!deletingPlan) return;
+    try {
+      await invoke("delete_plan", { id: deletingPlan.id });
+      addToast(`"${deletingPlan.title}" deleted`, "success");
+      setDeletingPlan(null);
+      loadPlans();
+    } catch (e) {
+      addToast(`Failed to delete plan: ${e}`, "error");
+      setDeletingPlan(null);
+    }
   }
 
   return (
@@ -260,11 +277,23 @@ export function Library() {
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
               {plans.map((plan) => (
-                <button
+                <div
                   key={plan.id}
                   onClick={() => navigate(`/plan/${plan.id}`)}
-                  className="text-left p-4 bg-chalk-board-dark/50 border border-chalk-white/5 hover:border-chalk-blue/20 rounded-lg transition-all group hover:bg-chalk-board-dark/80"
+                  className="relative text-left p-4 bg-chalk-board-dark/50 border border-chalk-white/5 hover:border-chalk-blue/20 rounded-lg transition-all group hover:bg-chalk-board-dark/80 cursor-pointer"
                 >
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setDeletingPlan(plan);
+                    }}
+                    className="absolute top-2 right-2 p-1.5 rounded-md opacity-0 group-hover:opacity-100 hover:bg-chalk-red/15 text-chalk-muted hover:text-chalk-red transition-all"
+                    title="Delete plan"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                    </svg>
+                  </button>
                   <div className="flex items-start gap-3">
                     <div className="w-9 h-9 rounded-lg bg-chalk-blue/8 flex items-center justify-center flex-shrink-0 group-hover:bg-chalk-blue/15 transition-colors">
                       <svg
@@ -325,7 +354,7 @@ export function Library() {
                       )}
                     </div>
                   </div>
-                </button>
+                </div>
               ))}
             </div>
           </div>
@@ -341,6 +370,14 @@ export function Library() {
           </div>
         )}
       </div>
+
+      {deletingPlan && (
+        <DeleteConfirmDialog
+          planTitle={deletingPlan.title}
+          onConfirm={handleDeletePlan}
+          onCancel={() => setDeletingPlan(null)}
+        />
+      )}
     </div>
   );
 }
