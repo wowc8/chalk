@@ -113,13 +113,43 @@ export interface StrippedStreamResult {
 }
 
 /**
+ * Heuristic: does `text` contain HTML that looks like editor content
+ * (tables, headings, complex block-level HTML)?  When the AI starts writing
+ * HTML *before* emitting the `<<<EDITOR_UPDATE>>>` marker — or skips the
+ * marker entirely — this catches the leak and prevents raw HTML from
+ * appearing in the chat bubble.
+ */
+const EDITOR_HTML_RE =
+  /<(?:table|thead|tbody|tfoot|tr|th|td)\b/i;
+
+function containsEditorHtml(text: string): boolean {
+  return EDITOR_HTML_RE.test(text);
+}
+
+/**
+ * Remove HTML block elements (tables and their children) from a string so
+ * that only the plain-text / markdown chat content remains.
+ */
+function stripHtmlBlocks(text: string): string {
+  // Remove complete <table>…</table> blocks (including nested content).
+  let result = text.replace(/<table[\s\S]*?<\/table>/gi, "");
+  // Remove any remaining orphan table-related tags (e.g. during streaming
+  // when the closing </table> hasn't arrived yet).
+  result = result.replace(/<\/?(?:table|thead|tbody|tfoot|tr|th|td|caption|colgroup|col)\b[^>]*>/gi, "");
+  return result.trim();
+}
+
+/**
  * Strip editor-update markers and content from a streaming string.
  *
  * Returns a structured result so the UI can decide whether to show a loading
  * indicator while editor content is being generated.
  *
- * Handles partially-received markers (e.g. the stream ends with `<<<EDITO`)
- * by trimming the ambiguous suffix so raw marker text never appears in chat.
+ * Handles:
+ * - Partially-received markers (e.g. the stream ends with `<<<EDITO`) by
+ *   trimming the ambiguous suffix so raw marker text never appears in chat.
+ * - HTML content that appears *before* or *outside* markers (the AI sometimes
+ *   starts writing table HTML before emitting the marker string).
  */
 export function stripEditorMarkers(streaming: string): StrippedStreamResult {
   const openIdx = streaming.indexOf(EDITOR_OPEN);
@@ -130,11 +160,23 @@ export function stripEditorMarkers(streaming: string): StrippedStreamResult {
       partialMarkerSuffixLen(streaming, EDITOR_OPEN),
       partialMarkerSuffixLen(streaming, EDITOR_CLOSE),
     );
-    const chat = partial > 0 ? streaming.slice(0, -partial) : streaming;
+    let chat = partial > 0 ? streaming.slice(0, -partial) : streaming;
+
+    // Even without markers, the AI may have started writing HTML directly.
+    if (containsEditorHtml(chat)) {
+      const cleaned = stripHtmlBlocks(chat);
+      return { chat: cleaned, isEditorStreaming: true };
+    }
+
     return { chat, isEditorStreaming: false };
   }
 
-  const before = streaming.slice(0, openIdx).trim();
+  let before = streaming.slice(0, openIdx).trim();
+
+  // Strip any HTML that leaked into the pre-marker chat text.
+  if (containsEditorHtml(before)) {
+    before = stripHtmlBlocks(before);
+  }
 
   const closeIdx = streaming.indexOf(EDITOR_CLOSE);
   if (closeIdx === -1) {
@@ -149,7 +191,13 @@ export function stripEditorMarkers(streaming: string): StrippedStreamResult {
     partialMarkerSuffixLen(afterRaw, EDITOR_OPEN),
     partialMarkerSuffixLen(afterRaw, EDITOR_CLOSE),
   );
-  const after = (partial > 0 ? afterRaw.slice(0, -partial) : afterRaw).trim();
+  let after = (partial > 0 ? afterRaw.slice(0, -partial) : afterRaw).trim();
+
+  // Strip any HTML that leaked into the post-marker chat text.
+  if (containsEditorHtml(after)) {
+    after = stripHtmlBlocks(after);
+  }
+
   const chat = [before, after].filter(Boolean).join("\n\n");
   return { chat, isEditorStreaming: false };
 }
