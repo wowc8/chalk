@@ -232,7 +232,7 @@ export function StepInitialDigest({
                 whileHover={{ scale: 1.05 }}
                 whileTap={{ scale: 0.95 }}
                 onClick={handleCancel}
-                className="px-4 py-2 border border-gray-600 rounded-lg text-gray-400 text-sm hover:text-white hover:border-gray-400 transition-colors"
+                className="px-4 py-2 border border-gray-600 rounded-lg text-gray-400 text-sm hover:text-white hover:border-gray-400 transition-colors shadow-none ring-0"
               >
                 Cancel
               </motion.button>
