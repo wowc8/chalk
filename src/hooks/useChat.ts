@@ -25,6 +25,7 @@ interface RetrievedContext {
   plan_id: string;
   title: string;
   content: string;
+  content_html: string;
   learning_objectives: string | null;
   distance: number;
 }
