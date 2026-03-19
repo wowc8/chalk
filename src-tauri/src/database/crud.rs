@@ -899,6 +899,166 @@ impl Database {
             Ok(())
         })
     }
+
+    // ── Teaching Templates ───────────────────────────────────
+
+    pub fn create_teaching_template(
+        &self,
+        source_doc_id: Option<&str>,
+        source_doc_name: Option<&str>,
+        template_json: &str,
+    ) -> Result<TeachingTemplate> {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO teaching_templates (id, source_doc_id, source_doc_name, template_json)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![id, source_doc_id, source_doc_name, template_json],
+            )?;
+            self.get_teaching_template_inner(conn, &id)
+        })
+    }
+
+    pub fn create_teaching_template_on_conn(
+        conn: &rusqlite::Connection,
+        source_doc_id: Option<&str>,
+        source_doc_name: Option<&str>,
+        template_json: &str,
+    ) -> Result<String> {
+        let id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO teaching_templates (id, source_doc_id, source_doc_name, template_json)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![id, source_doc_id, source_doc_name, template_json],
+        )?;
+        Ok(id)
+    }
+
+    pub fn get_teaching_template(&self, id: &str) -> Result<TeachingTemplate> {
+        self.with_conn(|conn| self.get_teaching_template_inner(conn, id))
+    }
+
+    fn get_teaching_template_inner(
+        &self,
+        conn: &rusqlite::Connection,
+        id: &str,
+    ) -> Result<TeachingTemplate> {
+        conn.query_row(
+            "SELECT id, source_doc_id, source_doc_name, template_json, created_at, updated_at
+             FROM teaching_templates WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(TeachingTemplate {
+                    id: row.get(0)?,
+                    source_doc_id: row.get(1)?,
+                    source_doc_name: row.get(2)?,
+                    template_json: row.get(3)?,
+                    created_at: row.get(4)?,
+                    updated_at: row.get(5)?,
+                })
+            },
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound,
+            other => DatabaseError::Sqlite(other),
+        })
+    }
+
+    pub fn get_teaching_template_by_source(&self, source_doc_id: &str) -> Result<TeachingTemplate> {
+        self.with_conn(|conn| {
+            conn.query_row(
+                "SELECT id, source_doc_id, source_doc_name, template_json, created_at, updated_at
+                 FROM teaching_templates WHERE source_doc_id = ?1
+                 ORDER BY updated_at DESC LIMIT 1",
+                params![source_doc_id],
+                |row| {
+                    Ok(TeachingTemplate {
+                        id: row.get(0)?,
+                        source_doc_id: row.get(1)?,
+                        source_doc_name: row.get(2)?,
+                        template_json: row.get(3)?,
+                        created_at: row.get(4)?,
+                        updated_at: row.get(5)?,
+                    })
+                },
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound,
+                other => DatabaseError::Sqlite(other),
+            })
+        })
+    }
+
+    pub fn list_teaching_templates(&self) -> Result<Vec<TeachingTemplate>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, source_doc_id, source_doc_name, template_json, created_at, updated_at
+                 FROM teaching_templates ORDER BY updated_at DESC",
+            )?;
+            let templates = stmt
+                .query_map([], |row| {
+                    Ok(TeachingTemplate {
+                        id: row.get(0)?,
+                        source_doc_id: row.get(1)?,
+                        source_doc_name: row.get(2)?,
+                        template_json: row.get(3)?,
+                        created_at: row.get(4)?,
+                        updated_at: row.get(5)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(templates)
+        })
+    }
+
+    pub fn get_active_teaching_template(&self) -> Result<TeachingTemplate> {
+        self.with_conn(|conn| {
+            conn.query_row(
+                "SELECT id, source_doc_id, source_doc_name, template_json, created_at, updated_at
+                 FROM teaching_templates ORDER BY updated_at DESC LIMIT 1",
+                [],
+                |row| {
+                    Ok(TeachingTemplate {
+                        id: row.get(0)?,
+                        source_doc_id: row.get(1)?,
+                        source_doc_name: row.get(2)?,
+                        template_json: row.get(3)?,
+                        created_at: row.get(4)?,
+                        updated_at: row.get(5)?,
+                    })
+                },
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound,
+                other => DatabaseError::Sqlite(other),
+            })
+        })
+    }
+
+    pub fn delete_teaching_template(&self, id: &str) -> Result<()> {
+        self.with_conn(|conn| {
+            let rows = conn.execute(
+                "DELETE FROM teaching_templates WHERE id = ?1",
+                params![id],
+            )?;
+            if rows == 0 {
+                Err(DatabaseError::NotFound)
+            } else {
+                Ok(())
+            }
+        })
+    }
+
+    pub fn delete_teaching_templates_by_source(
+        conn: &rusqlite::Connection,
+        source_doc_id: &str,
+    ) -> Result<()> {
+        conn.execute(
+            "DELETE FROM teaching_templates WHERE source_doc_id = ?1",
+            params![source_doc_id],
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1337,4 +1497,140 @@ mod tests {
         );
         assert_eq!(db.get_setting("theme").unwrap(), Some("dark".into()));
     }
+
+    // ── Teaching Template Tests ──────────────────────────────
+
+    #[test]
+    fn test_teaching_template_crud() {
+        let db = test_db();
+
+        let template_json = r#"{"table_structure":{"layout_type":"schedule_grid","columns":["Time","Monday","Tuesday"],"row_categories":[],"column_count":3},"time_slots":["9:00-9:30"],"color_scheme":{"mappings":[]},"content_patterns":{"cell_content_types":[],"has_links":false,"has_rich_formatting":false},"recurring_elements":{"subjects":[],"activities":["Math"]}}"#;
+
+        let template = db
+            .create_teaching_template(Some("doc123"), Some("My Plans"), template_json)
+            .unwrap();
+        assert_eq!(template.source_doc_id.as_deref(), Some("doc123"));
+        assert_eq!(template.source_doc_name.as_deref(), Some("My Plans"));
+
+        let fetched = db.get_teaching_template(&template.id).unwrap();
+        assert_eq!(fetched.id, template.id);
+        assert_eq!(fetched.template_json, template_json);
+
+        let by_source = db.get_teaching_template_by_source("doc123").unwrap();
+        assert_eq!(by_source.id, template.id);
+
+        let all = db.list_teaching_templates().unwrap();
+        assert_eq!(all.len(), 1);
+
+        let active = db.get_active_teaching_template().unwrap();
+        assert_eq!(active.id, template.id);
+
+        db.delete_teaching_template(&template.id).unwrap();
+        assert!(matches!(
+            db.get_teaching_template(&template.id),
+            Err(DatabaseError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn test_teaching_template_get_nonexistent() {
+        let db = test_db();
+        assert!(matches!(
+            db.get_teaching_template("nonexistent"),
+            Err(DatabaseError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn test_teaching_template_active_when_none() {
+        let db = test_db();
+        assert!(matches!(
+            db.get_active_teaching_template(),
+            Err(DatabaseError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn test_teaching_template_delete_nonexistent() {
+        let db = test_db();
+        assert!(matches!(
+            db.delete_teaching_template("nonexistent"),
+            Err(DatabaseError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn test_teaching_template_on_conn_and_delete_by_source() {
+        let db = test_db();
+
+        let id = db.with_conn(|conn| {
+            Database::create_teaching_template_on_conn(
+                conn,
+                Some("src_doc"),
+                Some("Source Doc"),
+                r#"{"table_structure":{"layout_type":"standard_table"}}"#,
+            )
+        }).unwrap();
+
+        let fetched = db.get_teaching_template(&id).unwrap();
+        assert_eq!(fetched.source_doc_id.as_deref(), Some("src_doc"));
+
+        db.with_conn(|conn| {
+            Database::delete_teaching_templates_by_source(conn, "src_doc")
+        }).unwrap();
+
+        assert!(matches!(
+            db.get_teaching_template(&id),
+            Err(DatabaseError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn test_teaching_template_json_roundtrip() {
+        let db = test_db();
+
+        let schema = TeachingTemplateSchema {
+            color_scheme: ColorScheme {
+                mappings: vec![ColorMapping {
+                    color: "#9900ff".to_string(),
+                    category: "header".to_string(),
+                    frequency: 5,
+                }],
+            },
+            table_structure: TableStructure {
+                layout_type: "schedule_grid".to_string(),
+                columns: vec!["Time".to_string(), "Monday".to_string()],
+                row_categories: vec!["Math".to_string()],
+                column_count: 2,
+            },
+            time_slots: vec!["9:00-9:30".to_string()],
+            content_patterns: ContentPatterns {
+                cell_content_types: vec!["activity_name".to_string()],
+                has_links: true,
+                has_rich_formatting: false,
+            },
+            recurring_elements: RecurringElements {
+                subjects: vec!["Biology".to_string()],
+                activities: vec!["Morning Circle".to_string()],
+            },
+        };
+
+        let json = serde_json::to_string(&schema).unwrap();
+        let template = db
+            .create_teaching_template(Some("doc1"), Some("Doc"), &json)
+            .unwrap();
+
+        let fetched = db.get_teaching_template(&template.id).unwrap();
+        let parsed: TeachingTemplateSchema =
+            serde_json::from_str(&fetched.template_json).unwrap();
+
+        assert_eq!(parsed.table_structure.layout_type, "schedule_grid");
+        assert_eq!(parsed.color_scheme.mappings.len(), 1);
+        assert_eq!(parsed.color_scheme.mappings[0].color, "#9900ff");
+        assert_eq!(parsed.time_slots, vec!["9:00-9:30"]);
+        assert!(parsed.content_patterns.has_links);
+        assert_eq!(parsed.recurring_elements.subjects, vec!["Biology"]);
+        assert_eq!(parsed.recurring_elements.activities, vec!["Morning Circle"]);
+    }
+
 }

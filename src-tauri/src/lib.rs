@@ -70,6 +70,56 @@ fn save_privacy_consent(
     privacy::save_consent(&state.db, consented)
 }
 
+// ── Teaching Template Tauri Commands ────────────────────────
+
+/// Get the active teaching template (most recently extracted).
+#[tauri::command]
+fn get_active_teaching_template(
+    state: tauri::State<AppState>,
+) -> Result<serde_json::Value, String> {
+    match state.db.get_active_teaching_template() {
+        Ok(template) => {
+            let schema: database::TeachingTemplateSchema =
+                serde_json::from_str(&template.template_json).map_err(|e| format!("{e}"))?;
+            Ok(serde_json::json!({
+                "id": template.id,
+                "source_doc_id": template.source_doc_id,
+                "source_doc_name": template.source_doc_name,
+                "template": schema,
+                "created_at": template.created_at,
+                "updated_at": template.updated_at,
+            }))
+        }
+        Err(database::DatabaseError::NotFound) => {
+            Ok(serde_json::json!(null))
+        }
+        Err(e) => Err(format!("{e}")),
+    }
+}
+
+/// List all teaching templates.
+#[tauri::command]
+fn list_teaching_templates(
+    state: tauri::State<AppState>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let templates = state.db.list_teaching_templates().map_err(|e| format!("{e}"))?;
+    templates
+        .into_iter()
+        .map(|t| {
+            let schema: database::TeachingTemplateSchema =
+                serde_json::from_str(&t.template_json).map_err(|e| format!("{e}"))?;
+            Ok(serde_json::json!({
+                "id": t.id,
+                "source_doc_id": t.source_doc_id,
+                "source_doc_name": t.source_doc_name,
+                "template": schema,
+                "created_at": t.created_at,
+                "updated_at": t.updated_at,
+            }))
+        })
+        .collect()
+}
+
 // ── App Settings Tauri Commands ─────────────────────────────
 
 #[tauri::command]
@@ -299,6 +349,8 @@ pub fn run() {
             is_feature_enabled,
             set_feature_flag,
             toggle_feature_flag,
+            get_active_teaching_template,
+            list_teaching_templates,
             cache_get,
             cache_clear,
             cache_stats,

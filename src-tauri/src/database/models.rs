@@ -82,6 +82,79 @@ pub struct ReferenceDoc {
     pub created_at: String,
 }
 
+// ── Teaching Templates ───────────────────────────────────────
+
+/// A teaching template extracted from a teacher's Google Docs during digest.
+/// Captures formatting patterns (colors, table structure, time slots, recurring
+/// elements) so AI-generated plans can match the teacher's style.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeachingTemplate {
+    pub id: String,
+    pub source_doc_id: Option<String>,
+    pub source_doc_name: Option<String>,
+    pub template_json: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Structured representation of a teaching template's JSON content.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TeachingTemplateSchema {
+    #[serde(default)]
+    pub color_scheme: ColorScheme,
+    #[serde(default)]
+    pub table_structure: TableStructure,
+    #[serde(default)]
+    pub time_slots: Vec<String>,
+    #[serde(default)]
+    pub content_patterns: ContentPatterns,
+    #[serde(default)]
+    pub recurring_elements: RecurringElements,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ColorScheme {
+    #[serde(default)]
+    pub mappings: Vec<ColorMapping>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ColorMapping {
+    pub color: String,
+    pub category: String,
+    pub frequency: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TableStructure {
+    #[serde(default)]
+    pub layout_type: String,
+    #[serde(default)]
+    pub columns: Vec<String>,
+    #[serde(default)]
+    pub row_categories: Vec<String>,
+    #[serde(default)]
+    pub column_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ContentPatterns {
+    #[serde(default)]
+    pub cell_content_types: Vec<String>,
+    #[serde(default)]
+    pub has_links: bool,
+    #[serde(default)]
+    pub has_rich_formatting: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RecurringElements {
+    #[serde(default)]
+    pub subjects: Vec<String>,
+    #[serde(default)]
+    pub activities: Vec<String>,
+}
+
 // ── Tags ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

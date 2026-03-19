@@ -11,6 +11,7 @@
 //! previously imported data stays untouched.
 
 pub mod parser;
+pub mod template_extractor;
 
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
@@ -54,6 +55,8 @@ struct FetchedDoc {
     doc_name: String,
     tables_found: usize,
     lessons: Vec<ExtractedLesson>,
+    /// Raw HTML for template extraction (formatting analysis).
+    raw_html: String,
 }
 
 /// Fetch a Google Doc as HTML via the Drive export API.
@@ -485,6 +488,7 @@ async fn fetch_document(
         doc_name: doc_name.to_string(),
         tables_found,
         lessons,
+        raw_html: html,
     })
 }
 
@@ -588,6 +592,46 @@ fn write_digest_results(
             .map_err(ChalkError::from)?;
 
             ref_docs_created.push(ref_doc_id);
+        }
+
+        // Extract and store the teaching template (formatting patterns).
+        let template_schema = template_extractor::extract_template(&doc.raw_html);
+        if !template_schema.table_structure.columns.is_empty() {
+            crate::database::Database::delete_teaching_templates_by_source(conn, &doc.doc_id)
+                .map_err(|e| ChalkError::new(
+                    ErrorDomain::Digest,
+                    ErrorCode::DigestParseFailed,
+                    format!("Failed to clean old templates: {}", e),
+                ))?;
+
+            let template_json = serde_json::to_string(&template_schema).map_err(|e| {
+                ChalkError::new(
+                    ErrorDomain::Digest,
+                    ErrorCode::DigestParseFailed,
+                    format!("Failed to serialize template: {}", e),
+                )
+            })?;
+
+            crate::database::Database::create_teaching_template_on_conn(
+                conn,
+                Some(&doc.doc_id),
+                Some(&doc.doc_name),
+                &template_json,
+            )
+            .map_err(|e| ChalkError::new(
+                ErrorDomain::Digest,
+                ErrorCode::DigestParseFailed,
+                format!("Failed to store teaching template: {}", e),
+            ))?;
+
+            info!(
+                doc_id = doc.doc_id.as_str(),
+                doc_name = doc.doc_name.as_str(),
+                layout_type = template_schema.table_structure.layout_type.as_str(),
+                columns = template_schema.table_structure.column_count,
+                time_slots = template_schema.time_slots.len(),
+                "Teaching template extracted"
+            );
         }
 
         total_tables += doc.tables_found;
@@ -1249,6 +1293,7 @@ mod tests {
                     subject_hint: None,
                     grade_hint: None,
                 }],
+                raw_html: String::new(),
             },
             FetchedDoc {
                 doc_id: "doc2".into(),
@@ -1261,6 +1306,7 @@ mod tests {
                     subject_hint: None,
                     grade_hint: None,
                 }],
+                raw_html: String::new(),
             },
         ];
 
@@ -1300,6 +1346,7 @@ mod tests {
                 subject_hint: Some("Biology".into()),
                 grade_hint: Some("9th".into()),
             }],
+            raw_html: String::new(),
         }];
 
         let result = db.with_transaction(|tx| {
