@@ -204,33 +204,56 @@ impl Database {
 // ── Chat Completion ─────────────────────────────────────────
 
 /// System prompt for the Chalk AI assistant.
-const SYSTEM_PROMPT: &str = r#"You are Chalk, an AI teaching assistant embedded in a lesson plan editor. Your role is to help teachers create, refine, and improve their lesson plans.
+const SYSTEM_PROMPT: &str = r#"You are Chalk — a seasoned, collaborative teaching partner embedded in a lesson plan editor. Think of yourself as the experienced colleague down the hall who's seen hundreds of lesson plans, knows what works in a real classroom, and always has a practical suggestion ready.
 
-You can help with:
-- Drafting learning objectives (clear, measurable, aligned to standards)
-- Designing activities and instructional sequences
-- Creating assessments (formative and summative)
-- Suggesting differentiation strategies
-- Improving pacing and flow
-- Refining language and clarity
+## Your Expertise
+You bring deep knowledge in curriculum design and backwards planning (Understanding by Design), differentiation strategies (tiered activities, flexible grouping, scaffolding for ELLs and IEP students), formative and summative assessment design (exit tickets, rubrics, performance tasks), grade-level developmental expectations from Pre-K through elementary, classroom management woven into instructional flow, and cross-curricular integration opportunities.
 
-When the teacher is editing a specific lesson plan, its current content will be provided. Use it to give targeted, contextual suggestions rather than generic advice.
+## How You Work
+- **Be specific, not generic.** Instead of "add an assessment," say "try a quick exit ticket where students sketch the water cycle and label three stages — that tells you in 30 seconds who got it."
+- **Proactively flag gaps.** If a lesson plan is missing learning objectives, assessment, differentiation, or closure, mention it — don't wait to be asked.
+- **Suggest improvements.** When you see a solid plan, still offer one or two ways to level it up: a higher-order thinking question, a turn-and-talk moment, a formative check.
+- **Speak like a colleague.** Warm, direct, and encouraging. Skip the jargon-heavy academic tone. Say "this is a strong opening hook" not "the anticipatory set demonstrates pedagogical soundness."
+- **Reference best practices naturally.** Bloom's Taxonomy, Webb's DOK, Gradual Release of Responsibility, UDL — weave these in when relevant, but explain them in plain language.
+- **Respect the teacher's style.** Build on what they already do well. Frame suggestions as options, not mandates.
+
+## What You Help With
+- Drafting clear, measurable learning objectives aligned to standards
+- Designing engaging activities and instructional sequences with strong pacing
+- Creating formative checks and summative assessments
+- Building in differentiation (enrichment, intervention, accommodations)
+- Strengthening transitions, closures, and hooks
+- Refining language and clarity in plan documents
+
+## Context Awareness
+When the teacher is editing a specific lesson plan, its current content will be provided. Give targeted, contextual feedback — not generic advice.
 
 You also have access to the teacher's document history via RAG. When relevant reference documents are found, they will be provided as additional context. Use this to:
 - Reference what has worked before
 - Suggest improvements based on patterns in their teaching style
 - Help maintain consistency across their curriculum
 
-IMPORTANT — Preserving original formatting from reference documents:
+## Formatting Rules
+
+### Reference Documents
 When reference documents include "Original HTML", this is the teacher's actual formatting from their Google Docs (color-coded table cells, bold/underline text, bullet lists, table structure). When you cite or reproduce content from these reference documents:
 - Output the original HTML directly — do NOT convert it to markdown
 - Preserve table structures (<table>, <tr>, <td>), inline styles (colors, background-color, font-weight), and text formatting (<b>, <u>, <em>, <ul>/<li>)
 - You may wrap the HTML in a brief introduction, but the referenced content itself must retain its original HTML formatting
 - If the teacher asks you to modify or adapt the content, still output HTML to preserve the visual structure
 
-When suggesting NEW content (not from reference documents), use markdown formatting.
+### New Content
+When suggesting NEW content (not from reference documents), use markdown formatting."#;
 
-Be concise, practical, and focused on actionable teaching advice."#;
+/// Fetch the active teaching template JSON, if one exists.
+/// Returns `None` silently if no template is stored — the AI still works, just
+/// without template-aware formatting.
+fn get_template_json(db: &Database) -> Option<String> {
+    match db.get_active_teaching_template() {
+        Ok(template) => Some(template.template_json),
+        Err(_) => None,
+    }
+}
 
 /// Create an AI provider from the current app settings.
 fn create_provider_from_settings(
@@ -254,10 +277,31 @@ fn build_messages(
     user_message: &str,
     rag_context: &str,
     active_plan: Option<(&str, &str)>, // (title, content)
+    teaching_template: Option<&str>,   // serialized template JSON
 ) -> Vec<CompletionMessage> {
     let mut messages = Vec::new();
 
     let mut system_content = SYSTEM_PROMPT.to_string();
+
+    // Inject teaching template if available — tells the AI about the teacher's
+    // preferred table structure, color scheme, time slots, and recurring elements.
+    if let Some(template_json) = teaching_template {
+        system_content.push_str(&format!(
+            "\n\n## Teacher's Lesson Plan Template\n\
+             The teacher uses a specific template structure for their lesson plans. \
+             When generating or modifying lesson plan content, match this structure as closely as possible.\n\
+             \n\
+             Use the same table layout (columns, rows, grid arrangement), apply the same color scheme \
+             (background colors for table cells by category), follow the time slot pattern, and include \
+             the recurring elements the teacher typically uses.\n\
+             \n\
+             Template definition:\n```json\n{template_json}\n```\n\
+             \n\
+             When outputting lesson plan tables, use HTML `<table>` with inline `style` attributes \
+             matching the color mappings above. Preserve the column structure and row categories. \
+             If the template defines time slots, organize content into those time blocks."
+        ));
+    }
 
     // Inject active plan context if available.
     if let Some((title, content)) = active_plan {
@@ -317,8 +361,9 @@ async fn generate_response(
     user_message: &str,
     rag_context: &str,
     active_plan: Option<(&str, &str)>,
+    teaching_template: Option<&str>,
 ) -> Result<String, ChalkError> {
-    let messages = build_messages(history, user_message, rag_context, active_plan);
+    let messages = build_messages(history, user_message, rag_context, active_plan, teaching_template);
     provider.complete(&messages, 2048, 0.7).await
 }
 
@@ -331,8 +376,9 @@ async fn generate_response_stream(
     rag_context: &str,
     conversation_id: &str,
     active_plan: Option<(&str, &str)>,
+    teaching_template: Option<&str>,
 ) -> Result<String, ChalkError> {
-    let messages = build_messages(history, user_message, rag_context, active_plan);
+    let messages = build_messages(history, user_message, rag_context, active_plan, teaching_template);
     let conv_id = conversation_id.to_string();
     let app_handle = app.clone();
 
@@ -433,11 +479,21 @@ pub async fn send_chat_message(
         _ => None,
     };
 
+    // Fetch teaching template for prompt injection.
+    let template_json = get_template_json(db);
+
     // Create provider and generate AI response.
     let ai_provider = create_provider_from_settings(&api_key, &base_url, &model, "openai")
         .map_err(|e| e.message)?;
     let ai_response =
-        generate_response(ai_provider.as_ref(), &history, &input.message, &rag_context, active_plan)
+        generate_response(
+            ai_provider.as_ref(),
+            &history,
+            &input.message,
+            &rag_context,
+            active_plan,
+            template_json.as_deref(),
+        )
             .await
             .map_err(|e| e.message)?;
 
@@ -543,6 +599,9 @@ pub async fn send_chat_message_stream(
         context_plans,
     };
 
+    // Fetch teaching template for prompt injection.
+    let template_json = get_template_json(db);
+
     // Create provider before spawning so we get early config errors.
     let ai_provider = create_provider_from_settings(&api_key, &base_url, &model, "openai")
         .map_err(|e| e.message)?;
@@ -570,6 +629,7 @@ pub async fn send_chat_message_stream(
             &rag_context,
             &conv_id,
             active_plan,
+            template_json.as_deref(),
         )
         .await
         {
@@ -943,7 +1003,7 @@ mod tests {
     #[test]
     fn test_build_messages_without_context() {
         let history: Vec<ChatMessage> = vec![];
-        let messages = build_messages(&history, "Hello", "", None);
+        let messages = build_messages(&history, "Hello", "", None, None);
 
         assert_eq!(messages.len(), 2); // system + user
         assert_eq!(messages[0].role, "system");
@@ -956,7 +1016,7 @@ mod tests {
     fn test_build_messages_with_rag_context() {
         let history: Vec<ChatMessage> = vec![];
         let rag_ctx = "Relevant plan: Photosynthesis Lab";
-        let messages = build_messages(&history, "Help me", rag_ctx, None);
+        let messages = build_messages(&history, "Help me", rag_ctx, None, None);
 
         assert_eq!(messages.len(), 2);
         assert!(messages[0].content.contains(SYSTEM_PROMPT));
@@ -983,7 +1043,7 @@ mod tests {
                 created_at: "2024-01-01".into(),
             },
         ];
-        let messages = build_messages(&history, "New question", "", None);
+        let messages = build_messages(&history, "New question", "", None, None);
 
         // system + 2 history + user = 4
         assert_eq!(messages.len(), 4);
@@ -1006,7 +1066,7 @@ mod tests {
             })
             .collect();
 
-        let messages = build_messages(&history, "Final", "", None);
+        let messages = build_messages(&history, "Final", "", None, None);
         // system + 20 history + user = 22
         assert_eq!(messages.len(), 22);
         // First history message should be index 5 (25-20=5).
@@ -1033,7 +1093,7 @@ mod tests {
                 created_at: "2024-01-01".into(),
             },
         ];
-        let messages = build_messages(&history, "Hi", "", None);
+        let messages = build_messages(&history, "Hi", "", None, None);
 
         // system + 1 user from history (system skipped) + user = 3
         assert_eq!(messages.len(), 3);
@@ -1044,7 +1104,7 @@ mod tests {
     fn test_build_messages_with_active_plan() {
         let history: Vec<ChatMessage> = vec![];
         let plan = Some(("Photosynthesis Lab", "Students will learn about..."));
-        let messages = build_messages(&history, "Help me improve this", "", plan);
+        let messages = build_messages(&history, "Help me improve this", "", plan, None);
 
         assert_eq!(messages.len(), 2);
         assert!(messages[0].content.contains("CURRENT LESSON PLAN"));
@@ -1056,7 +1116,7 @@ mod tests {
     fn test_build_messages_with_empty_plan() {
         let history: Vec<ChatMessage> = vec![];
         let plan = Some(("New Plan", ""));
-        let messages = build_messages(&history, "Help me", "", plan);
+        let messages = build_messages(&history, "Help me", "", plan, None);
 
         assert_eq!(messages.len(), 2);
         assert!(messages[0].content.contains("currently empty"));
@@ -1067,12 +1127,38 @@ mod tests {
     fn test_build_messages_with_plan_and_rag() {
         let history: Vec<ChatMessage> = vec![];
         let plan = Some(("My Plan", "Some content here"));
-        let messages = build_messages(&history, "Help", "Related: old plan data", plan);
+        let messages = build_messages(&history, "Help", "Related: old plan data", plan, None);
 
         assert_eq!(messages.len(), 2);
         assert!(messages[0].content.contains("CURRENT LESSON PLAN"));
         assert!(messages[0].content.contains("TEACHING HISTORY"));
         assert!(messages[0].content.contains("Related: old plan data"));
+    }
+
+    #[test]
+    fn test_build_messages_with_teaching_template() {
+        let history: Vec<ChatMessage> = vec![];
+        let template = r##"{"color_scheme":{"mappings":[{"color":"#FFD700","category":"Math","frequency":5}]},"table_structure":{"layout_type":"grid","columns":["Time","Monday","Tuesday"],"row_categories":["Morning","Afternoon"],"column_count":3},"time_slots":["8:00-9:00","9:00-10:00"],"content_patterns":{"cell_content_types":["activity"],"has_links":false,"has_rich_formatting":true},"recurring_elements":{"subjects":["Math","Reading"],"activities":["Circle Time","Centers"]}}"##;
+        let messages = build_messages(&history, "Make a plan", "", None, Some(template));
+
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0].content.contains("Teacher's Lesson Plan Template"));
+        assert!(messages[0].content.contains("color_scheme"));
+        assert!(messages[0].content.contains("table_structure"));
+        assert!(messages[0].content.contains("time_slots"));
+    }
+
+    #[test]
+    fn test_build_messages_with_template_and_plan() {
+        let history: Vec<ChatMessage> = vec![];
+        let template = r#"{"color_scheme":{},"table_structure":{}}"#;
+        let plan = Some(("My Plan", "Some content"));
+        let messages = build_messages(&history, "Help", "", plan, Some(template));
+
+        assert_eq!(messages.len(), 2);
+        // Template section appears before plan section.
+        assert!(messages[0].content.contains("Teacher's Lesson Plan Template"));
+        assert!(messages[0].content.contains("CURRENT LESSON PLAN"));
     }
 
     // NOTE: Stream chunk and request serialization tests moved to openai.rs
