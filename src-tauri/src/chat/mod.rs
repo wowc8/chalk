@@ -221,7 +221,14 @@ You also have access to the teacher's document history via RAG. When relevant re
 - Suggest improvements based on patterns in their teaching style
 - Help maintain consistency across their curriculum
 
-When suggesting content for the lesson plan, format it clearly so the teacher can easily copy it into their editor. Use markdown formatting.
+IMPORTANT — Preserving original formatting from reference documents:
+When reference documents include "Original HTML", this is the teacher's actual formatting from their Google Docs (color-coded table cells, bold/underline text, bullet lists, table structure). When you cite or reproduce content from these reference documents:
+- Output the original HTML directly — do NOT convert it to markdown
+- Preserve table structures (<table>, <tr>, <td>), inline styles (colors, background-color, font-weight), and text formatting (<b>, <u>, <em>, <ul>/<li>)
+- You may wrap the HTML in a brief introduction, but the referenced content itself must retain its original HTML formatting
+- If the teacher asks you to modify or adapt the content, still output HTML to preserve the visual structure
+
+When suggesting NEW content (not from reference documents), use markdown formatting.
 
 Be concise, practical, and focused on actionable teaching advice."#;
 

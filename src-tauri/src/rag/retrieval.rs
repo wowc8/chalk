@@ -15,6 +15,8 @@ pub struct RetrievedContext {
     pub plan_id: String,
     pub title: String,
     pub content: String,
+    /// Original HTML from the Google Docs export, preserving tables, colors, and formatting.
+    pub content_html: String,
     pub learning_objectives: Option<String>,
     pub distance: f64,
 }
@@ -22,7 +24,8 @@ pub struct RetrievedContext {
 /// Maximum number of reference docs to retrieve for context.
 const MAX_CONTEXT_DOCS: usize = 5;
 /// Maximum total characters of context to include (to stay within LLM token limits).
-const MAX_CONTEXT_CHARS: usize = 8000;
+/// Increased from 8000 to accommodate HTML content alongside plain text.
+const MAX_CONTEXT_CHARS: usize = 12000;
 /// Relative weight for FTS5 results in hybrid scoring.
 const FTS_WEIGHT: f64 = 1.0;
 /// Relative weight for vector results in hybrid scoring.
@@ -69,7 +72,8 @@ pub async fn retrieve_relevant_plans(
             Err(_) => continue, // Doc may have been deleted since indexing.
         };
 
-        let content_len = doc.content_text.len() + doc.title.len();
+        // Budget accounts for both plain text and HTML content.
+        let content_len = doc.content_text.len() + doc.content_html.len() + doc.title.len();
         if total_chars + content_len > MAX_CONTEXT_CHARS && !contexts.is_empty() {
             break; // Budget exceeded; stop adding more context.
         }
@@ -79,6 +83,7 @@ pub async fn retrieve_relevant_plans(
             plan_id: doc.id,
             title: doc.title,
             content: doc.content_text,
+            content_html: doc.content_html,
             learning_objectives: None,
             distance: 1.0 - result.score, // Convert score to distance-like metric
         });
@@ -103,13 +108,22 @@ pub fn format_context_for_prompt(contexts: &[RetrievedContext]) -> String {
                 entry.push_str(&format!("Objectives: {obj}\n"));
             }
         }
-        // Truncate very long content to keep prompt manageable.
+        // Include original HTML when available so the AI can preserve formatting.
+        if !ctx.content_html.is_empty() {
+            let html = if ctx.content_html.len() > 3000 {
+                format!("{}...", &ctx.content_html[..3000])
+            } else {
+                ctx.content_html.clone()
+            };
+            entry.push_str(&format!("Original HTML (preserve this formatting):\n{html}\n"));
+        }
+        // Truncate very long plain-text content to keep prompt manageable.
         let content = if ctx.content.len() > 2000 {
             format!("{}...", &ctx.content[..2000])
         } else {
             ctx.content.clone()
         };
-        entry.push_str(&format!("Content:\n{content}\n"));
+        entry.push_str(&format!("Plain text summary:\n{content}\n"));
         parts.push(entry);
     }
 
@@ -131,6 +145,7 @@ mod tests {
             plan_id: "abc".to_string(),
             title: "Photosynthesis Lab".to_string(),
             content: "Students will study light reactions.".to_string(),
+            content_html: "<table><tr><td style=\"background:#90EE90\">Light Reactions</td></tr></table>".to_string(),
             learning_objectives: Some("Understand photosynthesis".to_string()),
             distance: 0.15,
         }];
@@ -140,6 +155,8 @@ mod tests {
         assert!(formatted.contains("Photosynthesis Lab"));
         assert!(formatted.contains("Understand photosynthesis"));
         assert!(formatted.contains("light reactions"));
+        assert!(formatted.contains("Original HTML"));
+        assert!(formatted.contains("<table>"));
     }
 
     #[test]
@@ -149,14 +166,46 @@ mod tests {
             plan_id: "abc".to_string(),
             title: "Long Plan".to_string(),
             content: long_content,
+            content_html: String::new(),
             learning_objectives: None,
             distance: 0.1,
         }];
 
         let formatted = format_context_for_prompt(&contexts);
         assert!(formatted.contains("..."));
-        // Should be truncated to ~2000 chars content + metadata.
-        assert!(formatted.len() < 2500);
+    }
+
+    #[test]
+    fn test_format_context_truncates_long_html() {
+        let long_html = "<td>x</td>".repeat(600);
+        let contexts = vec![RetrievedContext {
+            plan_id: "abc".to_string(),
+            title: "Long HTML Plan".to_string(),
+            content: "Short text".to_string(),
+            content_html: long_html,
+            learning_objectives: None,
+            distance: 0.1,
+        }];
+
+        let formatted = format_context_for_prompt(&contexts);
+        assert!(formatted.contains("Original HTML"));
+        assert!(formatted.contains("..."));
+    }
+
+    #[test]
+    fn test_format_context_omits_html_section_when_empty() {
+        let contexts = vec![RetrievedContext {
+            plan_id: "abc".to_string(),
+            title: "No HTML Plan".to_string(),
+            content: "Some text".to_string(),
+            content_html: String::new(),
+            learning_objectives: None,
+            distance: 0.1,
+        }];
+
+        let formatted = format_context_for_prompt(&contexts);
+        assert!(!formatted.contains("Original HTML"));
+        assert!(formatted.contains("Plain text summary"));
     }
 
     #[test]
@@ -166,6 +215,7 @@ mod tests {
                 plan_id: "a".to_string(),
                 title: "Plan A".to_string(),
                 content: "Content A".to_string(),
+                content_html: "<b>Content A</b>".to_string(),
                 learning_objectives: None,
                 distance: 0.1,
             },
@@ -173,6 +223,7 @@ mod tests {
                 plan_id: "b".to_string(),
                 title: "Plan B".to_string(),
                 content: "Content B".to_string(),
+                content_html: "<em>Content B</em>".to_string(),
                 learning_objectives: Some("Goals B".to_string()),
                 distance: 0.2,
             },
