@@ -231,6 +231,32 @@
   background: rgba(116, 185, 255, 0.12);
 }
 
+/* Highlight marks */
+.chalk-editor-content mark {
+  border-radius: 2px;
+  padding: 0.1em 0.15em;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+/* Images */
+.chalk-editor-content img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+  margin: 0.75rem 0;
+}
+
+.chalk-editor-content img.ProseMirror-selectednode {
+  outline: 2px solid var(--color-chalk-blue);
+  outline-offset: 2px;
+}
+
+/* Text alignment */
+.chalk-editor-content [style*="text-align: center"] { text-align: center; }
+.chalk-editor-content [style*="text-align: right"] { text-align: right; }
+.chalk-editor-content [style*="text-align: justify"] { text-align: justify; }
+
 /* Selection */
 .chalk-editor-content ::selection {
   background: rgba(116, 185, 255, 0.25);
