@@ -246,8 +246,8 @@ When you create, modify, or update lesson plan content, write it directly to the
 <table><tr><th>Time</th><th>Activity</th></tr>...</table>
 <<<END_EDITOR_UPDATE>>>
 
-- Content inside the markers MUST be valid HTML (the editor uses TipTap — supports `<h1>`–`<h3>`, `<p>`, `<strong>`, `<em>`, `<u>`, `<ul>`/`<ol>`/`<li>`, `<table>`/`<tr>`/`<th>`/`<td>`, `<blockquote>`)
-- Use inline `style` attributes for table cell colors when matching the teacher's template
+- Content inside the markers MUST be valid HTML (the editor uses TipTap — supports `<h1>`–`<h3>`, `<p>`, `<strong>`, `<em>`, `<u>`, `<ul>`/`<ol>`/`<li>`, `<table>`/`<tr>`/`<th>`/`<td>`, `<blockquote>`, `<mark data-color="COLOR">` for background highlighting, `<span style="color: COLOR">` for text color)
+- For color-coded cells, wrap cell content in `<mark data-color="COLOR">content</mark>` — do NOT use `style="background-color:..."` on `<td>` elements (TipTap strips those)
 - The editor update REPLACES the entire editor content, so include the full plan — not just the changed section
 - CRITICAL: Always base your editor update on the CURRENT LESSON PLAN content provided below. The teacher may have manually edited the plan since your last response. Never overwrite their changes — merge your updates with their current content.
 
@@ -389,15 +389,17 @@ fn format_template_instructions(template_json: &str) -> String {
     // ── Color Scheme ──
     let cs = &schema.color_scheme;
     if !cs.mappings.is_empty() {
-        instructions.push_str("### Color Coding (inline styles)\n");
+        instructions.push_str("### Color Coding (TipTap-compatible)\n");
         instructions.push_str(
-            "Apply these background colors to table cells using `style=\"background-color:COLOR\"`. \
+            "Apply background colors using the `<mark>` tag: `<mark data-color=\"COLOR\">content</mark>`. \
+             Do NOT use `style=\"background-color:...\"` on `<td>` elements — TipTap strips those. \
+             For text colors, use `<span style=\"color: COLOR\">text</span>`. \
              This is how the teacher visually organizes their schedule.\n\n"
         );
         for mapping in &cs.mappings {
             instructions.push_str(&format!(
-                "- `{}` → {} cells\n",
-                mapping.color, mapping.category
+                "- `{}` → {} cells → use `<mark data-color=\"{}\">`\n",
+                mapping.color, mapping.category, mapping.color
             ));
         }
         instructions.push('\n');
@@ -433,12 +435,13 @@ fn format_template_instructions(template_json: &str) -> String {
              fill every cell with specific lesson content:\n\n```html\n<table>\n  <tr>\n"
         );
         for col in &ts.columns {
-            // Apply header color if available
-            let header_color = cs.mappings.iter()
+            // Apply header color if available via <mark> tag
+            let header_mark = cs.mappings.iter()
                 .find(|m| m.category == "header")
-                .map(|m| format!(" style=\"background-color:{}\"", m.color))
+                .map(|m| format!("<mark data-color=\"{}\">", m.color))
                 .unwrap_or_default();
-            instructions.push_str(&format!("    <th{header_color}>{col}</th>\n"));
+            let header_mark_close = if header_mark.is_empty() { "" } else { "</mark>" };
+            instructions.push_str(&format!("    <th>{header_mark}{col}{header_mark_close}</th>\n"));
         }
         instructions.push_str("  </tr>\n");
 
@@ -449,9 +452,9 @@ fn format_template_instructions(template_json: &str) -> String {
             instructions.push_str(&format!("    <td>{slot}</td>\n"));
             for _ in 1..ts.columns.len() {
                 instructions.push_str(
-                    "    <td style=\"background-color:...\">\
+                    "    <td><mark data-color=\"...\">\
                      <strong>Activity Name</strong><br/>Specific details...\
-                     </td>\n"
+                     </mark></td>\n"
                 );
             }
             instructions.push_str("  </tr>\n");
@@ -1398,10 +1401,10 @@ mod tests {
         assert!(result.contains("Recess"));
         assert!(result.contains("do NOT replace them"));
 
-        // Color coding.
+        // Color coding — should use mark tags, not background-color.
         assert!(result.contains("#9900ff"));
         assert!(result.contains("#00ffff"));
-        assert!(result.contains("background-color"));
+        assert!(result.contains("mark data-color"));
 
         // Content detail instructions.
         assert!(result.contains("specific, detailed content"));
