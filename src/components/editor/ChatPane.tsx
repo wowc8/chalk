@@ -117,9 +117,44 @@ function TypingIndicator() {
   );
 }
 
+function EditorLoadingIndicator() {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="flex justify-start mb-3"
+    >
+      <div className="max-w-[85%] px-3.5 py-2.5 rounded-xl text-sm leading-relaxed bg-chalk-board-dark/80 border border-chalk-blue/15 text-chalk-dust">
+        <div className="flex items-center gap-2.5">
+          <div className="flex gap-1">
+            {[0, 1, 2].map((i) => (
+              <motion.div
+                key={i}
+                className="w-1.5 h-1.5 rounded-full bg-chalk-blue/60"
+                animate={{ opacity: [0.3, 1, 0.3], scale: [0.85, 1, 0.85] }}
+                transition={{
+                  duration: 1.4,
+                  repeat: Infinity,
+                  delay: i * 0.2,
+                }}
+              />
+            ))}
+          </div>
+          <span className="text-xs text-chalk-muted/70">Creating your lesson plan...</span>
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
 function StreamingBubble({ content }: { content: string }) {
-  const chatOnly = useMemo(() => stripEditorMarkers(content), [content]);
-  const renderedHtml = useMemo(() => markdownToHtml(chatOnly), [chatOnly]);
+  const stripped = useMemo(() => stripEditorMarkers(content), [content]);
+  const renderedHtml = useMemo(() => markdownToHtml(stripped.chat), [stripped.chat]);
+
+  // When editor content is streaming with nothing to show in chat, show a loading indicator.
+  if (stripped.isEditorStreaming && !stripped.chat) {
+    return <EditorLoadingIndicator />;
+  }
 
   return (
     <motion.div
@@ -130,11 +165,27 @@ function StreamingBubble({ content }: { content: string }) {
       <div className="max-w-[85%] px-3.5 py-2.5 rounded-xl text-sm leading-relaxed bg-chalk-board-dark/80 border border-chalk-white/8 text-chalk-dust">
         <div className="chat-markdown">
           <span dangerouslySetInnerHTML={{ __html: renderedHtml }} />
-          <motion.span
-            animate={{ opacity: [1, 0] }}
-            transition={{ duration: 0.5, repeat: Infinity }}
-            className="inline-block w-0.5 h-4 bg-chalk-blue/60 ml-0.5 align-text-bottom"
-          />
+          {stripped.isEditorStreaming ? (
+            <div className="flex items-center gap-2 mt-2 pt-2 border-t border-chalk-white/5">
+              <div className="flex gap-1">
+                {[0, 1, 2].map((i) => (
+                  <motion.div
+                    key={i}
+                    className="w-1 h-1 rounded-full bg-chalk-blue/60"
+                    animate={{ opacity: [0.3, 1, 0.3] }}
+                    transition={{ duration: 1.4, repeat: Infinity, delay: i * 0.2 }}
+                  />
+                ))}
+              </div>
+              <span className="text-[11px] text-chalk-muted/50">Writing to editor...</span>
+            </div>
+          ) : (
+            <motion.span
+              animate={{ opacity: [1, 0] }}
+              transition={{ duration: 0.5, repeat: Infinity }}
+              className="inline-block w-0.5 h-4 bg-chalk-blue/60 ml-0.5 align-text-bottom"
+            />
+          )}
         </div>
       </div>
     </motion.div>
