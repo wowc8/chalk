@@ -7,8 +7,8 @@ import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
 import Table from "@tiptap/extension-table";
 import TableRow from "@tiptap/extension-table-row";
-import TableHeader from "@tiptap/extension-table-header";
-import TableCell from "@tiptap/extension-table-cell";
+import { CustomTableHeader } from "./CustomTableHeader";
+import { CustomTableCell } from "./CustomTableCell";
 import Color from "@tiptap/extension-color";
 import { TextStyle } from "@tiptap/extension-text-style";
 import Highlight from "@tiptap/extension-highlight";
@@ -597,8 +597,8 @@ export function TipTapEditor({ content, onUpdate, editable = true }: TipTapEdito
         resizable: true,
       }),
       TableRow,
-      TableHeader,
-      TableCell,
+      CustomTableHeader,
+      CustomTableCell,
       Image.configure({
         inline: false,
         allowBase64: true,

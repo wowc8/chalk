@@ -154,17 +154,120 @@ fn parse_background_color(style: &str) -> Option<String> {
     None
 }
 
+/// Check if a string contains a year range like "2022-2023", "2023/2024", or "2022-23".
+fn contains_year_range(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.len() < 7 {
+        return false;
+    }
+    for i in 0..=bytes.len().saturating_sub(7) {
+        // Check for "20" followed by 2 digits (a 4-digit year starting with 20)
+        if bytes.get(i..i + 2) == Some(b"20")
+            && bytes.get(i + 2).map_or(false, |b| b.is_ascii_digit())
+            && bytes.get(i + 3).map_or(false, |b| b.is_ascii_digit())
+        {
+            // Check for separator after the 4-digit year
+            let sep = bytes.get(i + 4).copied();
+            if sep == Some(b'-') || sep == Some(b'/') {
+                // Check for at least 2 more digits after separator
+                if bytes.get(i + 5).map_or(false, |b| b.is_ascii_digit())
+                    && bytes.get(i + 6).map_or(false, |b| b.is_ascii_digit())
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Score a table for how likely it is to be the teacher's weekly planning template.
+///
+/// Higher score = more likely to be the actual planning table.
+/// Penalizes tables that look like reference/archive data (year ranges, multi-year
+/// columns like "LP 2022-2023"), and rewards tables with day-of-week columns
+/// and time-like first-column values.
+fn score_planning_table(table: &ParsedTable) -> i32 {
+    if table.rows.is_empty() {
+        return 0;
+    }
+
+    let headers: Vec<String> = table.rows[0]
+        .cells
+        .iter()
+        .map(|c| c.text.trim().to_string())
+        .collect();
+    let header_lower: Vec<String> = headers.iter().map(|h| h.to_lowercase()).collect();
+
+    let mut score: i32 = 0;
+
+    // Reward: has day-of-week columns (strong signal for a weekly planning grid).
+    if detect_schedule_columns(&header_lower).is_some() {
+        score += 50;
+    }
+
+    // Reward: has time-like values in the first column of data rows.
+    let time_rows = table
+        .rows
+        .iter()
+        .skip(1)
+        .filter(|r| r.cells.first().map_or(false, |c| is_time_like(c.text.trim())))
+        .count();
+    score += (time_rows as i32) * 5;
+
+    // Reward: reasonable number of rows (2-30 rows typical for weekly plans).
+    let data_rows = table.rows.len().saturating_sub(1);
+    if (2..=30).contains(&data_rows) {
+        score += 10;
+    }
+
+    // Reward: reasonable number of columns (5-7 typical for Mon-Fri + time col).
+    if (5..=7).contains(&headers.len()) {
+        score += 10;
+    }
+
+    // Penalty: headers contain year ranges (e.g., "2022-2023", "2023/2024").
+    // These are reference/archive tables, not planning templates.
+    for header in &header_lower {
+        if contains_year_range(header) {
+            score -= 40;
+        }
+        // Penalty: headers like "LP", "Lesson Plan" followed by year.
+        if header.contains("lp ") && header.chars().any(|c| c.is_ascii_digit()) {
+            score -= 30;
+        }
+        // Penalty: curriculum name columns (e.g., "eureka math").
+        if header.contains("eureka") || header.contains("curriculum") || header.contains("edition") {
+            score -= 20;
+        }
+    }
+
+    // Penalty: very few columns (1-2) — unlikely to be a plan grid.
+    if headers.len() <= 2 {
+        score -= 20;
+    }
+
+    // Small tiebreaker: more rows = slightly higher score.
+    score += data_rows.min(15) as i32;
+
+    score
+}
+
 /// Determine the table layout structure from the parsed tables.
 ///
-/// Finds the largest/most representative table and extracts its column headers,
-/// row categories, and determines if it's a schedule grid or standard table.
+/// Scores all tables to identify the actual planning template (not just the largest
+/// table, which may be a reference/archive table). Adds semantic labels describing
+/// what columns and rows represent.
 fn extract_table_structure(tables: &[ParsedTable]) -> TableStructure {
     if tables.is_empty() {
         return TableStructure::default();
     }
 
-    // Find the table with the most rows (likely the main plan table).
-    let main_table = tables.iter().max_by_key(|t| t.rows.len()).unwrap();
+    // Score each table and pick the best candidate for a planning template.
+    let main_table = tables
+        .iter()
+        .max_by_key(|t| score_planning_table(t))
+        .unwrap();
 
     if main_table.rows.is_empty() {
         return TableStructure::default();
@@ -178,10 +281,45 @@ fn extract_table_structure(tables: &[ParsedTable]) -> TableStructure {
 
     let header_lower: Vec<String> = headers.iter().map(|h| h.to_lowercase()).collect();
 
-    let layout_type = if detect_schedule_columns(&header_lower).is_some() {
+    let is_schedule = detect_schedule_columns(&header_lower).is_some();
+    let layout_type = if is_schedule {
         "schedule_grid".to_string()
     } else {
         "standard_table".to_string()
+    };
+
+    // Assign semantic labels.
+    let column_semantic = if is_schedule {
+        Some("days_of_week".to_string())
+    } else {
+        None
+    };
+
+    // Check if the first column contains time-like values.
+    let has_time_rows = main_table
+        .rows
+        .iter()
+        .skip(1)
+        .any(|r| r.cells.first().map_or(false, |c| is_time_like(c.text.trim())));
+
+    let row_semantic = if is_schedule && has_time_rows {
+        Some("time_slots".to_string())
+    } else if !is_schedule {
+        // For standard tables, check if the first column looks like categories.
+        let first_col_values: Vec<&str> = main_table
+            .rows
+            .iter()
+            .skip(1)
+            .filter_map(|r| r.cells.first().map(|c| c.text.trim()))
+            .filter(|t| !t.is_empty())
+            .collect();
+        if !first_col_values.is_empty() && first_col_values.iter().all(|v| !is_time_like(v)) {
+            Some("categories".to_string())
+        } else {
+            None
+        }
+    } else {
+        None
     };
 
     // Extract row categories from the first column of data rows.
@@ -203,6 +341,8 @@ fn extract_table_structure(tables: &[ParsedTable]) -> TableStructure {
         columns: headers,
         row_categories,
         column_count,
+        column_semantic,
+        row_semantic,
     }
 }
 
@@ -733,6 +873,8 @@ mod tests {
                 columns: vec!["Time".to_string(), "Monday".to_string()],
                 row_categories: vec!["Math".to_string()],
                 column_count: 2,
+                column_semantic: Some("days_of_week".to_string()),
+                row_semantic: Some("time_slots".to_string()),
             },
             time_slots: vec!["9:00-9:30".to_string()],
             content_patterns: ContentPatterns {
@@ -997,5 +1139,123 @@ mod tests {
         // The specials row has different activities each day (Art, Music, PE, Library) —
         // each individual one appears in <60% of days, so none should be in daily_routine
         // as individual entries. But Art appears 2/5 = 40% — below threshold.
+    }
+
+    // ── Year Range Detection Tests ──────────────────────────────
+
+    #[test]
+    fn test_contains_year_range() {
+        assert!(contains_year_range("lp 2022-2023"));
+        assert!(contains_year_range("LP 2023/2024"));
+        assert!(contains_year_range("2022-23"));
+        assert!(contains_year_range("Eureka Math 2021-2022"));
+        assert!(!contains_year_range("Monday"));
+        assert!(!contains_year_range("8:15-9:00"));
+        assert!(!contains_year_range("Grade 3"));
+        assert!(!contains_year_range(""));
+    }
+
+    // ── Table Scoring Tests ──────────────────────────────────────
+
+    #[test]
+    fn test_score_planning_table_prefers_schedule_grid() {
+        let schedule_html = r#"<html><body>
+            <table>
+                <tr><th>Time</th><th>Monday</th><th>Tuesday</th><th>Wednesday</th><th>Thursday</th><th>Friday</th></tr>
+                <tr><td>8:00-8:45</td><td>Math</td><td>Reading</td><td>Math</td><td>Reading</td><td>Math</td></tr>
+                <tr><td>9:00-9:30</td><td>PE</td><td>Art</td><td>PE</td><td>Music</td><td>PE</td></tr>
+            </table>
+        </body></html>"#;
+        let schedule_tables = parser::extract_tables(schedule_html);
+
+        let reference_html = r#"<html><body>
+            <table>
+                <tr><th>LP 2022-2023</th><th>LP 2023/2024</th><th>Eureka Math</th></tr>
+                <tr><td>Unit 1</td><td>Module 1</td><td>Chapter 1</td></tr>
+                <tr><td>Unit 2</td><td>Module 2</td><td>Chapter 2</td></tr>
+                <tr><td>Unit 3</td><td>Module 3</td><td>Chapter 3</td></tr>
+                <tr><td>Unit 4</td><td>Module 4</td><td>Chapter 4</td></tr>
+            </table>
+        </body></html>"#;
+        let reference_tables = parser::extract_tables(reference_html);
+
+        let schedule_score = score_planning_table(&schedule_tables[0]);
+        let reference_score = score_planning_table(&reference_tables[0]);
+
+        assert!(
+            schedule_score > reference_score,
+            "Schedule grid (score={}) should score higher than reference table (score={})",
+            schedule_score,
+            reference_score
+        );
+    }
+
+    #[test]
+    fn test_extract_table_structure_picks_schedule_over_reference() {
+        // HTML with two tables: a reference table (larger) and a schedule grid (smaller).
+        let html = r#"<html><body>
+            <table>
+                <tr><th>LP 2022-2023</th><th>LP 2023/2024</th><th>Eureka Math</th></tr>
+                <tr><td>Unit 1</td><td>Module 1</td><td>Chapter 1</td></tr>
+                <tr><td>Unit 2</td><td>Module 2</td><td>Chapter 2</td></tr>
+                <tr><td>Unit 3</td><td>Module 3</td><td>Chapter 3</td></tr>
+                <tr><td>Unit 4</td><td>Module 4</td><td>Chapter 4</td></tr>
+                <tr><td>Unit 5</td><td>Module 5</td><td>Chapter 5</td></tr>
+                <tr><td>Unit 6</td><td>Module 6</td><td>Chapter 6</td></tr>
+            </table>
+            <table>
+                <tr><th>Day/Time</th><th>Monday</th><th>Tuesday</th><th>Wednesday</th><th>Thursday</th><th>Friday</th></tr>
+                <tr><td>8:15-9:00</td><td>Math</td><td>Reading</td><td>Math</td><td>Reading</td><td>Math</td></tr>
+                <tr><td>9:00-9:30</td><td>Centers</td><td>Writing</td><td>Centers</td><td>Writing</td><td>Centers</td></tr>
+            </table>
+        </body></html>"#;
+
+        let tables = parser::extract_tables(html);
+        assert_eq!(tables.len(), 2, "Should find 2 tables");
+
+        let structure = extract_table_structure(&tables);
+        // Should pick the schedule grid, not the larger reference table.
+        assert_eq!(structure.layout_type, "schedule_grid");
+        assert_eq!(structure.column_count, 6);
+        assert!(structure.columns.contains(&"Monday".to_string()));
+        assert!(!structure.columns.contains(&"LP 2022-2023".to_string()));
+    }
+
+    // ── Semantic Labels Tests ────────────────────────────────────
+
+    #[test]
+    fn test_semantic_labels_schedule_grid() {
+        let html = r#"<html><body>
+            <table>
+                <tr><th>Day/Time</th><th>Monday</th><th>Tuesday</th><th>Wednesday</th><th>Thursday</th><th>Friday</th></tr>
+                <tr><td>8:15-9:00</td><td>Math</td><td>Reading</td><td>Math</td><td>Reading</td><td>Math</td></tr>
+                <tr><td>9:00-9:30</td><td>PE</td><td>Art</td><td>PE</td><td>Music</td><td>PE</td></tr>
+            </table>
+        </body></html>"#;
+
+        let template = extract_template(html);
+        assert_eq!(template.table_structure.column_semantic, Some("days_of_week".to_string()));
+        assert_eq!(template.table_structure.row_semantic, Some("time_slots".to_string()));
+    }
+
+    #[test]
+    fn test_semantic_labels_standard_table() {
+        let html = r#"<html><body>
+            <table>
+                <tr><th>Title</th><th>Subject</th><th>Duration</th></tr>
+                <tr><td>Photosynthesis</td><td>Biology</td><td>45 min</td></tr>
+                <tr><td>Cell Division</td><td>Biology</td><td>60 min</td></tr>
+            </table>
+        </body></html>"#;
+
+        let template = extract_template(html);
+        assert_eq!(template.table_structure.column_semantic, None);
+        assert_eq!(template.table_structure.row_semantic, Some("categories".to_string()));
+    }
+
+    #[test]
+    fn test_score_planning_table_empty() {
+        let empty_table = ParsedTable { rows: vec![] };
+        assert_eq!(score_planning_table(&empty_table), 0);
     }
 }
