@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use scraper::{Html, Selector};
 
 use crate::database::{
-    ColorMapping, ColorScheme, ContentPatterns, RecurringElements, TableStructure,
-    TeachingTemplateSchema,
+    ColorMapping, ColorScheme, ContentPatterns, DailyRoutineEvent, RecurringElements,
+    TableStructure, TeachingTemplateSchema,
 };
 
 use super::parser::{self, ParsedTable};
@@ -33,6 +33,7 @@ pub fn extract_template(html: &str) -> TeachingTemplateSchema {
     let time_slots = extract_time_slots(&tables);
     let content_patterns = extract_content_patterns(html, &tables);
     let recurring_elements = extract_recurring_elements(&tables);
+    let daily_routine = extract_daily_routine(&tables);
 
     TeachingTemplateSchema {
         color_scheme,
@@ -40,6 +41,7 @@ pub fn extract_template(html: &str) -> TeachingTemplateSchema {
         time_slots,
         content_patterns,
         recurring_elements,
+        daily_routine,
     }
 }
 
@@ -371,6 +373,145 @@ fn extract_recurring_elements(tables: &[ParsedTable]) -> RecurringElements {
     }
 }
 
+/// Known routine / non-academic event keywords.
+/// An activity whose lowercase form contains any of these is considered a routine event.
+const ROUTINE_KEYWORDS: &[&str] = &[
+    "breakfast",
+    "lunch",
+    "recess",
+    "dismissal",
+    "arrival",
+    "morning meeting",
+    "morning circle",
+    "pack up",
+    "pack-up",
+    "snack",
+    "restroom",
+    "bathroom",
+    "transition",
+    "bus",
+    "carpool",
+    "aftercare",
+    "assembly",
+    "homeroom",
+    "advisory",
+    "gym",
+    "pe ",
+    "p.e.",
+    "physical education",
+    "specials",
+    "encore",
+    "related arts",
+    "music",
+    "art",
+    "library",
+    "computer lab",
+    "technology",
+    "chapel",
+    "devotion",
+    "pledge",
+    "announcements",
+    "cleanup",
+    "clean up",
+    "clean-up",
+    "closing circle",
+    "quiet time",
+    "rest time",
+    "nap",
+];
+
+/// Returns true if the activity name matches a known routine/non-academic event.
+fn is_routine_activity(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    ROUTINE_KEYWORDS
+        .iter()
+        .any(|kw| lower.contains(kw) || lower == kw.trim())
+}
+
+/// Extract daily routine events — non-academic activities that appear consistently
+/// across most day columns at the same time slot in schedule grids.
+///
+/// For each time slot row in a schedule grid, if the same activity appears in the
+/// majority of day columns (≥ 3 out of 5, or ≥ 60% of day columns) AND the activity
+/// matches a known routine keyword, it is captured as a `DailyRoutineEvent`.
+///
+/// Activities that appear at every time slot but are academic (e.g., "Math") are
+/// intentionally excluded — we only want the structural day events.
+fn extract_daily_routine(tables: &[ParsedTable]) -> Vec<DailyRoutineEvent> {
+    let mut routine_events: Vec<DailyRoutineEvent> = Vec::new();
+    let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for table in tables {
+        if table.rows.len() < 2 {
+            continue;
+        }
+
+        let headers: Vec<String> = table.rows[0]
+            .cells
+            .iter()
+            .map(|c| c.text.trim().to_lowercase())
+            .collect();
+
+        let (time_col, day_col_pairs) = match detect_schedule_columns(&headers) {
+            Some(cols) => cols,
+            None => continue,
+        };
+
+        let day_indices: Vec<usize> = day_col_pairs.iter().map(|(idx, _)| *idx).collect();
+        let num_days = day_indices.len();
+        // Need at least 2 day columns to detect patterns.
+        if num_days < 2 {
+            continue;
+        }
+
+        // Threshold: activity must appear in ≥60% of day columns for that row.
+        let threshold = (num_days as f64 * 0.6).ceil() as usize;
+
+        for row in table.rows.iter().skip(1) {
+            // Get the time slot for this row.
+            let time_slot = row
+                .cells
+                .get(time_col)
+                .map(|c| c.text.trim().to_string())
+                .filter(|t| is_time_like(t));
+
+            // Count activity occurrences across day columns.
+            let mut activity_counts: HashMap<String, usize> = HashMap::new();
+            for &col_idx in &day_indices {
+                if let Some(cell) = row.cells.get(col_idx) {
+                    let activity = cell
+                        .text
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    if !activity.is_empty() && activity.len() < 60 {
+                        *activity_counts.entry(activity).or_insert(0) += 1;
+                    }
+                }
+            }
+
+            // Find activities that meet the threshold and are routine.
+            for (activity, count) in &activity_counts {
+                if *count >= threshold && is_routine_activity(activity) {
+                    let name_lower = activity.to_lowercase();
+                    if seen_names.insert(name_lower) {
+                        routine_events.push(DailyRoutineEvent {
+                            name: activity.clone(),
+                            time_slot: time_slot.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Sort by time slot for natural ordering.
+    routine_events.sort_by(|a, b| a.time_slot.cmp(&b.time_slot));
+    routine_events
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -603,6 +744,10 @@ mod tests {
                 subjects: vec!["Math".to_string()],
                 activities: vec!["Reading Group".to_string()],
             },
+            daily_routine: vec![DailyRoutineEvent {
+                name: "Lunch".to_string(),
+                time_slot: Some("12:00-12:30".to_string()),
+            }],
         };
 
         let json = serde_json::to_string(&schema).unwrap();
@@ -612,6 +757,8 @@ mod tests {
         assert_eq!(deserialized.color_scheme.mappings.len(), 1);
         assert_eq!(deserialized.time_slots.len(), 1);
         assert_eq!(deserialized.recurring_elements.subjects.len(), 1);
+        assert_eq!(deserialized.daily_routine.len(), 1);
+        assert_eq!(deserialized.daily_routine[0].name, "Lunch");
     }
 
     #[test]
@@ -622,5 +769,233 @@ mod tests {
         assert!(schema.table_structure.columns.is_empty());
         assert!(schema.time_slots.is_empty());
         assert!(schema.recurring_elements.activities.is_empty());
+        assert!(schema.daily_routine.is_empty());
+    }
+
+    // ── Daily Routine Extraction Tests ──────────────────────────
+
+    #[test]
+    fn test_is_routine_activity() {
+        // Known routine keywords.
+        assert!(is_routine_activity("Lunch"));
+        assert!(is_routine_activity("lunch"));
+        assert!(is_routine_activity("Recess"));
+        assert!(is_routine_activity("Morning Meeting"));
+        assert!(is_routine_activity("Dismissal"));
+        assert!(is_routine_activity("Breakfast"));
+        assert!(is_routine_activity("Snack Time"));
+        assert!(is_routine_activity("PE "));
+        assert!(is_routine_activity("Gym"));
+        assert!(is_routine_activity("Art"));
+        assert!(is_routine_activity("Music"));
+        assert!(is_routine_activity("Library"));
+        assert!(is_routine_activity("Assembly"));
+        assert!(is_routine_activity("Pack Up"));
+        assert!(is_routine_activity("Pack-Up"));
+        assert!(is_routine_activity("Announcements"));
+        assert!(is_routine_activity("Chapel"));
+        assert!(is_routine_activity("Closing Circle"));
+        assert!(is_routine_activity("Clean Up"));
+
+        // Academic subjects should NOT match.
+        assert!(!is_routine_activity("Math"));
+        assert!(!is_routine_activity("Reading"));
+        assert!(!is_routine_activity("Science"));
+        assert!(!is_routine_activity("Social Studies"));
+        assert!(!is_routine_activity("Writing Workshop"));
+    }
+
+    #[test]
+    fn test_extract_daily_routine_schedule_with_lunch_and_recess() {
+        let html = r#"<html><body>
+            <table>
+                <tr><th>Time</th><th>Monday</th><th>Tuesday</th><th>Wednesday</th><th>Thursday</th><th>Friday</th></tr>
+                <tr><td>8:00-8:45</td><td>Math</td><td>Math</td><td>Math</td><td>Math</td><td>Math</td></tr>
+                <tr><td>8:45-9:30</td><td>Reading</td><td>Reading</td><td>Reading</td><td>Reading</td><td>Reading</td></tr>
+                <tr><td>9:30-10:00</td><td>Recess</td><td>Recess</td><td>Recess</td><td>Recess</td><td>Recess</td></tr>
+                <tr><td>10:00-10:45</td><td>Science</td><td>Writing</td><td>Science</td><td>Writing</td><td>Science</td></tr>
+                <tr><td>11:00-11:30</td><td>Lunch</td><td>Lunch</td><td>Lunch</td><td>Lunch</td><td>Lunch</td></tr>
+                <tr><td>11:30-12:15</td><td>Social Studies</td><td>Social Studies</td><td>Social Studies</td><td>Social Studies</td><td>Social Studies</td></tr>
+                <tr><td>12:15-1:00</td><td>Specials</td><td>Specials</td><td>Specials</td><td>Specials</td><td>Specials</td></tr>
+                <tr><td>2:30-2:45</td><td>Dismissal</td><td>Dismissal</td><td>Dismissal</td><td>Dismissal</td><td>Dismissal</td></tr>
+            </table>
+        </body></html>"#;
+
+        let template = extract_template(html);
+
+        // Should detect Recess, Lunch, Specials, Dismissal as routine events.
+        let routine_names: Vec<&str> = template.daily_routine.iter().map(|e| e.name.as_str()).collect();
+        assert!(routine_names.contains(&"Recess"), "Expected Recess in routine: {:?}", routine_names);
+        assert!(routine_names.contains(&"Lunch"), "Expected Lunch in routine: {:?}", routine_names);
+        assert!(routine_names.contains(&"Specials"), "Expected Specials in routine: {:?}", routine_names);
+        assert!(routine_names.contains(&"Dismissal"), "Expected Dismissal in routine: {:?}", routine_names);
+
+        // Academic subjects should NOT be in daily_routine.
+        assert!(!routine_names.contains(&"Math"));
+        assert!(!routine_names.contains(&"Reading"));
+        assert!(!routine_names.contains(&"Science"));
+
+        // Verify time slots are captured.
+        let recess = template.daily_routine.iter().find(|e| e.name == "Recess").unwrap();
+        assert_eq!(recess.time_slot, Some("9:30-10:00".to_string()));
+
+        let lunch = template.daily_routine.iter().find(|e| e.name == "Lunch").unwrap();
+        assert_eq!(lunch.time_slot, Some("11:00-11:30".to_string()));
+    }
+
+    #[test]
+    fn test_extract_daily_routine_no_routine_events() {
+        // A schedule grid with only academic subjects — no routine events.
+        let html = r#"<html><body>
+            <table>
+                <tr><th>Time</th><th>Monday</th><th>Tuesday</th><th>Wednesday</th></tr>
+                <tr><td>9:00</td><td>Math</td><td>Reading</td><td>Math</td></tr>
+                <tr><td>10:00</td><td>Science</td><td>Writing</td><td>Science</td></tr>
+            </table>
+        </body></html>"#;
+
+        let template = extract_template(html);
+        assert!(template.daily_routine.is_empty());
+    }
+
+    #[test]
+    fn test_extract_daily_routine_partial_coverage() {
+        // Recess appears in only 2 out of 5 days — below 60% threshold.
+        let html = r#"<html><body>
+            <table>
+                <tr><th>Time</th><th>Monday</th><th>Tuesday</th><th>Wednesday</th><th>Thursday</th><th>Friday</th></tr>
+                <tr><td>9:30-10:00</td><td>Recess</td><td>Recess</td><td>Math</td><td>Science</td><td>Reading</td></tr>
+            </table>
+        </body></html>"#;
+
+        let template = extract_template(html);
+        // Recess only in 2/5 days = 40%, below 60% threshold.
+        let routine_names: Vec<&str> = template.daily_routine.iter().map(|e| e.name.as_str()).collect();
+        assert!(!routine_names.contains(&"Recess"));
+    }
+
+    #[test]
+    fn test_extract_daily_routine_meets_threshold() {
+        // Recess appears in 3 out of 5 days — meets 60% threshold.
+        let html = r#"<html><body>
+            <table>
+                <tr><th>Time</th><th>Monday</th><th>Tuesday</th><th>Wednesday</th><th>Thursday</th><th>Friday</th></tr>
+                <tr><td>9:30-10:00</td><td>Recess</td><td>Recess</td><td>Recess</td><td>Science</td><td>Reading</td></tr>
+            </table>
+        </body></html>"#;
+
+        let template = extract_template(html);
+        let routine_names: Vec<&str> = template.daily_routine.iter().map(|e| e.name.as_str()).collect();
+        assert!(routine_names.contains(&"Recess"), "3/5 = 60% should meet threshold: {:?}", routine_names);
+    }
+
+    #[test]
+    fn test_extract_daily_routine_standard_table_ignored() {
+        // Standard tables (non-schedule grids) should not produce daily_routine events.
+        let html = r#"<html><body>
+            <table>
+                <tr><th>Title</th><th>Subject</th><th>Duration</th></tr>
+                <tr><td>Lunch Break</td><td>N/A</td><td>30 min</td></tr>
+                <tr><td>Recess</td><td>N/A</td><td>15 min</td></tr>
+            </table>
+        </body></html>"#;
+
+        let template = extract_template(html);
+        assert!(template.daily_routine.is_empty());
+    }
+
+    #[test]
+    fn test_extract_daily_routine_deduplicates() {
+        // Same routine event at same time should only appear once.
+        let html = r#"<html><body>
+            <table>
+                <tr><th>Time</th><th>Monday</th><th>Tuesday</th><th>Wednesday</th></tr>
+                <tr><td>11:30-12:00</td><td>Lunch</td><td>Lunch</td><td>Lunch</td></tr>
+            </table>
+        </body></html>"#;
+
+        let template = extract_template(html);
+        let lunch_count = template.daily_routine.iter().filter(|e| e.name == "Lunch").count();
+        assert_eq!(lunch_count, 1, "Lunch should appear exactly once");
+    }
+
+    #[test]
+    fn test_extract_daily_routine_sorted_by_time() {
+        let html = r#"<html><body>
+            <table>
+                <tr><th>Time</th><th>Monday</th><th>Tuesday</th><th>Wednesday</th></tr>
+                <tr><td>12:00-12:30</td><td>Lunch</td><td>Lunch</td><td>Lunch</td></tr>
+                <tr><td>8:00-8:15</td><td>Morning Meeting</td><td>Morning Meeting</td><td>Morning Meeting</td></tr>
+                <tr><td>10:00-10:15</td><td>Recess</td><td>Recess</td><td>Recess</td></tr>
+                <tr><td>2:45-3:00</td><td>Dismissal</td><td>Dismissal</td><td>Dismissal</td></tr>
+            </table>
+        </body></html>"#;
+
+        let template = extract_template(html);
+        assert!(template.daily_routine.len() >= 4);
+
+        // Should be sorted by time slot.
+        let time_slots: Vec<Option<String>> = template
+            .daily_routine
+            .iter()
+            .map(|e| e.time_slot.clone())
+            .collect();
+        let mut sorted = time_slots.clone();
+        sorted.sort();
+        assert_eq!(time_slots, sorted, "Daily routine should be sorted by time slot");
+    }
+
+    #[test]
+    fn test_extract_daily_routine_empty_html() {
+        let template = extract_template("");
+        assert!(template.daily_routine.is_empty());
+    }
+
+    #[test]
+    fn test_extract_daily_routine_realistic_elementary_schedule() {
+        let html = r#"<html><body>
+            <table>
+                <tr><th>Day/Time</th><th>Monday</th><th>Tuesday</th><th>Wednesday</th><th>Thursday</th><th>Friday</th></tr>
+                <tr><td>7:45-8:00</td><td>Breakfast</td><td>Breakfast</td><td>Breakfast</td><td>Breakfast</td><td>Breakfast</td></tr>
+                <tr><td>8:00-8:15</td><td>Morning Meeting</td><td>Morning Meeting</td><td>Morning Meeting</td><td>Morning Meeting</td><td>Morning Meeting</td></tr>
+                <tr><td>8:15-9:00</td><td>Math Workshop</td><td>Math Workshop</td><td>Math Workshop</td><td>Math Workshop</td><td>Math Assessment</td></tr>
+                <tr><td>9:00-9:45</td><td>Reading Block</td><td>Reading Block</td><td>Reading Block</td><td>Reading Block</td><td>Reading Block</td></tr>
+                <tr><td>9:45-10:00</td><td>Snack</td><td>Snack</td><td>Snack</td><td>Snack</td><td>Snack</td></tr>
+                <tr><td>10:00-10:15</td><td>Recess</td><td>Recess</td><td>Recess</td><td>Recess</td><td>Recess</td></tr>
+                <tr><td>10:15-11:00</td><td>Writing</td><td>Writing</td><td>Writing</td><td>Writing</td><td>Writing</td></tr>
+                <tr><td>11:00-11:45</td><td>Art</td><td>Music</td><td>PE</td><td>Library</td><td>Art</td></tr>
+                <tr><td>11:45-12:15</td><td>Lunch</td><td>Lunch</td><td>Lunch</td><td>Lunch</td><td>Lunch</td></tr>
+                <tr><td>12:15-12:30</td><td>Recess</td><td>Recess</td><td>Recess</td><td>Recess</td><td>Recess</td></tr>
+                <tr><td>12:30-1:15</td><td>Science</td><td>Social Studies</td><td>Science</td><td>Social Studies</td><td>Science</td></tr>
+                <tr><td>1:15-1:30</td><td>Pack Up</td><td>Pack Up</td><td>Pack Up</td><td>Pack Up</td><td>Pack Up</td></tr>
+                <tr><td>1:30</td><td>Dismissal</td><td>Dismissal</td><td>Dismissal</td><td>Dismissal</td><td>Dismissal</td></tr>
+            </table>
+        </body></html>"#;
+
+        let template = extract_template(html);
+        let routine_names: Vec<&str> = template.daily_routine.iter().map(|e| e.name.as_str()).collect();
+
+        // All routine events should be detected.
+        assert!(routine_names.contains(&"Breakfast"), "Missing Breakfast: {:?}", routine_names);
+        assert!(routine_names.contains(&"Morning Meeting"), "Missing Morning Meeting: {:?}", routine_names);
+        assert!(routine_names.contains(&"Snack"), "Missing Snack: {:?}", routine_names);
+        assert!(routine_names.contains(&"Lunch"), "Missing Lunch: {:?}", routine_names);
+        assert!(routine_names.contains(&"Pack Up"), "Missing Pack Up: {:?}", routine_names);
+        assert!(routine_names.contains(&"Dismissal"), "Missing Dismissal: {:?}", routine_names);
+
+        // Recess appears at two different times — should appear once (deduplicated by name).
+        let recess_count = template.daily_routine.iter().filter(|e| e.name == "Recess").count();
+        assert_eq!(recess_count, 1, "Recess should be deduplicated to 1 entry");
+
+        // Academic subjects should NOT be routine events.
+        assert!(!routine_names.contains(&"Math Workshop"));
+        assert!(!routine_names.contains(&"Reading Block"));
+        assert!(!routine_names.contains(&"Writing"));
+        assert!(!routine_names.contains(&"Science"));
+        assert!(!routine_names.contains(&"Social Studies"));
+
+        // The specials row has different activities each day (Art, Music, PE, Library) —
+        // each individual one appears in <60% of days, so none should be in daily_routine
+        // as individual entries. But Art appears 2/5 = 40% — below threshold.
     }
 }

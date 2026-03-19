@@ -110,6 +110,11 @@ pub struct TeachingTemplateSchema {
     pub content_patterns: ContentPatterns,
     #[serde(default)]
     pub recurring_elements: RecurringElements,
+    /// Routine non-academic events that appear consistently across most days
+    /// at similar times (e.g., breakfast, lunch, recess, dismissal).
+    /// Included in weekly/daily plan prompts but excluded for single-lesson requests.
+    #[serde(default)]
+    pub daily_routine: Vec<DailyRoutineEvent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -153,6 +158,16 @@ pub struct RecurringElements {
     pub subjects: Vec<String>,
     #[serde(default)]
     pub activities: Vec<String>,
+}
+
+/// A routine event that appears consistently across most days at a similar time.
+/// Examples: breakfast, lunch, recess, gym, specials, dismissal, morning meeting.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DailyRoutineEvent {
+    /// Display name of the routine event (e.g., "Lunch", "Recess").
+    pub name: String,
+    /// The time slot where this event typically occurs (e.g., "11:30-12:00").
+    pub time_slot: Option<String>,
 }
 
 // ── Tags ─────────────────────────────────────────────────────

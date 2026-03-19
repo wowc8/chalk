@@ -1613,6 +1613,7 @@ mod tests {
                 subjects: vec!["Biology".to_string()],
                 activities: vec!["Morning Circle".to_string()],
             },
+            daily_routine: vec![],
         };
 
         let json = serde_json::to_string(&schema).unwrap();
