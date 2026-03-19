@@ -7,7 +7,7 @@ pub mod provider;
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
-use crate::database::Database;
+use crate::database::{Database, TeachingTemplateSchema};
 use crate::errors::ChalkError;
 use crate::events;
 use crate::rag::embeddings::EmbeddingClient;
@@ -284,6 +284,170 @@ fn get_template_json(db: &Database) -> Option<String> {
     }
 }
 
+/// Convert a teaching template JSON string into structured prompt instructions.
+///
+/// Instead of dumping raw JSON for the AI to interpret, this function parses
+/// the template schema and produces clear, actionable instructions the AI can
+/// follow to generate HTML that matches the teacher's actual plan structure.
+fn format_template_instructions(template_json: &str) -> String {
+    let schema: TeachingTemplateSchema = match serde_json::from_str(template_json) {
+        Ok(s) => s,
+        Err(_) => return format!(
+            "The teacher has a lesson plan template. Use this structure:\n```json\n{template_json}\n```"
+        ),
+    };
+
+    let mut instructions = String::new();
+
+    instructions.push_str("\n\n## Teacher's Lesson Plan Template — FOLLOW THIS EXACTLY\n\n");
+    instructions.push_str(
+        "When generating or editing lesson plan content for the editor (inside `<<<EDITOR_UPDATE>>>` markers), \
+         you MUST produce an HTML table that matches this teacher's specific schedule structure. \
+         Do NOT generate a flat list or generic table — replicate their exact format.\n\n"
+    );
+
+    // ── Table Structure ──
+    let ts = &schema.table_structure;
+    if !ts.columns.is_empty() {
+        instructions.push_str("### Table Layout\n");
+        if ts.layout_type == "schedule_grid" {
+            instructions.push_str(
+                "This is a **weekly schedule grid**: days of the week as columns, time slots as rows.\n\n"
+            );
+        }
+        instructions.push_str(&format!(
+            "**Columns ({}):** {}\n\n",
+            ts.column_count,
+            ts.columns.join(" | ")
+        ));
+        if !ts.row_categories.is_empty() {
+            instructions.push_str(&format!(
+                "**Row categories (left column):** {}\n\n",
+                ts.row_categories.join(", ")
+            ));
+        }
+    }
+
+    // ── Time Slots ──
+    if !schema.time_slots.is_empty() {
+        instructions.push_str("### Time Blocks\n");
+        instructions.push_str(
+            "Each row in the table corresponds to a time block. Use these EXACT time slots as the first column:\n\n"
+        );
+        for slot in &schema.time_slots {
+            instructions.push_str(&format!("- {slot}\n"));
+        }
+        instructions.push('\n');
+    }
+
+    // ── Recurring Elements ──
+    let re = &schema.recurring_elements;
+    if !re.activities.is_empty() || !re.subjects.is_empty() {
+        instructions.push_str("### Recurring Daily Events\n");
+        instructions.push_str(
+            "These activities appear every day (or most days) at the same time. \
+             Keep them in place — do NOT replace them with new content. \
+             Only fill the lesson-specific slots with new activities.\n\n"
+        );
+        if !re.activities.is_empty() {
+            instructions.push_str(&format!(
+                "**Daily recurring activities:** {}\n\n",
+                re.activities.join(", ")
+            ));
+        }
+        if !re.subjects.is_empty() {
+            instructions.push_str(&format!(
+                "**Regular subjects:** {}\n\n",
+                re.subjects.join(", ")
+            ));
+        }
+    }
+
+    // ── Color Scheme ──
+    let cs = &schema.color_scheme;
+    if !cs.mappings.is_empty() {
+        instructions.push_str("### Color Coding (inline styles)\n");
+        instructions.push_str(
+            "Apply these background colors to table cells using `style=\"background-color:COLOR\"`. \
+             This is how the teacher visually organizes their schedule.\n\n"
+        );
+        for mapping in &cs.mappings {
+            instructions.push_str(&format!(
+                "- `{}` → {} cells\n",
+                mapping.color, mapping.category
+            ));
+        }
+        instructions.push('\n');
+    }
+
+    // ── Content Patterns ──
+    let cp = &schema.content_patterns;
+    instructions.push_str("### Content Detail Level\n");
+    instructions.push_str(
+        "Each cell should contain **specific, detailed content** — not just a subject name. Include:\n\
+         - Specific activity names (e.g., \"Counting with Small Pumpkins\" not just \"Math\")\n\
+         - Book titles, song names, game names when relevant\n\
+         - Brief description of what students will do\n\n"
+    );
+    if cp.has_rich_formatting {
+        instructions.push_str(
+            "Use **rich formatting** inside cells: `<strong>` for labels/headers, \
+             `<em>` for emphasis. The teacher's plans use formatted text.\n\n"
+        );
+    }
+    if cp.has_links {
+        instructions.push_str(
+            "Include `<a href=\"...\">` links to resources where appropriate — \
+             the teacher's plans reference external documents.\n\n"
+        );
+    }
+
+    // ── HTML Skeleton Example ──
+    if ts.layout_type == "schedule_grid" && !schema.time_slots.is_empty() && !ts.columns.is_empty() {
+        instructions.push_str("### HTML Output Format\n");
+        instructions.push_str(
+            "Generate a complete `<table>` with this structure. Here is the skeleton — \
+             fill every cell with specific lesson content:\n\n```html\n<table>\n  <tr>\n"
+        );
+        for col in &ts.columns {
+            // Apply header color if available
+            let header_color = cs.mappings.iter()
+                .find(|m| m.category == "header")
+                .map(|m| format!(" style=\"background-color:{}\"", m.color))
+                .unwrap_or_default();
+            instructions.push_str(&format!("    <th{header_color}>{col}</th>\n"));
+        }
+        instructions.push_str("  </tr>\n");
+
+        // Show first 2-3 time slot rows as example
+        let example_slots: Vec<&String> = schema.time_slots.iter().take(3).collect();
+        for slot in &example_slots {
+            instructions.push_str("  <tr>\n");
+            instructions.push_str(&format!("    <td>{slot}</td>\n"));
+            for _ in 1..ts.columns.len() {
+                instructions.push_str(
+                    "    <td style=\"background-color:...\">\
+                     <strong>Activity Name</strong><br/>Specific details...\
+                     </td>\n"
+                );
+            }
+            instructions.push_str("  </tr>\n");
+        }
+        if schema.time_slots.len() > 3 {
+            instructions.push_str("  <!-- ... continue for all time slots ... -->\n");
+        }
+        instructions.push_str("</table>\n```\n\n");
+    }
+
+    instructions.push_str(
+        "**CRITICAL:** Generate ALL time slot rows, ALL day columns, and fill EVERY cell. \
+         An empty cell is better than a missing row. The output must be a complete weekly schedule, \
+         not a partial plan.\n"
+    );
+
+    instructions
+}
+
 /// Create an AI provider from the current app settings.
 fn create_provider_from_settings(
     api_key: &str,
@@ -315,29 +479,15 @@ fn build_messages(
     // Inject teaching template if available — tells the AI about the teacher's
     // preferred table structure, color scheme, time slots, and recurring elements.
     if let Some(template_json) = teaching_template {
-        system_content.push_str(&format!(
-            "\n\n## Teacher's Lesson Plan Template\n\
-             The teacher uses a specific template structure for their lesson plans. \
-             When writing to the editor (inside <<<EDITOR_UPDATE>>> markers), match this structure.\n\
-             \n\
-             Use the same table layout (columns, rows, grid arrangement), apply the same color scheme \
-             (background colors for table cells by category via inline `style` attributes), \
-             follow the time slot pattern, and include the recurring elements the teacher typically uses.\n\
-             \n\
-             Template definition:\n```json\n{template_json}\n```\n\
-             \n\
-             When generating editor HTML, use `<table>` with inline `style` attributes matching \
-             the color mappings above. Preserve the column structure and row categories. \
-             If the template defines time slots, organize content into those time blocks."
-        ));
+        system_content.push_str(&format_template_instructions(template_json));
     }
 
     // Inject active plan context if available.
     if let Some((title, content)) = active_plan {
         if !content.is_empty() {
             // Truncate very long plan content to stay within token budget.
-            let truncated = if content.len() > 6000 {
-                format!("{}...(truncated)", &content[..6000])
+            let truncated = if content.len() > 12000 {
+                format!("{}...(truncated)", &content[..12000])
             } else {
                 content.to_string()
             };
@@ -393,7 +543,7 @@ async fn generate_response(
     teaching_template: Option<&str>,
 ) -> Result<String, ChalkError> {
     let messages = build_messages(history, user_message, rag_context, active_plan, teaching_template);
-    provider.complete(&messages, 2048, 0.7).await
+    provider.complete(&messages, 4096, 0.7).await
 }
 
 /// Stream a response using the provider abstraction, emitting tokens via Tauri events.
@@ -412,7 +562,7 @@ async fn generate_response_stream(
     let app_handle = app.clone();
 
     provider
-        .complete_stream(&messages, 2048, 0.7, Box::new(move |token| {
+        .complete_stream(&messages, 4096, 0.7, Box::new(move |token| {
             events::emit_chat_stream_token(
                 &app_handle,
                 events::ChatStreamTokenPayload {
@@ -1167,20 +1317,28 @@ mod tests {
     #[test]
     fn test_build_messages_with_teaching_template() {
         let history: Vec<ChatMessage> = vec![];
-        let template = r##"{"color_scheme":{"mappings":[{"color":"#FFD700","category":"Math","frequency":5}]},"table_structure":{"layout_type":"grid","columns":["Time","Monday","Tuesday"],"row_categories":["Morning","Afternoon"],"column_count":3},"time_slots":["8:00-9:00","9:00-10:00"],"content_patterns":{"cell_content_types":["activity"],"has_links":false,"has_rich_formatting":true},"recurring_elements":{"subjects":["Math","Reading"],"activities":["Circle Time","Centers"]}}"##;
+        let template = r##"{"color_scheme":{"mappings":[{"color":"#FFD700","category":"Math","frequency":5}]},"table_structure":{"layout_type":"schedule_grid","columns":["Time","Monday","Tuesday"],"row_categories":["Morning","Afternoon"],"column_count":3},"time_slots":["8:00-9:00","9:00-10:00"],"content_patterns":{"cell_content_types":["activity"],"has_links":false,"has_rich_formatting":true},"recurring_elements":{"subjects":["Math","Reading"],"activities":["Circle Time","Centers"]}}"##;
         let messages = build_messages(&history, "Make a plan", "", None, Some(template));
 
         assert_eq!(messages.len(), 2);
         assert!(messages[0].content.contains("Teacher's Lesson Plan Template"));
-        assert!(messages[0].content.contains("color_scheme"));
-        assert!(messages[0].content.contains("table_structure"));
-        assert!(messages[0].content.contains("time_slots"));
+        // Structured instructions instead of raw JSON.
+        assert!(messages[0].content.contains("Time | Monday | Tuesday"));
+        assert!(messages[0].content.contains("8:00-9:00"));
+        assert!(messages[0].content.contains("9:00-10:00"));
+        assert!(messages[0].content.contains("Circle Time"));
+        assert!(messages[0].content.contains("Centers"));
+        assert!(messages[0].content.contains("#FFD700"));
+        assert!(messages[0].content.contains("rich formatting"));
+        // Should have HTML skeleton example for schedule grids.
+        assert!(messages[0].content.contains("<table>"));
+        assert!(messages[0].content.contains("<th"));
     }
 
     #[test]
     fn test_build_messages_with_template_and_plan() {
         let history: Vec<ChatMessage> = vec![];
-        let template = r#"{"color_scheme":{},"table_structure":{}}"#;
+        let template = r#"{"color_scheme":{"mappings":[]},"table_structure":{"layout_type":"schedule_grid","columns":["Time","Mon"],"row_categories":[],"column_count":2},"time_slots":[],"content_patterns":{"cell_content_types":[],"has_links":false,"has_rich_formatting":false},"recurring_elements":{"subjects":[],"activities":[]}}"#;
         let plan = Some(("My Plan", "Some content"));
         let messages = build_messages(&history, "Help", "", plan, Some(template));
 
@@ -1191,6 +1349,117 @@ mod tests {
     }
 
     // NOTE: Stream chunk and request serialization tests moved to openai.rs
+
+    // ── format_template_instructions tests ──────────────────────
+
+    #[test]
+    fn test_format_template_instructions_schedule_grid() {
+        let template = r##"{"color_scheme":{"mappings":[{"color":"#9900ff","category":"header","frequency":6},{"color":"#00ffff","category":"activity","frequency":3}]},"table_structure":{"layout_type":"schedule_grid","columns":["Day/Time","Monday","Tuesday","Wednesday","Thursday","Friday"],"row_categories":["Morning Circle","Centers"],"column_count":6},"time_slots":["8:15-9:00","9:00-9:10","9:10-9:30","9:30-10:00"],"content_patterns":{"cell_content_types":["activity"],"has_links":true,"has_rich_formatting":true},"recurring_elements":{"subjects":["Math","Reading"],"activities":["Soft Start Breakfast","Morning Circle","Recess"]}}"##;
+
+        let result = format_template_instructions(template);
+
+        // Structure markers.
+        assert!(result.contains("weekly schedule grid"));
+        assert!(result.contains("Day/Time | Monday | Tuesday | Wednesday | Thursday | Friday"));
+        assert!(result.contains("6"), "Should mention column count");
+
+        // Time slots listed.
+        assert!(result.contains("8:15-9:00"));
+        assert!(result.contains("9:00-9:10"));
+        assert!(result.contains("9:10-9:30"));
+        assert!(result.contains("9:30-10:00"));
+
+        // Recurring elements.
+        assert!(result.contains("Soft Start Breakfast"));
+        assert!(result.contains("Morning Circle"));
+        assert!(result.contains("Recess"));
+        assert!(result.contains("do NOT replace them"));
+
+        // Color coding.
+        assert!(result.contains("#9900ff"));
+        assert!(result.contains("#00ffff"));
+        assert!(result.contains("background-color"));
+
+        // Content detail instructions.
+        assert!(result.contains("specific, detailed content"));
+        assert!(result.contains("rich formatting"));
+        assert!(result.contains("links"));
+
+        // HTML skeleton.
+        assert!(result.contains("<table>"));
+        assert!(result.contains("<th"));
+        assert!(result.contains("8:15-9:00"));
+
+        // Row categories.
+        assert!(result.contains("Morning Circle"));
+        assert!(result.contains("Centers"));
+    }
+
+    #[test]
+    fn test_format_template_instructions_standard_table() {
+        let template = r#"{"color_scheme":{"mappings":[]},"table_structure":{"layout_type":"standard_table","columns":["Title","Subject","Duration","Objectives"],"row_categories":[],"column_count":4},"time_slots":[],"content_patterns":{"cell_content_types":["activity_name","duration","objectives"],"has_links":false,"has_rich_formatting":false},"recurring_elements":{"subjects":[],"activities":[]}}"#;
+
+        let result = format_template_instructions(template);
+
+        // Should NOT say "weekly schedule grid" for standard tables.
+        assert!(!result.contains("weekly schedule grid"));
+        // Should list columns.
+        assert!(result.contains("Title | Subject | Duration | Objectives"));
+        // No time slots section.
+        assert!(!result.contains("Time Blocks"));
+        // No recurring elements section.
+        assert!(!result.contains("Recurring Daily Events"));
+        // No HTML skeleton for non-schedule tables.
+        assert!(!result.contains("<table>") || !result.contains("skeleton"));
+    }
+
+    #[test]
+    fn test_format_template_instructions_empty_template() {
+        let template = "{}";
+        let result = format_template_instructions(template);
+
+        // Should still produce the base instructions.
+        assert!(result.contains("FOLLOW THIS EXACTLY"));
+        assert!(result.contains("specific, detailed content"));
+        // No time slots or colors sections.
+        assert!(!result.contains("Time Blocks"));
+        assert!(!result.contains("Color Coding"));
+    }
+
+    #[test]
+    fn test_format_template_instructions_invalid_json() {
+        let template = "not valid json at all";
+        let result = format_template_instructions(template);
+
+        // Should fall back to raw JSON dump.
+        assert!(result.contains("not valid json at all"));
+    }
+
+    #[test]
+    fn test_format_template_instructions_colors_only() {
+        let template = r##"{"color_scheme":{"mappings":[{"color":"#ff0000","category":"header","frequency":10},{"color":"#00ff00","category":"highlight","frequency":20}]},"table_structure":{"layout_type":"","columns":[],"row_categories":[],"column_count":0},"time_slots":[],"content_patterns":{"cell_content_types":[],"has_links":false,"has_rich_formatting":false},"recurring_elements":{"subjects":[],"activities":[]}}"##;
+
+        let result = format_template_instructions(template);
+
+        assert!(result.contains("#ff0000"));
+        assert!(result.contains("#00ff00"));
+        assert!(result.contains("header cells"));
+        assert!(result.contains("highlight cells"));
+    }
+
+    #[test]
+    fn test_format_template_instructions_many_time_slots_skeleton_truncated() {
+        // If there are many time slots, the skeleton only shows first 3.
+        let template = r#"{"color_scheme":{"mappings":[]},"table_structure":{"layout_type":"schedule_grid","columns":["Time","Monday","Tuesday"],"row_categories":[],"column_count":3},"time_slots":["8:00-8:30","8:30-9:00","9:00-9:30","9:30-10:00","10:00-10:30"],"content_patterns":{"cell_content_types":[],"has_links":false,"has_rich_formatting":false},"recurring_elements":{"subjects":[],"activities":[]}}"#;
+
+        let result = format_template_instructions(template);
+
+        // All time slots listed in the Time Blocks section.
+        assert!(result.contains("8:00-8:30"));
+        assert!(result.contains("10:00-10:30"));
+        // HTML skeleton shows first 3 + ellipsis comment.
+        assert!(result.contains("continue for all time slots"));
+    }
 
     #[test]
     fn test_cascade_delete_messages() {
