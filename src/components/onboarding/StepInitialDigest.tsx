@@ -6,7 +6,6 @@ interface Props {
   onNext: () => void;
   onBack: () => void;
   setError: (err: string | null) => void;
-  setProcessing: (processing: boolean) => void;
 }
 
 type ScanState = "idle" | "scanning" | "success" | "empty" | "error" | "success_no_key";
@@ -24,7 +23,6 @@ export function StepInitialDigest({
   onNext,
   onBack,
   setError,
-  setProcessing,
 }: Props) {
   const [scanState, setScanState] = useState<ScanState>("idle");
   const [result, setResult] = useState<string | null>(null);
@@ -68,7 +66,6 @@ export function StepInitialDigest({
   const handleDigest = async () => {
     cancelledRef.current = false;
     setScanState("scanning");
-    setProcessing(true);
     setError(null);
     setErrorDetail(null);
     startProgressSimulation();
@@ -123,9 +120,7 @@ export function StepInitialDigest({
         setError("Scan failed. You can retry or skip for now.");
       }
     } finally {
-      if (!cancelledRef.current) {
-        setProcessing(false);
-      }
+      // no-op: scan state already updated in try/catch
     }
   };
 
@@ -133,7 +128,6 @@ export function StepInitialDigest({
     cancelledRef.current = true;
     stopProgressSimulation();
     setScanState("idle");
-    setProcessing(false);
     setError(null);
     setErrorDetail(null);
 

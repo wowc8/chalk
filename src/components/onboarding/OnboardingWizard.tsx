@@ -6,7 +6,7 @@ import { StepGoogleAuth } from "./StepGoogleAuth";
 import { StepFolderSelect } from "./StepFolderSelect";
 import { StepInitialDigest } from "./StepInitialDigest";
 import { StepComplete } from "./StepComplete";
-import { BatmanOverlay } from "./BatmanOverlay";
+
 import { useTeacherName } from "../../hooks/useTeacherName";
 
 export interface OnboardingStatus {
@@ -41,7 +41,7 @@ export function OnboardingWizard({
 }) {
   const [step, setStep] = useState<Step>("welcome");
   const [direction, setDirection] = useState(1);
-  const [processing, setProcessing] = useState(false);
+
   const [error, setError] = useState<string | null>(null);
   const { name: teacherName, setName: saveTeacherName } = useTeacherName();
 
@@ -101,9 +101,6 @@ export function OnboardingWizard({
         ))}
       </div>
 
-      {/* Batman overlay for processing states */}
-      <AnimatePresence>{processing && <BatmanOverlay />}</AnimatePresence>
-
       {/* Step content */}
       <div className="relative z-10 flex items-center justify-center min-h-screen px-6">
         <AnimatePresence mode="wait" custom={direction}>
@@ -153,7 +150,6 @@ export function OnboardingWizard({
                 onNext={() => goTo("complete")}
                 onBack={() => goTo("folder-select")}
                 setError={setError}
-                setProcessing={setProcessing}
               />
             )}
             {step === "complete" && (
