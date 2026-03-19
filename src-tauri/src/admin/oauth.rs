@@ -564,6 +564,8 @@ pub async fn trigger_initial_digest(
     if embeddings_skipped {
         message.push_str("|embeddings_skipped");
     }
+    // Append the table identification method so the frontend can show a toast.
+    message.push_str(&format!("|table_id:{}", summary.table_id_method));
 
     Ok(message)
 }

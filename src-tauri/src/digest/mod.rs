@@ -48,6 +48,8 @@ pub struct DigestSummary {
     pub total_tables: usize,
     pub total_sections: usize,
     pub results: Vec<DigestResult>,
+    /// How the planning table was identified: "ai", "heuristic", or "none".
+    pub table_id_method: String,
 }
 
 /// Data fetched from the API for a single document, ready to be written to DB.
@@ -59,6 +61,8 @@ struct FetchedDoc {
     /// Pre-computed template schema (via AI or heuristic). Computed during the
     /// async fetch phase so it's ready for the synchronous DB transaction.
     template_schema: Option<TeachingTemplateSchema>,
+    /// How the planning table was identified: "ai", "heuristic", or "none".
+    table_id_method: String,
 }
 
 /// Fetch a Google Doc as HTML via the Drive export API.
@@ -491,21 +495,33 @@ async fn fetch_document(
     let lessons = extract_lessons_from_doc(&html);
 
     // Pre-compute template schema using AI if available, otherwise heuristic.
-    let template_schema = if !html.is_empty() {
-        let schema = match ai_provider {
+    let (template_schema, table_id_method) = if !html.is_empty() {
+        let (schema, method) = match ai_provider {
             Some(provider) => {
                 info!(doc_id, doc_name, "Using AI to identify planning template table");
                 template_extractor::extract_template_with_ai(&html, provider).await
             }
-            None => template_extractor::extract_template(&html),
+            None => {
+                info!(doc_id, doc_name, "No AI provider — using heuristic table identification");
+                (template_extractor::extract_template(&html), "heuristic")
+            }
         };
         if !schema.table_structure.columns.is_empty() {
-            Some(schema)
+            info!(
+                doc_id,
+                doc_name,
+                method,
+                columns = schema.table_structure.columns.join(" | ").as_str(),
+                layout_type = schema.table_structure.layout_type.as_str(),
+                daily_routine_count = schema.daily_routine.len(),
+                "Template extracted — selected table columns"
+            );
+            (Some(schema), method.to_string())
         } else {
-            None
+            (None, "none".to_string())
         }
     } else {
-        None
+        (None, "none".to_string())
     };
 
     Ok(FetchedDoc {
@@ -514,6 +530,7 @@ async fn fetch_document(
         tables_found,
         lessons,
         template_schema,
+        table_id_method,
     })
 }
 
@@ -717,11 +734,19 @@ fn write_digest_results(
         });
     }
 
+    // Pick the table identification method from the first doc that had a template.
+    let table_id_method = fetched_docs
+        .iter()
+        .find(|d| d.template_schema.is_some())
+        .map(|d| d.table_id_method.clone())
+        .unwrap_or_else(|| "none".to_string());
+
     Ok(DigestSummary {
         documents_processed: results.len(),
         total_tables,
         total_sections,
         results,
+        table_id_method,
     })
 }
 
@@ -985,6 +1010,7 @@ pub async fn digest_folder(
                 total_tables: 0,
                 total_sections: 0,
                 results: Vec::new(),
+                table_id_method: "none".to_string(),
             });
         }
 
@@ -1320,6 +1346,7 @@ mod tests {
             total_tables: 5,
             total_sections: 12,
             results: Vec::new(),
+            table_id_method: "ai".to_string(),
         };
         let json = serde_json::to_value(&summary).unwrap();
         assert_eq!(json["documents_processed"], 3);
@@ -1371,6 +1398,7 @@ mod tests {
                     grade_hint: None,
                 }],
                 template_schema: None,
+                table_id_method: "none".into(),
             },
             FetchedDoc {
                 doc_id: "doc2".into(),
@@ -1384,6 +1412,7 @@ mod tests {
                     grade_hint: None,
                 }],
                 template_schema: None,
+                table_id_method: "none".into(),
             },
         ];
 
@@ -1424,6 +1453,7 @@ mod tests {
                 grade_hint: Some("9th".into()),
             }],
             template_schema: None,
+            table_id_method: "heuristic".into(),
         }];
 
         let result = db.with_transaction(|tx| {
