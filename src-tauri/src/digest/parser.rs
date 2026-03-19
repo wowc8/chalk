@@ -18,10 +18,15 @@ pub struct TableRow {
     pub cells: Vec<TableCell>,
 }
 
-/// A single cell in a table row, with extracted plain text.
+/// A single cell in a table row, with both plain text and inner HTML.
 #[derive(Debug, Clone)]
 pub struct TableCell {
+    /// Plain-text content (whitespace-collapsed), used for header matching
+    /// and structural detection.
     pub text: String,
+    /// Inner HTML of the cell, preserving formatting such as bold, italic,
+    /// colors, lists, and hyperlinks.
+    pub html: String,
 }
 
 /// Extract all tables from an HTML document exported by Google Drive.
@@ -75,7 +80,8 @@ pub fn extract_tables(html: &str) -> Vec<ParsedTable> {
                 .select(&cell_sel)
                 .map(|cell| {
                     let text = cell_text(&cell);
-                    TableCell { text }
+                    let html = cell_inner_html(&cell);
+                    TableCell { text, html }
                 })
                 .collect();
 
@@ -105,6 +111,17 @@ fn cell_text(element: &scraper::ElementRef) -> String {
     collect_text(element, &mut parts);
     let raw = parts.join("");
     raw.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Extract the inner HTML of an element, cleaning up Google Docs export
+/// artifacts (e.g. class attributes) while preserving semantic formatting.
+fn cell_inner_html(element: &scraper::ElementRef) -> String {
+    let raw = element.inner_html();
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    trimmed.to_string()
 }
 
 /// Recursively collect text, inserting a space before block-level elements.
@@ -250,5 +267,49 @@ mod tests {
         "#;
         let tables = extract_tables(html);
         assert_eq!(tables[0].rows[0].cells[0].text, "Bold and italic");
+    }
+
+    #[test]
+    fn test_html_field_preserves_formatting() {
+        let html = r#"
+            <table><tr><td><span style="font-weight:bold">Bold</span> and <em>italic</em></td></tr></table>
+        "#;
+        let tables = extract_tables(html);
+        let cell_html = &tables[0].rows[0].cells[0].html;
+        assert!(cell_html.contains("<span"), "HTML should preserve span tags");
+        assert!(cell_html.contains("<em>"), "HTML should preserve em tags");
+        assert!(cell_html.contains("Bold"), "HTML should contain text");
+    }
+
+    #[test]
+    fn test_html_field_preserves_links() {
+        let html = r#"
+            <table><tr><td><a href="https://example.com">Click here</a></td></tr></table>
+        "#;
+        let tables = extract_tables(html);
+        let cell_html = &tables[0].rows[0].cells[0].html;
+        assert!(cell_html.contains("<a "), "HTML should preserve anchor tags");
+        assert!(cell_html.contains("href"), "HTML should preserve href attributes");
+        assert_eq!(tables[0].rows[0].cells[0].text, "Click here");
+    }
+
+    #[test]
+    fn test_html_field_preserves_lists() {
+        let html = r#"
+            <table><tr><td><ul><li>Item 1</li><li>Item 2</li></ul></td></tr></table>
+        "#;
+        let tables = extract_tables(html);
+        let cell_html = &tables[0].rows[0].cells[0].html;
+        assert!(cell_html.contains("<ul>"), "HTML should preserve ul tags");
+        assert!(cell_html.contains("<li>"), "HTML should preserve li tags");
+    }
+
+    #[test]
+    fn test_html_field_empty_cell() {
+        let html = r#"
+            <table><tr><td></td></tr></table>
+        "#;
+        let tables = extract_tables(html);
+        assert_eq!(tables[0].rows[0].cells[0].html, "");
     }
 }

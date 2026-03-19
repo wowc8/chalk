@@ -186,9 +186,9 @@ fn extract_lessons_from_schedule(
     let mut lessons = Vec::new();
 
     for row in &table.rows[1..] {
-        let cells: Vec<String> = row.cells.iter().map(|c| c.text.trim().to_string()).collect();
+        let texts: Vec<String> = row.cells.iter().map(|c| c.text.trim().to_string()).collect();
 
-        let time_slot = cells.get(time_col).map(|s| s.as_str()).unwrap_or("");
+        let time_slot = texts.get(time_col).map(|s| s.as_str()).unwrap_or("");
 
         // Skip rows that are purely structural.
         if is_structural_text(time_slot) {
@@ -196,7 +196,7 @@ fn extract_lessons_from_schedule(
         }
 
         for (col_idx, day_label) in day_columns {
-            let activity = match cells.get(*col_idx) {
+            let activity = match texts.get(*col_idx) {
                 Some(text) if !text.is_empty() => text,
                 _ => continue,
             };
@@ -211,31 +211,44 @@ fn extract_lessons_from_schedule(
                 continue;
             }
 
-            // Build a meaningful title and body.
+            // Build a meaningful title and body using HTML for content.
             let title = activity.clone();
+            let activity_html = row.cells.get(*col_idx)
+                .map(|c| c.html.trim().to_string())
+                .unwrap_or_default();
+
             let mut body_parts = Vec::new();
             if !day_label.is_empty() {
-                body_parts.push(format!("Day: {}", day_label));
+                body_parts.push(format!("<p><strong>Day:</strong> {}</p>", day_label));
             }
-            if !time_slot.is_empty() && !is_time_like(time_slot) {
-                // If the time slot has text that isn't a pure time, include as-is.
-                body_parts.push(format!("Time: {}", time_slot));
-            } else if !time_slot.is_empty() {
-                body_parts.push(format!("Time: {}", time_slot));
+            if !time_slot.is_empty() {
+                body_parts.push(format!("<p><strong>Time:</strong> {}</p>", time_slot));
+            }
+
+            // Include the cell's formatted HTML content.
+            if !activity_html.is_empty() {
+                body_parts.push(activity_html);
             }
 
             // Gather any extra context from non-day, non-time columns.
-            for (j, cell_val) in cells.iter().enumerate() {
+            for (j, cell_text) in texts.iter().enumerate() {
                 if j == time_col || day_columns.iter().any(|(ci, _)| *ci == j) {
                     continue;
                 }
-                if !cell_val.is_empty() && !is_time_like(cell_val) && !is_structural_text(cell_val) {
+                if !cell_text.is_empty() && !is_time_like(cell_text) && !is_structural_text(cell_text) {
                     let header_label = headers.get(j).map(|h| h.trim()).unwrap_or("Note");
-                    body_parts.push(format!("{}: {}", capitalize_header(header_label), cell_val));
+                    let cell_html = row.cells.get(j)
+                        .map(|c| c.html.trim().to_string())
+                        .unwrap_or_default();
+                    body_parts.push(format!(
+                        "<p><strong>{}:</strong> {}</p>",
+                        capitalize_header(header_label),
+                        if cell_html.is_empty() { cell_text.clone() } else { cell_html }
+                    ));
                 }
             }
 
-            let content = body_parts.join("\n\n");
+            let content = body_parts.join("");
 
             lessons.push(ExtractedLesson {
                 title,
@@ -302,12 +315,12 @@ fn extract_lesson_from_row(
     headers: &[String],
     row: &parser::TableRow,
 ) -> Option<ExtractedLesson> {
-    let cells: Vec<String> = row.cells.iter().map(|c| c.text.trim().to_string()).collect();
+    let texts: Vec<String> = row.cells.iter().map(|c| c.text.trim().to_string()).collect();
 
-    // Build a header-value map for flexible column matching.
+    // Build a header-value map for flexible column matching (uses plain text).
     let field_map: Vec<(&str, &str)> = headers
         .iter()
-        .zip(cells.iter())
+        .zip(texts.iter())
         .map(|(h, v)| (h.as_str(), v.as_str()))
         .collect();
 
@@ -316,23 +329,28 @@ fn extract_lesson_from_row(
 
     if title.is_empty() {
         // If no title column, try using the first non-empty cell as the title.
-        if let Some(first_non_empty) = cells.iter().find(|c| !c.is_empty()) {
+        if let Some((first_idx, first_non_empty)) = texts.iter().enumerate().find(|(_, c)| !c.is_empty()) {
             // Skip time-only and structural entries.
             if is_time_like(first_non_empty) || is_structural_text(first_non_empty) {
                 return None;
             }
 
-            let content = cells
+            // Build content using HTML from non-title cells.
+            let content_parts: Vec<String> = row.cells
                 .iter()
-                .filter(|c| !c.is_empty() && *c != first_non_empty)
-                .filter(|c| !is_time_like(c))
-                .cloned()
-                .collect::<Vec<_>>()
-                .join("\n\n");
+                .enumerate()
+                .filter(|(i, c)| *i != first_idx && !c.text.trim().is_empty() && !is_time_like(c.text.trim()))
+                .map(|(_, c)| {
+                    let html = c.html.trim().to_string();
+                    if html.is_empty() { c.text.trim().to_string() } else { html }
+                })
+                .collect();
 
-            if content.is_empty() {
+            if content_parts.is_empty() {
                 return None;
             }
+
+            let content = content_parts.join("");
 
             return Some(ExtractedLesson {
                 title: first_non_empty.clone(),
@@ -350,20 +368,32 @@ fn extract_lesson_from_row(
         return None;
     }
 
-    // Build rich content from all non-title columns.
+    // Build rich content from all non-title columns, using HTML for formatting.
     let mut content_parts: Vec<String> = Vec::new();
-    for (header, value) in &field_map {
-        if value.is_empty() {
+    for (idx, (header, _text_value)) in field_map.iter().enumerate() {
+        if _text_value.is_empty() {
             continue;
         }
         let h = *header;
         if is_title_header(h) {
             continue;
         }
-        content_parts.push(format!("{}: {}", capitalize_header(h), value));
+        let cell_html = row.cells.get(idx)
+            .map(|c| c.html.trim().to_string())
+            .unwrap_or_default();
+        let value_html = if cell_html.is_empty() {
+            _text_value.to_string()
+        } else {
+            cell_html
+        };
+        content_parts.push(format!(
+            "<p><strong>{}:</strong> {}</p>",
+            capitalize_header(h),
+            value_html
+        ));
     }
 
-    let content = content_parts.join("\n\n");
+    let content = content_parts.join("");
 
     // A plan with a title but no body content is not useful — the user would
     // see an empty editor when clicking it.
@@ -1020,10 +1050,10 @@ mod tests {
         let headers = vec!["title".into(), "grade".into(), "subject".into(), "materials".into()];
         let row = parser::TableRow {
             cells: vec![
-                parser::TableCell { text: "Fractions".into() },
-                parser::TableCell { text: "5th".into() },
-                parser::TableCell { text: "Math".into() },
-                parser::TableCell { text: "Worksheets, manipulatives".into() },
+                parser::TableCell { html: String::new(), text: "Fractions".into() },
+                parser::TableCell { html: String::new(), text: "5th".into() },
+                parser::TableCell { html: String::new(), text: "Math".into() },
+                parser::TableCell { html: String::new(), text: "Worksheets, manipulatives".into() },
             ],
         };
 
@@ -1039,9 +1069,9 @@ mod tests {
         let headers = vec!["date".into(), "activity".into(), "notes".into()];
         let row = parser::TableRow {
             cells: vec![
-                parser::TableCell { text: "March 1".into() },
-                parser::TableCell { text: "Lab experiment".into() },
-                parser::TableCell { text: "Bring goggles".into() },
+                parser::TableCell { html: String::new(), text: "March 1".into() },
+                parser::TableCell { html: String::new(), text: "Lab experiment".into() },
+                parser::TableCell { html: String::new(), text: "Bring goggles".into() },
             ],
         };
 
@@ -1380,10 +1410,12 @@ mod tests {
         assert!(titles.contains(&"Science"));
         assert!(titles.contains(&"Art"));
 
-        // Each lesson body includes the day and time context.
+        // Each lesson body includes the day and time context (now as HTML).
         let reading = lessons.iter().find(|l| l.title == "Reading").unwrap();
-        assert!(reading.content.contains("Day: Tuesday"));
-        assert!(reading.content.contains("Time: 9:00-9:30"));
+        assert!(reading.content.contains("Day:"), "Should contain day label");
+        assert!(reading.content.contains("Tuesday"), "Should contain day name");
+        assert!(reading.content.contains("Time:"), "Should contain time label");
+        assert!(reading.content.contains("9:00-9:30"), "Should contain time range");
     }
 
     #[test]
@@ -1421,8 +1453,8 @@ mod tests {
         let headers = vec!["date".into(), "notes".into()];
         let row = parser::TableRow {
             cells: vec![
-                parser::TableCell { text: "9:00-9:30".into() },
-                parser::TableCell { text: "".into() },
+                parser::TableCell { html: String::new(), text: "9:00-9:30".into() },
+                parser::TableCell { html: String::new(), text: "".into() },
             ],
         };
         assert!(extract_lesson_from_row(&headers, &row).is_none());
@@ -1433,8 +1465,8 @@ mod tests {
         let headers = vec!["section".into(), "details".into()];
         let row = parser::TableRow {
             cells: vec![
-                parser::TableCell { text: "Notes:".into() },
-                parser::TableCell { text: "".into() },
+                parser::TableCell { html: String::new(), text: "Notes:".into() },
+                parser::TableCell { html: String::new(), text: "".into() },
             ],
         };
         assert!(extract_lesson_from_row(&headers, &row).is_none());
@@ -1445,7 +1477,7 @@ mod tests {
         // A plan with a title but empty body should be filtered out.
         let headers = vec!["title".into()];
         let row = parser::TableRow {
-            cells: vec![parser::TableCell { text: "Lonely Title".into() }],
+            cells: vec![parser::TableCell { html: String::new(), text: "Lonely Title".into() }],
         };
         assert!(extract_lesson_from_row(&headers, &row).is_none());
     }
