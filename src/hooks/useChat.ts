@@ -130,7 +130,12 @@ export function useChat(
               context_plan_ids: event.payload.context_plan_ids,
               created_at: new Date().toISOString(),
             };
-            setMessages((prev) => [...prev, assistantMsg]);
+            setMessages((prev) => {
+              // Deduplicate: the useEffect that fetches messages on conversationId
+              // change may have already loaded this message from the backend.
+              if (prev.some((m) => m.id === assistantMsg.id)) return prev;
+              return [...prev, assistantMsg];
+            });
             setStreamingContent(null);
             setIsLoading(false);
           }

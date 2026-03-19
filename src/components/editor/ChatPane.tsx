@@ -27,13 +27,21 @@ interface ChatPaneProps {
   isLoading?: boolean;
 }
 
+/** Parse a created_at string that may be ISO 8601 or SQLite datetime format. */
+function parseCreatedAt(raw: string): Date {
+  // Already ISO with "T" (e.g. "2026-03-18T10:30:00.000Z") — parse directly.
+  if (raw.includes("T")) return new Date(raw);
+  // SQLite format "YYYY-MM-DD HH:MM:SS" — insert T separator and UTC suffix.
+  return new Date(raw.replace(" ", "T") + "Z");
+}
+
 /** Convert backend message to display format. */
 function toDisplayMessage(msg: BackendMessage): ChatMessage {
   return {
     id: msg.id,
     role: msg.role as "user" | "assistant",
     content: msg.content,
-    timestamp: new Date(msg.created_at + "Z"),
+    timestamp: parseCreatedAt(msg.created_at),
   };
 }
 
