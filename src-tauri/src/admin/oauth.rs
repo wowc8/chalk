@@ -517,7 +517,12 @@ pub async fn trigger_initial_digest(
     let embeddings_skipped = if summary.total_lessons > 0 {
         match state.db.get_setting("openai_api_key") {
             Ok(Some(api_key)) if !api_key.is_empty() => {
-                let client = crate::rag::embeddings::EmbeddingClient::new(api_key);
+                let base_url = state
+                    .db
+                    .get_setting("openai_base_url")
+                    .unwrap_or(None)
+                    .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+                let client = crate::rag::embeddings::EmbeddingClient::with_base_url(api_key, base_url);
                 let plans = state
                     .db
                     .list_plans_without_embeddings()

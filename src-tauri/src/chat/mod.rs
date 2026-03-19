@@ -391,7 +391,7 @@ pub async fn send_chat_message(
         .unwrap_or_else(|| "gpt-4o-mini".to_string());
 
     // RAG: retrieve relevant plans.
-    let embedding_client = EmbeddingClient::new(api_key.clone());
+    let embedding_client = EmbeddingClient::with_base_url(api_key.clone(), base_url.clone());
     let context_plans = retrieval::retrieve_relevant_plans(db, &embedding_client, &input.message)
         .await
         .unwrap_or_default(); // Don't fail the whole request if RAG fails.
@@ -502,7 +502,7 @@ pub async fn send_chat_message_stream(
         .unwrap_or_else(|| "gpt-4o-mini".to_string());
 
     // RAG: retrieve relevant plans.
-    let embedding_client = EmbeddingClient::new(api_key.clone());
+    let embedding_client = EmbeddingClient::with_base_url(api_key.clone(), base_url.clone());
     let context_plans = retrieval::retrieve_relevant_plans(db, &embedding_client, &input.message)
         .await
         .unwrap_or_default();
@@ -652,6 +652,11 @@ pub async fn vectorize_plan(
         .map_err(|e| format!("{e}"))?
         .ok_or_else(|| "OpenAI API key not configured".to_string())?;
 
+    let base_url = db
+        .get_setting("openai_base_url")
+        .map_err(|e| format!("{e}"))?
+        .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+
     let plan = db.get_lesson_plan(&plan_id).map_err(|e| format!("{e}"))?;
 
     let embedding_text = crate::rag::chunker::create_embedding_text(
@@ -660,7 +665,7 @@ pub async fn vectorize_plan(
         plan.learning_objectives.as_deref(),
     );
 
-    let client = EmbeddingClient::new(api_key);
+    let client = EmbeddingClient::with_base_url(api_key, base_url);
     let embedding = client
         .embed_one(&embedding_text)
         .await
@@ -683,6 +688,11 @@ pub async fn vectorize_all_plans(state: tauri::State<'_, AppState>) -> Result<u3
         .map_err(|e| format!("{e}"))?
         .ok_or_else(|| "OpenAI API key not configured".to_string())?;
 
+    let base_url = db
+        .get_setting("openai_base_url")
+        .map_err(|e| format!("{e}"))?
+        .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+
     // Get all plans that don't have embeddings.
     let plans_without_embeddings = db
         .list_plans_without_embeddings()
@@ -692,7 +702,7 @@ pub async fn vectorize_all_plans(state: tauri::State<'_, AppState>) -> Result<u3
         return Ok(0);
     }
 
-    let client = EmbeddingClient::new(api_key);
+    let client = EmbeddingClient::with_base_url(api_key, base_url);
     let mut count = 0u32;
 
     for plan in &plans_without_embeddings {
@@ -721,8 +731,12 @@ pub async fn vectorize_all_plans(state: tauri::State<'_, AppState>) -> Result<u3
 }
 
 /// Save AI configuration settings.
+/// When an API key is saved, automatically vectorizes any lesson plans that
+/// don't have embeddings yet — this covers the case where plans were imported
+/// before the key was configured.
 #[tauri::command]
-pub fn save_ai_config(
+pub async fn save_ai_config(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     api_key: Option<String>,
     base_url: Option<String>,
@@ -730,17 +744,68 @@ pub fn save_ai_config(
 ) -> Result<(), String> {
     let db = &state.db;
 
-    if let Some(key) = api_key {
-        db.set_setting("openai_api_key", &key)
+    let key_was_set = api_key.is_some();
+
+    if let Some(ref key) = api_key {
+        db.set_setting("openai_api_key", key)
             .map_err(|e| format!("{e}"))?;
     }
-    if let Some(url) = base_url {
-        db.set_setting("openai_base_url", &url)
+    if let Some(ref url) = base_url {
+        db.set_setting("openai_base_url", url)
             .map_err(|e| format!("{e}"))?;
     }
-    if let Some(m) = model {
-        db.set_setting("chat_model", &m)
+    if let Some(ref m) = model {
+        db.set_setting("chat_model", m)
             .map_err(|e| format!("{e}"))?;
+    }
+
+    // When an API key is saved, kick off background vectorization for any
+    // plans that were imported without embeddings (e.g. before the key was set).
+    if key_was_set {
+        let app_handle = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let state = app_handle.state::<AppState>();
+            let db = &state.db;
+
+            let api_key = match db.get_setting("openai_api_key") {
+                Ok(Some(k)) if !k.is_empty() => k,
+                _ => return,
+            };
+            let base_url = db
+                .get_setting("openai_base_url")
+                .unwrap_or(None)
+                .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+
+            let plans = match db.list_plans_without_embeddings() {
+                Ok(p) if !p.is_empty() => p,
+                _ => return,
+            };
+
+            tracing::info!(count = plans.len(), "Auto-vectorizing plans after API key saved");
+
+            let client = EmbeddingClient::with_base_url(api_key, base_url);
+            let mut vectorized = 0u32;
+
+            for plan in &plans {
+                let text = crate::rag::chunker::create_embedding_text(
+                    &plan.title,
+                    &plan.content,
+                    plan.learning_objectives.as_deref(),
+                );
+                match client.embed_one(&text).await {
+                    Ok(embedding) => {
+                        if db.upsert_embedding(&plan.id, &embedding).is_ok() {
+                            vectorized += 1;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(plan_id = %plan.id, error = %e, "Auto-vectorize failed for plan");
+                    }
+                }
+            }
+
+            tracing::info!(vectorized, total = plans.len(), "Auto-vectorization complete");
+        });
     }
 
     Ok(())
