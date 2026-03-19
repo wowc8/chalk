@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useMemo, type MutableRefObject } from "rea
 import { motion, AnimatePresence } from "framer-motion";
 import { useChat, type ChatMessage as BackendMessage } from "../../hooks/useChat";
 import { useTeacherName } from "../../hooks/useTeacherName";
-import { markdownToHtml, stripEditorMarkers } from "../../utils/markdown";
+import { markdownToHtml, stripEditorMarkers, parseAiResponse } from "../../utils/markdown";
 
 export interface ChatMessage {
   id: string;
@@ -53,10 +53,14 @@ function MessageBubble({
 }) {
   const isUser = message.role === "user";
 
-  const renderedHtml = useMemo(
-    () => (isUser ? null : markdownToHtml(message.content)),
-    [isUser, message.content]
-  );
+  const renderedHtml = useMemo(() => {
+    if (isUser) return null;
+    // Persisted assistant messages may contain raw <<<EDITOR_UPDATE>>> markers
+    // and HTML (the backend stores the full AI response). Strip them so only
+    // the chat-visible summary is rendered.
+    const { chatContent } = parseAiResponse(message.content);
+    return markdownToHtml(chatContent);
+  }, [isUser, message.content]);
 
   return (
     <motion.div
@@ -151,8 +155,9 @@ function StreamingBubble({ content }: { content: string }) {
   const stripped = useMemo(() => stripEditorMarkers(content), [content]);
   const renderedHtml = useMemo(() => markdownToHtml(stripped.chat), [stripped.chat]);
 
-  // When editor content is streaming with nothing to show in chat, show a loading indicator.
-  if (stripped.isEditorStreaming && !stripped.chat) {
+  // When editor content is streaming (or detected via HTML heuristic) with
+  // nothing to show in chat, show a loading indicator.
+  if (stripped.isEditorStreaming && !stripped.chat.trim()) {
     return <EditorLoadingIndicator />;
   }
 
