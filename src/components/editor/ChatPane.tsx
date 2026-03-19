@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useMemo, type MutableRefObject } from "rea
 import { motion, AnimatePresence } from "framer-motion";
 import { useChat, type ChatMessage as BackendMessage } from "../../hooks/useChat";
 import { useTeacherName } from "../../hooks/useTeacherName";
-import { markdownToHtml } from "../../utils/markdown";
+import { markdownToHtml, stripEditorMarkers } from "../../utils/markdown";
 
 export interface ChatMessage {
   id: string;
@@ -18,8 +18,8 @@ interface ChatPaneProps {
   planTitle?: string;
   /** Ref to current editor content (read at send time, avoids stale closures). */
   planContentRef?: MutableRefObject<string>;
-  /** Callback to apply AI-suggested content to the editor. */
-  onApplyToEditor?: (content: string) => void;
+  /** Callback fired when the AI writes content directly to the editor. */
+  onEditorUpdate?: (html: string) => void;
   /** External messages (for backwards compatibility). If provided, uses these instead of the hook. */
   messages?: ChatMessage[];
   /** External send handler (for backwards compatibility). */
@@ -48,26 +48,15 @@ function toDisplayMessage(msg: BackendMessage): ChatMessage {
 
 function MessageBubble({
   message,
-  onApply,
 }: {
   message: ChatMessage;
-  onApply?: (content: string) => void;
 }) {
   const isUser = message.role === "user";
-  const [applied, setApplied] = useState(false);
 
   const renderedHtml = useMemo(
     () => (isUser ? null : markdownToHtml(message.content)),
     [isUser, message.content]
   );
-
-  const handleApply = () => {
-    if (onApply) {
-      onApply(renderedHtml ?? markdownToHtml(message.content));
-      setApplied(true);
-      setTimeout(() => setApplied(false), 2000);
-    }
-  };
 
   return (
     <motion.div
@@ -90,30 +79,15 @@ function MessageBubble({
             dangerouslySetInnerHTML={{ __html: renderedHtml! }}
           />
         )}
-        <div className="flex items-center justify-between mt-1.5">
-          <div
-            className={`text-[10px] ${
-              isUser ? "text-chalk-blue/40" : "text-chalk-muted/40"
-            }`}
-          >
-            {message.timestamp.toLocaleTimeString(undefined, {
-              hour: "numeric",
-              minute: "2-digit",
-            })}
-          </div>
-          {!isUser && onApply && (
-            <button
-              onClick={handleApply}
-              className={`text-[10px] px-1.5 py-0.5 rounded transition-colors ${
-                applied
-                  ? "text-chalk-green/80 bg-chalk-green/10"
-                  : "text-chalk-muted/40 hover:text-chalk-blue hover:bg-chalk-blue/10"
-              }`}
-              title="Apply this content to the editor"
-            >
-              {applied ? "Applied!" : "Apply to Editor"}
-            </button>
-          )}
+        <div
+          className={`text-[10px] mt-1.5 ${
+            isUser ? "text-chalk-blue/40" : "text-chalk-muted/40"
+          }`}
+        >
+          {message.timestamp.toLocaleTimeString(undefined, {
+            hour: "numeric",
+            minute: "2-digit",
+          })}
         </div>
       </div>
     </motion.div>
@@ -144,7 +118,8 @@ function TypingIndicator() {
 }
 
 function StreamingBubble({ content }: { content: string }) {
-  const renderedHtml = useMemo(() => markdownToHtml(content), [content]);
+  const chatOnly = useMemo(() => stripEditorMarkers(content), [content]);
+  const renderedHtml = useMemo(() => markdownToHtml(chatOnly), [chatOnly]);
 
   return (
     <motion.div
@@ -210,13 +185,13 @@ export function ChatPane({
   planId,
   planTitle,
   planContentRef,
-  onApplyToEditor,
+  onEditorUpdate,
   messages: externalMessages,
   onSendMessage: externalSendMessage,
   isLoading: externalLoading,
 }: ChatPaneProps) {
   // Use the integrated chat hook when no external messages are provided.
-  const chat = useChat(planId, planTitle, planContentRef);
+  const chat = useChat(planId, planTitle, planContentRef, onEditorUpdate);
   const isIntegrated = !externalMessages && !externalSendMessage;
   const { name: teacherName } = useTeacherName();
 
@@ -326,7 +301,6 @@ export function ChatPane({
             <MessageBubble
               key={msg.id}
               message={msg}
-              onApply={msg.role === "assistant" && onApplyToEditor ? onApplyToEditor : undefined}
             />
           ))}
           {loading && streamingContent ? (

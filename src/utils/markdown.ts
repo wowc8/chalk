@@ -47,3 +47,67 @@ export function markdownToHtml(md: string): string {
     return md;
   }
 }
+
+// ── Editor-update markers ──────────────────────────────────
+
+const EDITOR_OPEN = "<<<EDITOR_UPDATE>>>";
+const EDITOR_CLOSE = "<<<END_EDITOR_UPDATE>>>";
+
+export interface ParsedAiResponse {
+  /** Content to display in the chat bubble (markdown string). */
+  chatContent: string;
+  /** HTML to write directly into the TipTap editor, or null if no editor update. */
+  editorHtml: string | null;
+}
+
+/**
+ * Split an AI response into chat-visible text and editor-bound HTML.
+ *
+ * The AI is instructed to wrap any editor content with:
+ *   <<<EDITOR_UPDATE>>> ... <<<END_EDITOR_UPDATE>>>
+ *
+ * Everything outside those markers is treated as the chat summary.
+ */
+export function parseAiResponse(raw: string): ParsedAiResponse {
+  const openIdx = raw.indexOf(EDITOR_OPEN);
+  const closeIdx = raw.indexOf(EDITOR_CLOSE);
+
+  if (openIdx === -1 || closeIdx === -1 || closeIdx <= openIdx) {
+    // No valid markers — treat entire response as chat content.
+    return { chatContent: raw, editorHtml: null };
+  }
+
+  const editorHtml = raw
+    .slice(openIdx + EDITOR_OPEN.length, closeIdx)
+    .trim();
+
+  // Chat = everything before the opening marker + everything after the closing marker.
+  const before = raw.slice(0, openIdx).trim();
+  const after = raw.slice(closeIdx + EDITOR_CLOSE.length).trim();
+  const chatContent = [before, after].filter(Boolean).join("\n\n");
+
+  return {
+    chatContent: chatContent || "(Updated the lesson plan in the editor.)",
+    editorHtml: editorHtml || null,
+  };
+}
+
+/**
+ * Strip editor-update markers from a streaming string so the chat bubble
+ * only shows the conversational portion while streaming is in progress.
+ */
+export function stripEditorMarkers(streaming: string): string {
+  // If we haven't seen the open marker yet, everything is chat content.
+  const openIdx = streaming.indexOf(EDITOR_OPEN);
+  if (openIdx === -1) return streaming;
+
+  const before = streaming.slice(0, openIdx).trim();
+
+  // If the close marker hasn't arrived yet, just show what's before the open marker.
+  const closeIdx = streaming.indexOf(EDITOR_CLOSE);
+  if (closeIdx === -1) return before || "Writing to editor...";
+
+  // Both markers present — show chat portions only.
+  const after = streaming.slice(closeIdx + EDITOR_CLOSE.length).trim();
+  return [before, after].filter(Boolean).join("\n\n") || "Writing to editor...";
+}
