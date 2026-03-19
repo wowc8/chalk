@@ -155,9 +155,10 @@ function StreamingBubble({ content }: { content: string }) {
   const stripped = useMemo(() => stripEditorMarkers(content), [content]);
   const renderedHtml = useMemo(() => markdownToHtml(stripped.chat), [stripped.chat]);
 
-  // When editor content is streaming (or detected via HTML heuristic) with
-  // nothing to show in chat, show a loading indicator.
-  if (stripped.isEditorStreaming && !stripped.chat.trim()) {
+  // When editor content is streaming (detected via markers or HTML heuristic),
+  // suppress ALL chat content and show only the loading indicator. HTML tokens
+  // arrive before the marker text and leak into the chat bubble otherwise.
+  if (stripped.isEditorStreaming) {
     return <EditorLoadingIndicator />;
   }
 
@@ -170,27 +171,11 @@ function StreamingBubble({ content }: { content: string }) {
       <div className="max-w-[85%] px-3.5 py-2.5 rounded-xl text-sm leading-relaxed bg-chalk-board-dark/80 border border-chalk-white/8 text-chalk-dust">
         <div className="chat-markdown">
           <span dangerouslySetInnerHTML={{ __html: renderedHtml }} />
-          {stripped.isEditorStreaming ? (
-            <div className="flex items-center gap-2 mt-2 pt-2 border-t border-chalk-white/5">
-              <div className="flex gap-1">
-                {[0, 1, 2].map((i) => (
-                  <motion.div
-                    key={i}
-                    className="w-1 h-1 rounded-full bg-chalk-blue/60"
-                    animate={{ opacity: [0.3, 1, 0.3] }}
-                    transition={{ duration: 1.4, repeat: Infinity, delay: i * 0.2 }}
-                  />
-                ))}
-              </div>
-              <span className="text-[11px] text-chalk-muted/50">Writing to editor...</span>
-            </div>
-          ) : (
-            <motion.span
-              animate={{ opacity: [1, 0] }}
-              transition={{ duration: 0.5, repeat: Infinity }}
-              className="inline-block w-0.5 h-4 bg-chalk-blue/60 ml-0.5 align-text-bottom"
-            />
-          )}
+          <motion.span
+            animate={{ opacity: [1, 0] }}
+            transition={{ duration: 0.5, repeat: Infinity }}
+            className="inline-block w-0.5 h-4 bg-chalk-blue/60 ml-0.5 align-text-bottom"
+          />
         </div>
       </div>
     </motion.div>
