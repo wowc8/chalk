@@ -80,7 +80,7 @@ export function StepWelcome({ onNext, onSkip, onRestore }: Props) {
             if (e.key === "Enter") handleNext();
           }}
           placeholder="Your first name"
-          className="w-full max-w-xs mx-auto block px-4 py-2.5 bg-chalk-board-dark/60 border border-chalk-white/8 rounded-lg text-sm text-chalk-white placeholder-chalk-muted focus:outline-none focus:border-chalk-blue/40 transition-colors text-center"
+          className="w-full max-w-xs mx-auto block px-4 py-2.5 bg-chalk-board-dark/60 border border-chalk-white/8 rounded-lg text-sm text-chalk-white caret-chalk-white placeholder-chalk-muted focus:outline-none focus:border-chalk-blue/40 transition-colors text-center"
           autoFocus
         />
       </motion.div>
