@@ -167,47 +167,71 @@ pub async fn identify_planning_table_with_ai(
 ///
 /// This is the preferred entry point during digest when an AI provider is
 /// available. Falls back to heuristic scoring if the AI call fails.
+/// Returns `(schema, method)` where method is `"ai"` or `"heuristic"`.
 pub async fn extract_template_with_ai(
     html: &str,
     provider: &dyn AiProvider,
-) -> TeachingTemplateSchema {
+) -> (TeachingTemplateSchema, &'static str) {
     let tables = parser::extract_tables(html);
     if tables.is_empty() {
-        return TeachingTemplateSchema::default();
+        return (TeachingTemplateSchema::default(), "none");
     }
 
     // Try AI identification first.
     let ai_result = if tables.len() > 1 {
         match identify_planning_table_with_ai(provider, &tables).await {
-            Ok(id) => Some(id),
+            Ok(id) => {
+                info!(
+                    table_index = id.table_index,
+                    layout_type = id.layout_type.as_str(),
+                    column_semantic = id.column_semantic.as_str(),
+                    row_semantic = id.row_semantic.as_str(),
+                    "AI successfully identified planning table"
+                );
+                Some(id)
+            }
             Err(e) => {
-                warn!(error = %e, "AI table identification failed — falling back to heuristic");
+                warn!(
+                    error = %e,
+                    table_count = tables.len(),
+                    "AI table identification FAILED — falling back to heuristic scoring. \
+                     This may select the wrong table if archive tables are present."
+                );
                 None
             }
         }
     } else {
-        // Only one table — no need to ask the AI which one.
+        info!("Only 1 table in document — skipping AI identification");
         None
     };
 
+    let method = if ai_result.is_some() { "ai" } else { "heuristic" };
+
     let color_scheme = extract_colors(html);
     let table_structure = match &ai_result {
-        Some(ai_id) => extract_table_structure_with_ai(&tables, ai_id),
-        None => extract_table_structure(&tables),
+        Some(ai_id) => {
+            info!(method = "ai", "Building table structure from AI-identified table");
+            extract_table_structure_with_ai(&tables, ai_id)
+        }
+        None => {
+            info!(method = "heuristic", "Building table structure from heuristic scoring");
+            extract_table_structure(&tables)
+        }
     };
     let time_slots = extract_time_slots(&tables);
     let content_patterns = extract_content_patterns(html, &tables);
     let recurring_elements = extract_recurring_elements(&tables);
     let daily_routine = extract_daily_routine(&tables);
 
-    TeachingTemplateSchema {
+    let schema = TeachingTemplateSchema {
         color_scheme,
         table_structure,
         time_slots,
         content_patterns,
         recurring_elements,
         daily_routine,
-    }
+    };
+    (schema, method)
 }
 
 /// Extract a teaching template schema from the raw HTML of a Google Doc.
@@ -420,18 +444,37 @@ fn score_planning_table(table: &ParsedTable) -> i32 {
 
     // Penalty: headers contain year ranges (e.g., "2022-2023", "2023/2024").
     // These are reference/archive tables, not planning templates.
+    // Use aggressive penalties — archive tables must NEVER win over real planning tables.
+    let mut archive_penalty_count = 0;
     for header in &header_lower {
         if contains_year_range(header) {
-            score -= 40;
+            score -= 100;
+            archive_penalty_count += 1;
         }
         // Penalty: headers like "LP", "Lesson Plan" followed by year.
         if header.contains("lp ") && header.chars().any(|c| c.is_ascii_digit()) {
-            score -= 30;
+            score -= 80;
+            archive_penalty_count += 1;
         }
         // Penalty: curriculum name columns (e.g., "eureka math").
         if header.contains("eureka") || header.contains("curriculum") || header.contains("edition") {
-            score -= 20;
+            score -= 50;
+            archive_penalty_count += 1;
         }
+        // Penalty: headers that are just a bare 4-digit year (e.g., "2024", "2025").
+        if header.trim().len() == 4 && header.trim().chars().all(|c| c.is_ascii_digit()) {
+            let year: u32 = header.trim().parse().unwrap_or(0);
+            if (2000..=2099).contains(&year) {
+                score -= 60;
+                archive_penalty_count += 1;
+            }
+        }
+    }
+
+    // If the majority of headers triggered archive penalties, this is almost certainly
+    // an archive/reference table — apply an overwhelming additional penalty.
+    if archive_penalty_count > 0 && archive_penalty_count * 2 >= headers.len() {
+        score -= 500;
     }
 
     // Penalty: very few columns (1-2) — unlikely to be a plan grid.
@@ -456,6 +499,24 @@ fn extract_table_structure(tables: &[ParsedTable]) -> TableStructure {
     }
 
     // Score each table and pick the best candidate for a planning template.
+    // Log all scores so we can debug table selection issues.
+    for (i, table) in tables.iter().enumerate() {
+        let score = score_planning_table(table);
+        let headers: Vec<String> = table
+            .rows
+            .first()
+            .map(|r| r.cells.iter().map(|c| c.text.trim().to_string()).collect())
+            .unwrap_or_default();
+        info!(
+            table_index = i,
+            score = score,
+            rows = table.rows.len(),
+            cols = headers.len(),
+            headers = headers.join(" | ").as_str(),
+            "Heuristic table score"
+        );
+    }
+
     let main_table = tables
         .iter()
         .max_by_key(|t| score_planning_table(t))
@@ -1460,6 +1521,77 @@ mod tests {
         assert!(!structure.columns.contains(&"LP 2022-2023".to_string()));
     }
 
+    #[test]
+    fn test_archive_table_with_many_rows_never_wins() {
+        // Even with 30+ rows, an archive table must never beat a small schedule grid.
+        let mut archive_rows = String::new();
+        for i in 1..=35 {
+            archive_rows.push_str(&format!(
+                "<tr><td>Unit {i}</td><td>Module {i}</td><td>Chapter {i}</td></tr>\n"
+            ));
+        }
+        let html = format!(
+            r#"<html><body>
+            <table>
+                <tr><th>LP 2022-2023</th><th>LP 2023/2024</th><th>Eureka Math</th></tr>
+                {archive_rows}
+            </table>
+            <table>
+                <tr><th>Time</th><th>Monday</th><th>Tuesday</th><th>Wednesday</th><th>Thursday</th><th>Friday</th></tr>
+                <tr><td>8:15-9:00</td><td>Math</td><td>Reading</td><td>Math</td><td>Reading</td><td>Math</td></tr>
+            </table>
+        </body></html>"#
+        );
+
+        let tables = parser::extract_tables(&html);
+        assert_eq!(tables.len(), 2);
+
+        let archive_score = score_planning_table(&tables[0]);
+        let schedule_score = score_planning_table(&tables[1]);
+        assert!(
+            schedule_score > archive_score,
+            "Schedule grid (score={}) MUST beat archive table (score={}) even with 35 rows",
+            schedule_score,
+            archive_score
+        );
+
+        let structure = extract_table_structure(&tables);
+        assert_eq!(structure.layout_type, "schedule_grid");
+        assert!(structure.columns.contains(&"Monday".to_string()));
+    }
+
+    #[test]
+    fn test_heuristic_selects_correct_table_with_daily_routine() {
+        // When both archive and schedule tables exist, daily routine should come
+        // from the schedule table (which has day-of-week columns).
+        let html = r#"<html><body>
+            <table>
+                <tr><th>LP 2022-2023</th><th>LP 2023/2024</th><th>Eureka Math</th></tr>
+                <tr><td>Unit 1</td><td>Module 1</td><td>Chapter 1</td></tr>
+            </table>
+            <table>
+                <tr><th>Time</th><th>Monday</th><th>Tuesday</th><th>Wednesday</th><th>Thursday</th><th>Friday</th></tr>
+                <tr><td>8:00-8:30</td><td>Breakfast</td><td>Breakfast</td><td>Breakfast</td><td>Breakfast</td><td>Breakfast</td></tr>
+                <tr><td>8:30-9:15</td><td>Math</td><td>Reading</td><td>Math</td><td>Reading</td><td>Math</td></tr>
+                <tr><td>11:00-11:30</td><td>Lunch</td><td>Lunch</td><td>Lunch</td><td>Lunch</td><td>Lunch</td></tr>
+                <tr><td>11:30-12:00</td><td>Recess</td><td>Recess</td><td>Recess</td><td>Recess</td><td>Recess</td></tr>
+            </table>
+        </body></html>"#;
+
+        let template = extract_template(html);
+
+        // Template should have schedule grid columns, not archive columns.
+        assert_eq!(template.table_structure.layout_type, "schedule_grid");
+        assert!(template.table_structure.columns.contains(&"Monday".to_string()));
+        assert!(!template.table_structure.columns.iter().any(|c| c.contains("2022")));
+
+        // Daily routine should be extracted from the schedule table.
+        let routine_names: Vec<&str> = template.daily_routine.iter().map(|e| e.name.as_str()).collect();
+        assert!(routine_names.contains(&"Breakfast"), "Missing Breakfast: {:?}", routine_names);
+        assert!(routine_names.contains(&"Lunch"), "Missing Lunch: {:?}", routine_names);
+        assert!(routine_names.contains(&"Recess"), "Missing Recess: {:?}", routine_names);
+    }
+
     // ── Semantic Labels Tests ────────────────────────────────────
 
     #[test]
@@ -1832,8 +1964,9 @@ mod tests {
             </table>
         </body></html>"#;
 
-        let template = extract_template_with_ai(html, &provider).await;
+        let (template, method) = extract_template_with_ai(html, &provider).await;
 
+        assert_eq!(method, "ai");
         // AI-selected table should be the schedule grid.
         assert_eq!(template.table_structure.layout_type, "schedule_grid");
         assert_eq!(template.table_structure.column_semantic, Some("days_of_week".to_string()));
@@ -1859,7 +1992,8 @@ mod tests {
         </body></html>"#;
 
         // Should still produce a valid template using heuristic fallback.
-        let template = extract_template_with_ai(html, &provider).await;
+        let (template, method) = extract_template_with_ai(html, &provider).await;
+        assert_eq!(method, "heuristic");
         assert!(!template.table_structure.columns.is_empty());
     }
 
@@ -1876,10 +2010,11 @@ mod tests {
             </table>
         </body></html>"#;
 
-        let template = extract_template_with_ai(html, &provider).await;
+        let (template, method) = extract_template_with_ai(html, &provider).await;
 
         // With only one table, AI should NOT be called.
         assert_eq!(provider.call_count(), 0);
+        assert_eq!(method, "heuristic");
         // Should still extract the table using heuristic.
         assert!(!template.table_structure.columns.is_empty());
     }
@@ -1887,8 +2022,9 @@ mod tests {
     #[tokio::test]
     async fn test_extract_template_with_ai_empty_html() {
         let provider = MockAiProvider::new("{}");
-        let template = extract_template_with_ai("", &provider).await;
+        let (template, method) = extract_template_with_ai("", &provider).await;
         assert!(template.table_structure.columns.is_empty());
+        assert_eq!(method, "none");
         assert_eq!(provider.call_count(), 0);
     }
 
@@ -1939,7 +2075,8 @@ mod tests {
             </table>
         </body></html>"#;
 
-        let template = extract_template_with_ai(html, &provider).await;
+        let (template, method) = extract_template_with_ai(html, &provider).await;
+        assert_eq!(method, "ai");
 
         // Time slots should still be extracted.
         assert!(template.time_slots.contains(&"9:00-9:30".to_string()));

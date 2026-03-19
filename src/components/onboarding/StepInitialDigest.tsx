@@ -83,6 +83,8 @@ export function StepInitialDigest({
       const countMatch = msg.match(/Analyzed (\d+) document/);
       const count = countMatch ? parseInt(countMatch[1], 10) : 0;
       const embeddingsSkipped = msg.includes("embeddings_skipped");
+      const tableIdMatch = msg.match(/table_id:(\w+)/);
+      const tableIdMethod = tableIdMatch ? tableIdMatch[1] : null;
 
       if (count === 0) {
         setScanState("empty");
@@ -92,7 +94,11 @@ export function StepInitialDigest({
         setResult(msg.split("|")[0]);
       } else {
         setScanState("success");
-        setResult(msg.split("|")[0]);
+        let displayMsg = msg.split("|")[0];
+        if (tableIdMethod === "heuristic") {
+          displayMsg += " (used heuristic table detection — re-run if results look wrong)";
+        }
+        setResult(displayMsg);
       }
     } catch (e) {
       stopProgressSimulation();

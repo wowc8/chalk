@@ -64,6 +64,9 @@ pub struct DigestCompletePayload {
     pub total_tables: u32,
     pub total_plans: u32,
     pub errors: Vec<String>,
+    /// How the planning table was identified: "ai", "heuristic", or "none".
+    #[serde(default)]
+    pub table_id_method: Option<String>,
 }
 
 /// Cache invalidation event.
@@ -228,6 +231,7 @@ mod tests {
             total_tables: 45,
             total_plans: 42,
             errors: vec!["Failed to parse doc X".into()],
+            table_id_method: Some("ai".into()),
         };
         let json = serde_json::to_value(&payload).unwrap();
         assert_eq!(json["documents_processed"], 12);
