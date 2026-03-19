@@ -503,8 +503,8 @@ pub async fn trigger_initial_digest(
         folder_id = folder_id.as_str(),
         documents_processed = summary.documents_processed,
         total_tables = summary.total_tables,
-        total_lessons = summary.total_lessons,
-        "Initial digest complete"
+        total_sections = summary.total_sections,
+        "Initial digest complete — content stored as reference documents for AI context"
     );
 
     // Mark digest as complete.
@@ -512,9 +512,9 @@ pub async fn trigger_initial_digest(
     updated_status.initial_digest_complete = true;
     save_onboarding_status(&state.data_dir, &updated_status)?;
 
-    // Attempt to vectorize imported plans for RAG search.
+    // Attempt to vectorize imported reference docs for RAG search.
     // If no OpenAI API key is configured, skip gracefully.
-    let embeddings_skipped = if summary.total_lessons > 0 {
+    let embeddings_skipped = if summary.total_sections > 0 {
         match state.db.get_setting("openai_api_key") {
             Ok(Some(api_key)) if !api_key.is_empty() => {
                 let base_url = state
@@ -523,25 +523,25 @@ pub async fn trigger_initial_digest(
                     .unwrap_or(None)
                     .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
                 let client = crate::rag::embeddings::EmbeddingClient::with_base_url(api_key, base_url);
-                let plans = state
+                let docs = state
                     .db
-                    .list_plans_without_embeddings()
+                    .list_ref_docs_without_embeddings()
                     .unwrap_or_default();
                 let mut vectorized = 0u32;
-                for plan in &plans {
+                for doc in &docs {
                     let text = crate::rag::chunker::create_embedding_text(
-                        &plan.title,
-                        &plan.content,
-                        plan.learning_objectives.as_deref(),
+                        &doc.title,
+                        &doc.content_text,
+                        None,
                     );
                     match client.embed_one(&text).await {
                         Ok(embedding) => {
-                            if state.db.upsert_embedding(&plan.id, &embedding).is_ok() {
+                            if state.db.upsert_ref_doc_embedding(&doc.id, &embedding).is_ok() {
                                 vectorized += 1;
                             }
                         }
                         Err(e) => {
-                            warn!(plan_id = %plan.id, error = %e, "Failed to vectorize plan — skipping");
+                            warn!(doc_id = %doc.id, error = %e, "Failed to vectorize reference doc — skipping");
                         }
                     }
                 }
@@ -558,8 +558,8 @@ pub async fn trigger_initial_digest(
     };
 
     let mut message = format!(
-        "found {} document(s), extracted {} lesson plan(s)",
-        summary.documents_processed, summary.total_lessons
+        "Analyzed {} document(s) for AI context",
+        summary.documents_processed
     );
     if embeddings_skipped {
         message.push_str("|embeddings_skipped");

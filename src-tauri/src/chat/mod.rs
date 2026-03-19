@@ -216,7 +216,7 @@ You can help with:
 
 When the teacher is editing a specific lesson plan, its current content will be provided. Use it to give targeted, contextual suggestions rather than generic advice.
 
-You also have access to the teacher's lesson plan history via RAG. When relevant plans are found, they will be provided as additional context. Use this to:
+You also have access to the teacher's document history via RAG. When relevant reference documents are found, they will be provided as additional context. Use this to:
 - Reference what has worked before
 - Suggest improvements based on patterns in their teaching style
 - Help maintain consistency across their curriculum
@@ -678,7 +678,7 @@ pub async fn vectorize_plan(
     Ok(())
 }
 
-/// Vectorize all existing plans that don't have embeddings yet.
+/// Vectorize all existing reference docs that don't have embeddings yet.
 #[tauri::command]
 pub async fn vectorize_all_plans(state: tauri::State<'_, AppState>) -> Result<u32, String> {
     let db = &state.db;
@@ -693,40 +693,40 @@ pub async fn vectorize_all_plans(state: tauri::State<'_, AppState>) -> Result<u3
         .map_err(|e| format!("{e}"))?
         .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
 
-    // Get all plans that don't have embeddings.
-    let plans_without_embeddings = db
-        .list_plans_without_embeddings()
+    // Get all reference docs that don't have embeddings.
+    let docs_without_embeddings = db
+        .list_ref_docs_without_embeddings()
         .map_err(|e| format!("{e}"))?;
 
-    if plans_without_embeddings.is_empty() {
+    if docs_without_embeddings.is_empty() {
         return Ok(0);
     }
 
     let client = EmbeddingClient::with_base_url(api_key, base_url);
     let mut count = 0u32;
 
-    for plan in &plans_without_embeddings {
+    for doc in &docs_without_embeddings {
         let embedding_text = crate::rag::chunker::create_embedding_text(
-            &plan.title,
-            &plan.content,
-            plan.learning_objectives.as_deref(),
+            &doc.title,
+            &doc.content_text,
+            None,
         );
 
         match client.embed_one(&embedding_text).await {
             Ok(embedding) => {
-                if let Err(e) = db.upsert_embedding(&plan.id, &embedding) {
-                    tracing::warn!(plan_id = %plan.id, error = %e, "Failed to store embedding");
+                if let Err(e) = db.upsert_ref_doc_embedding(&doc.id, &embedding) {
+                    tracing::warn!(doc_id = %doc.id, error = %e, "Failed to store ref doc embedding");
                 } else {
                     count += 1;
                 }
             }
             Err(e) => {
-                tracing::warn!(plan_id = %plan.id, error = %e.message, "Failed to generate embedding");
+                tracing::warn!(doc_id = %doc.id, error = %e.message, "Failed to generate ref doc embedding");
             }
         }
     }
 
-    tracing::info!(count, "Vectorized plans");
+    tracing::info!(count, "Vectorized reference docs");
     Ok(count)
 }
 
@@ -760,7 +760,7 @@ pub async fn save_ai_config(
     }
 
     // When an API key is saved, kick off background vectorization for any
-    // plans that were imported without embeddings (e.g. before the key was set).
+    // reference docs that were imported without embeddings (e.g. before the key was set).
     if key_was_set {
         let app_handle = app.clone();
         tauri::async_runtime::spawn(async move {
@@ -776,35 +776,35 @@ pub async fn save_ai_config(
                 .unwrap_or(None)
                 .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
 
-            let plans = match db.list_plans_without_embeddings() {
-                Ok(p) if !p.is_empty() => p,
+            let docs = match db.list_ref_docs_without_embeddings() {
+                Ok(d) if !d.is_empty() => d,
                 _ => return,
             };
 
-            tracing::info!(count = plans.len(), "Auto-vectorizing plans after API key saved");
+            tracing::info!(count = docs.len(), "Auto-vectorizing reference docs after API key saved");
 
             let client = EmbeddingClient::with_base_url(api_key, base_url);
             let mut vectorized = 0u32;
 
-            for plan in &plans {
+            for doc in &docs {
                 let text = crate::rag::chunker::create_embedding_text(
-                    &plan.title,
-                    &plan.content,
-                    plan.learning_objectives.as_deref(),
+                    &doc.title,
+                    &doc.content_text,
+                    None,
                 );
                 match client.embed_one(&text).await {
                     Ok(embedding) => {
-                        if db.upsert_embedding(&plan.id, &embedding).is_ok() {
+                        if db.upsert_ref_doc_embedding(&doc.id, &embedding).is_ok() {
                             vectorized += 1;
                         }
                     }
                     Err(e) => {
-                        tracing::warn!(plan_id = %plan.id, error = %e, "Auto-vectorize failed for plan");
+                        tracing::warn!(doc_id = %doc.id, error = %e, "Auto-vectorize failed for reference doc");
                     }
                 }
             }
 
-            tracing::info!(vectorized, total = plans.len(), "Auto-vectorization complete");
+            tracing::info!(vectorized, total = docs.len(), "Auto-vectorization complete");
         });
     }
 

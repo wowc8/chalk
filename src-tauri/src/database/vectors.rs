@@ -111,6 +111,136 @@ impl Database {
         })
     }
 
+    // ── Reference Doc Embeddings ────────────────────────────────
+
+    /// Store an embedding vector for a reference document.
+    pub fn upsert_ref_doc_embedding(&self, doc_id: &str, embedding: &[f32]) -> Result<()> {
+        let json = format!(
+            "[{}]",
+            embedding
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+
+        self.with_conn(|conn| {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS _ref_doc_vec_id_map (
+                    rowid    INTEGER PRIMARY KEY AUTOINCREMENT,
+                    doc_id   TEXT NOT NULL UNIQUE
+                )",
+            )?;
+
+            conn.execute(
+                "INSERT INTO _ref_doc_vec_id_map (doc_id) VALUES (?1) ON CONFLICT(doc_id) DO NOTHING",
+                params![doc_id],
+            )?;
+
+            let rowid: i64 = conn.query_row(
+                "SELECT rowid FROM _ref_doc_vec_id_map WHERE doc_id = ?1",
+                params![doc_id],
+                |row| row.get(0),
+            )?;
+
+            conn.execute(
+                "DELETE FROM reference_doc_vectors WHERE rowid = ?1",
+                params![rowid],
+            )?;
+            conn.execute(
+                "INSERT INTO reference_doc_vectors (rowid, embedding) VALUES (?1, ?2)",
+                params![rowid, json],
+            )?;
+
+            Ok(())
+        })
+    }
+
+    /// Find the most similar reference documents to the given query embedding.
+    pub fn search_similar_ref_docs(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<VectorSearchResult>> {
+        let json = format!(
+            "[{}]",
+            query_embedding
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+
+        self.with_conn(|conn| {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS _ref_doc_vec_id_map (
+                    rowid    INTEGER PRIMARY KEY AUTOINCREMENT,
+                    doc_id   TEXT NOT NULL UNIQUE
+                )",
+            )?;
+
+            let mut stmt = conn.prepare(
+                "SELECT v.rowid, v.distance
+                 FROM reference_doc_vectors v
+                 WHERE v.embedding MATCH ?1
+                   AND k = ?2
+                 ORDER BY v.distance",
+            )?;
+
+            let vec_rows: Vec<(i64, f64)> = stmt
+                .query_map(params![json, limit as i64], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+
+            let mut results = Vec::with_capacity(vec_rows.len());
+            for (rowid, distance) in vec_rows {
+                let doc_id: String = conn.query_row(
+                    "SELECT doc_id FROM _ref_doc_vec_id_map WHERE rowid = ?1",
+                    params![rowid],
+                    |row| row.get(0),
+                )?;
+                results.push(VectorSearchResult {
+                    lesson_plan_id: doc_id,
+                    distance,
+                });
+            }
+
+            Ok(results)
+        })
+    }
+
+    /// Remove the embedding for a reference document.
+    pub fn delete_ref_doc_embedding(&self, doc_id: &str) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS _ref_doc_vec_id_map (
+                    rowid    INTEGER PRIMARY KEY AUTOINCREMENT,
+                    doc_id   TEXT NOT NULL UNIQUE
+                )",
+            )?;
+
+            let rowid: std::result::Result<i64, _> = conn.query_row(
+                "SELECT rowid FROM _ref_doc_vec_id_map WHERE doc_id = ?1",
+                params![doc_id],
+                |row| row.get(0),
+            );
+
+            if let Ok(rowid) = rowid {
+                conn.execute(
+                    "DELETE FROM reference_doc_vectors WHERE rowid = ?1",
+                    params![rowid],
+                )?;
+                conn.execute(
+                    "DELETE FROM _ref_doc_vec_id_map WHERE rowid = ?1",
+                    params![rowid],
+                )?;
+            }
+
+            Ok(())
+        })
+    }
+
     /// Remove the embedding for a lesson plan.
     pub fn delete_embedding(&self, lesson_plan_id: &str) -> Result<()> {
         self.with_conn(|conn| {

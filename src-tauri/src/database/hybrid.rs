@@ -85,6 +85,82 @@ impl Database {
         })
     }
 
+    // ── Reference Doc Hybrid Search ────────────────────────────
+
+    /// Hybrid search across reference documents (FTS5 + vector).
+    pub fn search_ref_docs_hybrid(
+        &self,
+        fts_query: &str,
+        query_embedding: &[f32],
+        limit: usize,
+        fts_weight: f64,
+        vec_weight: f64,
+    ) -> Result<Vec<HybridSearchResult>> {
+        let per_source_limit = limit * 3;
+
+        let fts_results = self.search_ref_docs_fts(fts_query, per_source_limit)?;
+        let vec_results = self.search_similar_ref_docs(query_embedding, per_source_limit)?;
+
+        let mut scores: HashMap<String, f64> = HashMap::new();
+
+        for (position, result) in fts_results.iter().enumerate() {
+            let rrf_score = fts_weight / (RRF_K + position as f64 + 1.0);
+            *scores.entry(result.lesson_plan_id.clone()).or_insert(0.0) += rrf_score;
+        }
+
+        for (position, result) in vec_results.iter().enumerate() {
+            let rrf_score = vec_weight / (RRF_K + position as f64 + 1.0);
+            *scores.entry(result.lesson_plan_id.clone()).or_insert(0.0) += rrf_score;
+        }
+
+        if scores.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut scored: Vec<(String, f64)> = scores.into_iter().collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(limit);
+
+        self.with_conn(|conn| {
+            let mut results = Vec::with_capacity(scored.len());
+            for (doc_id, score) in scored {
+                let title: Option<String> = conn
+                    .query_row(
+                        "SELECT title FROM reference_docs WHERE id = ?1",
+                        params![doc_id],
+                        |row| row.get(0),
+                    )
+                    .ok();
+
+                if let Some(title) = title {
+                    results.push(HybridSearchResult {
+                        lesson_plan_id: doc_id,
+                        title,
+                        score,
+                    });
+                }
+            }
+            Ok(results)
+        })
+    }
+
+    /// FTS5-only hybrid search for reference documents.
+    pub fn search_ref_docs_hybrid_fts_only(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<HybridSearchResult>> {
+        let fts_results = self.search_ref_docs_fts(query, limit)?;
+        Ok(fts_results
+            .into_iter()
+            .map(|r| HybridSearchResult {
+                lesson_plan_id: r.lesson_plan_id,
+                title: r.title,
+                score: -r.rank,
+            })
+            .collect())
+    }
+
     /// Perform hybrid search using only the text query (FTS5 only, no embedding).
     /// Falls back to pure FTS5 when embeddings are unavailable.
     pub fn search_hybrid_fts_only(

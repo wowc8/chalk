@@ -106,6 +106,41 @@ impl Database {
         self.search_fuzzy(query, limit)
     }
 
+    // ── Reference Doc FTS ─────────────────────────────────────
+
+    /// Search reference documents using FTS5 full-text search.
+    pub fn search_ref_docs_fts(&self, query: &str, limit: usize) -> Result<Vec<FtsSearchResult>> {
+        if query.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let sanitized = sanitize_fts_query(query);
+        if sanitized.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT rd.id, rd.title, rank
+                 FROM reference_docs_fts fts
+                 INNER JOIN reference_docs rd ON rd.rowid = fts.rowid
+                 WHERE reference_docs_fts MATCH ?1
+                 ORDER BY rank
+                 LIMIT ?2",
+            )?;
+
+            let rows = stmt.query_map(params![sanitized, limit as i64], |row| {
+                Ok(FtsSearchResult {
+                    lesson_plan_id: row.get(0)?,
+                    title: row.get(1)?,
+                    rank: row.get(2)?,
+                })
+            })?;
+
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
     /// Manually rebuild the FTS5 index from the lesson_plans table.
     /// Useful after bulk operations or data recovery.
     pub fn rebuild_fts_index(&self) -> Result<()> {
