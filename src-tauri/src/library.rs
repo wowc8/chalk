@@ -2,6 +2,7 @@ use crate::database::{
     FtsSearchResult, HybridSearchResult, LessonPlan, LibraryPlanCard, LibraryQuery, NewLessonPlan,
     NewTag, PlanVersion, Tag,
 };
+use crate::rag::embeddings::EmbeddingClient;
 use crate::AppState;
 
 // ── Tag commands ─────────────────────────────────────────────
@@ -249,14 +250,60 @@ pub fn update_plan_title(
 // ── Plan versioning commands ─────────────────────────────────
 
 #[tauri::command]
-pub fn finalize_plan(
+pub async fn finalize_plan(
     state: tauri::State<'_, AppState>,
     id: String,
 ) -> Result<PlanVersion, String> {
-    state
+    let version = state
         .db
         .finalize_plan(&id)
-        .map_err(|e| format!("{}", e))
+        .map_err(|e| format!("{}", e))?;
+
+    // Best-effort auto-vectorize: generate embedding and upsert into sqlite-vec
+    // so finalized plans feed the RAG pipeline immediately.
+    // Failures here are logged but don't block the finalize operation.
+    if let Err(e) = auto_vectorize_plan(&state.db, &id).await {
+        tracing::warn!(plan_id = %id, error = %e, "Auto-vectorize after finalize failed (non-fatal)");
+    }
+
+    Ok(version)
+}
+
+/// Generate an embedding for the given plan and upsert it into the vector DB.
+/// Returns an error if the API key is not configured or the embedding call fails.
+async fn auto_vectorize_plan(
+    db: &crate::database::Database,
+    plan_id: &str,
+) -> Result<(), String> {
+    let api_key = db
+        .get_setting("openai_api_key")
+        .map_err(|e| format!("{e}"))?
+        .ok_or_else(|| "OpenAI API key not configured".to_string())?;
+
+    let base_url = db
+        .get_setting("openai_base_url")
+        .map_err(|e| format!("{e}"))?
+        .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+
+    let plan = db.get_lesson_plan(plan_id).map_err(|e| format!("{e}"))?;
+
+    let embedding_text = crate::rag::chunker::create_embedding_text(
+        &plan.title,
+        &plan.content,
+        plan.learning_objectives.as_deref(),
+    );
+
+    let client = EmbeddingClient::with_base_url(api_key, base_url);
+    let embedding = client
+        .embed_one(&embedding_text)
+        .await
+        .map_err(|e| e.message)?;
+
+    db.upsert_embedding(plan_id, &embedding)
+        .map_err(|e| format!("{e}"))?;
+
+    tracing::info!(plan_id = %plan_id, "Plan auto-vectorized on finalize");
+    Ok(())
 }
 
 #[tauri::command]
@@ -737,5 +784,120 @@ mod tests {
             .unwrap();
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].title, "Algebra Intro");
+    }
+
+    // ── Auto-vectorize tests ────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_auto_vectorize_returns_error_without_api_key() {
+        let db = test_db();
+
+        let subject = db
+            .create_subject(&crate::database::NewSubject {
+                name: "Science".into(),
+                grade_level: None,
+                description: None,
+            })
+            .unwrap();
+        let plan = db
+            .create_lesson_plan(&NewLessonPlan {
+                subject_id: subject.id.clone(),
+                title: "Photosynthesis".into(),
+                content: Some("Plants convert sunlight".into()),
+                source_doc_id: None,
+                source_table_index: None,
+                learning_objectives: None,
+            })
+            .unwrap();
+
+        // No API key configured — auto_vectorize_plan should return Err
+        let result = auto_vectorize_plan(&db, &plan.id).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("API key not configured"));
+    }
+
+    #[test]
+    fn test_finalize_plan_db_layer_then_upsert_embedding() {
+        // Verify that finalize + manual embedding upsert works end-to-end
+        // at the DB layer (the integration that auto_vectorize_plan performs).
+        let db = test_db();
+
+        let subject = db
+            .create_subject(&crate::database::NewSubject {
+                name: "Math".into(),
+                grade_level: None,
+                description: None,
+            })
+            .unwrap();
+        let plan = db
+            .create_lesson_plan(&NewLessonPlan {
+                subject_id: subject.id.clone(),
+                title: "Quadratics".into(),
+                content: Some("Solving ax^2 + bx + c = 0".into()),
+                source_doc_id: None,
+                source_table_index: None,
+                learning_objectives: Some("Students solve quadratic equations".into()),
+            })
+            .unwrap();
+
+        // Finalize the plan
+        let version = db.finalize_plan(&plan.id).unwrap();
+        assert_eq!(version.version, 1);
+        assert_eq!(version.title, "Quadratics");
+
+        // Recreate vec table with smaller dims for test.
+        db.with_conn(|conn| {
+            conn.execute_batch("DROP TABLE IF EXISTS lesson_plan_vectors")?;
+            conn.execute_batch(
+                "CREATE VIRTUAL TABLE lesson_plan_vectors USING vec0(embedding float[4])",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        // Simulate the embedding upsert that auto_vectorize_plan would do
+        let fake_embedding = [0.1_f32, 0.2, 0.3, 0.4];
+        db.upsert_embedding(&plan.id, &fake_embedding).unwrap();
+
+        // Verify the plan is now searchable via vector similarity
+        let results = db.search_similar(&[0.1, 0.2, 0.3, 0.4], 5).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].lesson_plan_id, plan.id);
+
+        // Upsert again (re-finalize scenario) — should replace, not duplicate
+        let new_embedding = [0.5_f32, 0.6, 0.7, 0.8];
+        db.upsert_embedding(&plan.id, &new_embedding).unwrap();
+
+        let results = db.search_similar(&[0.5, 0.6, 0.7, 0.8], 5).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].lesson_plan_id, plan.id);
+    }
+
+    #[test]
+    fn test_finalize_plan_status_is_finalized() {
+        let db = test_db();
+
+        let subject = db
+            .create_subject(&crate::database::NewSubject {
+                name: "English".into(),
+                grade_level: None,
+                description: None,
+            })
+            .unwrap();
+        let plan = db
+            .create_lesson_plan(&NewLessonPlan {
+                subject_id: subject.id.clone(),
+                title: "Poetry".into(),
+                content: Some("Haiku structure".into()),
+                source_doc_id: None,
+                source_table_index: None,
+                learning_objectives: None,
+            })
+            .unwrap();
+
+        db.finalize_plan(&plan.id).unwrap();
+
+        let updated = db.get_lesson_plan(&plan.id).unwrap();
+        assert_eq!(updated.status, "finalized");
     }
 }
