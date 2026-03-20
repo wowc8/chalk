@@ -424,8 +424,16 @@ fn format_template_instructions(template_json: &str) -> String {
             "Apply cell background colors directly on `<td>` and `<th>` elements using \
              `style=\"background-color: COLOR\"`. For example: `<td style=\"background-color: #FFD700\">content</td>`. \
              Do NOT use `<mark>` tags for cell backgrounds — those render as inline text highlights, not cell fills. \
-             For text colors, use `<span style=\"color: COLOR\">text</span>`. \
              This is how the teacher visually organizes their schedule.\n\n"
+        );
+        instructions.push_str(
+            "**CRITICAL — TEXT CONTRAST:** When using colored cell backgrounds, you MUST ensure \
+             the text inside is clearly readable. Use **black text** (`color: #000000` or no color override) on \
+             light/pastel backgrounds (yellow, light green, light pink, light blue, white). Use **white text** \
+             (`color: #FFFFFF`) on dark backgrounds (dark purple, dark blue, dark green, dark red). \
+             Apply text color via `style=\"background-color: BG; color: TEXT\"` on the `<td>`/`<th>` element. \
+             **NEVER use grey text on colored backgrounds** — it is unreadable. When in doubt, use black text \
+             (`#000000`) which has high contrast on most light/pastel backgrounds.\n\n"
         );
         for mapping in &cs.mappings {
             instructions.push_str(&format!(
@@ -562,13 +570,15 @@ fn format_template_instructions(template_json: &str) -> String {
         instructions.push_str(
             "**CRITICAL:** Generate ALL time slot columns, ALL day rows, and fill EVERY cell. \
              An empty cell is better than a missing column. The output must be a complete weekly schedule, \
-             not a partial plan.\n\n"
+             not a partial plan. Ensure all text is readable — use `color: #000000` (black) on all \
+             light-colored cell backgrounds.\n\n"
         );
     } else {
         instructions.push_str(
             "**CRITICAL:** Generate ALL time slot rows, ALL day columns, and fill EVERY cell. \
              An empty cell is better than a missing row. The output must be a complete weekly schedule, \
-             not a partial plan.\n\n"
+             not a partial plan. Ensure all text is readable — use `color: #000000` (black) on all \
+             light-colored cell backgrounds.\n\n"
         );
     }
 

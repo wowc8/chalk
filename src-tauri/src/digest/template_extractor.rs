@@ -964,7 +964,7 @@ fn extract_recurring_elements(tables: &[ParsedTable]) -> RecurringElements {
 /// across most day columns at the same time slot in schedule grids.
 ///
 /// Detection is purely frequency-based: for each time slot row, if the same activity
-/// text (case-insensitive, trimmed) appears in ≥60% of day columns, it is captured as
+/// text (case-insensitive, trimmed) appears in ≥40% of day columns, it is captured as
 /// a `DailyRoutineEvent` along with which specific days it occurs on.
 ///
 /// No hardcoded keyword list is used — any recurring event is detected dynamically.
@@ -990,7 +990,9 @@ fn extract_daily_routine(tables: &[ParsedTable]) -> Vec<DailyRoutineEvent> {
                 continue;
             }
 
-            let threshold = (num_days as f64 * 0.6).ceil() as usize;
+            // Use 40% threshold so events appearing 2/5 days are captured (e.g. breakfast
+            // that only appears Mon-Wed). Previously 60% missed events like these.
+            let threshold = (num_days as f64 * 0.4).ceil() as usize;
 
             for row in table.rows.iter().skip(1) {
                 let time_slot = row
@@ -1042,7 +1044,7 @@ fn extract_daily_routine(tables: &[ParsedTable]) -> Vec<DailyRoutineEvent> {
                 continue;
             }
 
-            let threshold = (num_days as f64 * 0.6).ceil() as usize;
+            let threshold = (num_days as f64 * 0.4).ceil() as usize;
 
             // For each time-slot column, check if the same activity appears
             // in ≥60% of day rows at that column.
@@ -1383,7 +1385,7 @@ mod tests {
 
         let template = extract_template(html);
 
-        // Frequency-based detection: any activity in ≥60% of day columns is detected.
+        // Frequency-based detection: any activity in ≥40% of day columns is detected.
         let routine_names: Vec<&str> = template.daily_routine.iter().map(|e| e.name.as_str()).collect();
         assert!(routine_names.contains(&"Recess"), "Expected Recess in routine: {:?}", routine_names);
         assert!(routine_names.contains(&"Lunch"), "Expected Lunch in routine: {:?}", routine_names);
@@ -1396,8 +1398,8 @@ mod tests {
 
         // Science appears 3/5 = 60% — meets threshold.
         assert!(routine_names.contains(&"Science"), "Expected Science in routine: {:?}", routine_names);
-        // Writing appears 2/5 = 40% — below threshold.
-        assert!(!routine_names.contains(&"Writing"), "Writing should NOT meet threshold: {:?}", routine_names);
+        // Writing appears 2/5 = 40% — meets 40% threshold.
+        assert!(routine_names.contains(&"Writing"), "Expected Writing in routine (2/5 = 40%%): {:?}", routine_names);
 
         // Verify time slots are captured.
         let recess = template.daily_routine.iter().find(|e| e.name == "Recess").unwrap();
@@ -1416,7 +1418,7 @@ mod tests {
 
     #[test]
     fn test_extract_daily_routine_no_recurring_events() {
-        // A schedule grid where no activity appears in ≥60% of day columns.
+        // A schedule grid where no activity appears in ≥40% of day columns.
         let html = r#"<html><body>
             <table>
                 <tr><th>Time</th><th>Monday</th><th>Tuesday</th><th>Wednesday</th></tr>
@@ -1426,13 +1428,13 @@ mod tests {
         </body></html>"#;
 
         let template = extract_template(html);
-        // Each activity appears 1/3 = 33%, below 60% threshold.
+        // Each activity appears 1/3 = 33%, below 40% threshold.
         assert!(template.daily_routine.is_empty());
     }
 
     #[test]
     fn test_extract_daily_routine_partial_coverage() {
-        // Recess appears in only 2 out of 5 days — below 60% threshold.
+        // Recess appears in only 2 out of 5 days — meets 40% threshold.
         let html = r#"<html><body>
             <table>
                 <tr><th>Time</th><th>Monday</th><th>Tuesday</th><th>Wednesday</th><th>Thursday</th><th>Friday</th></tr>
@@ -1441,14 +1443,17 @@ mod tests {
         </body></html>"#;
 
         let template = extract_template(html);
-        // Recess only in 2/5 days = 40%, below 60% threshold.
+        // Recess in 2/5 days = 40%, meets threshold.
         let routine_names: Vec<&str> = template.daily_routine.iter().map(|e| e.name.as_str()).collect();
-        assert!(!routine_names.contains(&"Recess"));
+        assert!(routine_names.contains(&"Recess"), "2/5 = 40%% should meet threshold: {:?}", routine_names);
+
+        let recess = template.daily_routine.iter().find(|e| e.name == "Recess").unwrap();
+        assert_eq!(recess.days.len(), 2, "Recess should list 2 days");
     }
 
     #[test]
     fn test_extract_daily_routine_meets_threshold() {
-        // Recess appears in 3 out of 5 days — meets 60% threshold.
+        // Recess appears in 3 out of 5 days — meets 40% threshold.
         let html = r#"<html><body>
             <table>
                 <tr><th>Time</th><th>Monday</th><th>Tuesday</th><th>Wednesday</th><th>Thursday</th><th>Friday</th></tr>
@@ -1458,7 +1463,7 @@ mod tests {
 
         let template = extract_template(html);
         let routine_names: Vec<&str> = template.daily_routine.iter().map(|e| e.name.as_str()).collect();
-        assert!(routine_names.contains(&"Recess"), "3/5 = 60% should meet threshold: {:?}", routine_names);
+        assert!(routine_names.contains(&"Recess"), "3/5 = 60%% should meet threshold: {:?}", routine_names);
 
         // Verify days are tracked correctly.
         let recess = template.daily_routine.iter().find(|e| e.name == "Recess").unwrap();
@@ -1566,19 +1571,19 @@ mod tests {
         let recess_count = template.daily_routine.iter().filter(|e| e.name == "Recess").count();
         assert_eq!(recess_count, 1, "Recess should be deduplicated to 1 entry");
 
-        // Academic subjects appearing in ≥60% of days are also detected as recurring.
+        // Academic subjects appearing in ≥40% of days are also detected as recurring.
         // Math Workshop appears 4/5 = 80%, Reading Block 5/5 = 100%, Writing 5/5 = 100%.
         assert!(routine_names.contains(&"Math Workshop"), "Missing Math Workshop: {:?}", routine_names);
         assert!(routine_names.contains(&"Reading Block"), "Missing Reading Block: {:?}", routine_names);
         assert!(routine_names.contains(&"Writing"), "Missing Writing: {:?}", routine_names);
 
-        // Science appears 3/5 = 60%, Social Studies 2/5 = 40%.
+        // Science appears 3/5 = 60%, Social Studies 2/5 = 40% — both meet 40% threshold.
         assert!(routine_names.contains(&"Science"), "Missing Science (3/5 = 60%%): {:?}", routine_names);
-        assert!(!routine_names.contains(&"Social Studies"), "Social Studies 2/5 = 40%% should NOT meet threshold: {:?}", routine_names);
+        assert!(routine_names.contains(&"Social Studies"), "Missing Social Studies (2/5 = 40%%): {:?}", routine_names);
 
         // The specials row has different activities each day (Art, Music, PE, Library) —
-        // each individual one appears in <60% of days, so none should be in daily_routine
-        // as individual entries. Art appears 2/5 = 40% — below threshold.
+        // Art appears 2/5 = 40% — meets threshold now.
+        assert!(routine_names.contains(&"Art"), "Missing Art (2/5 = 40%%): {:?}", routine_names);
 
         // Verify days are tracked on Breakfast (all 5 days).
         let breakfast = template.daily_routine.iter().find(|e| e.name == "Breakfast").unwrap();

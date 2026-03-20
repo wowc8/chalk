@@ -538,7 +538,7 @@ async fn fetch_document(
 ///
 /// Returns `None` if the API key is not configured — the caller should
 /// fall back to heuristic extraction.
-fn create_ai_provider_from_db(db: &Database) -> Option<Box<dyn AiProvider>> {
+pub fn create_ai_provider_from_db(db: &Database) -> Option<Box<dyn AiProvider>> {
     let api_key = db.get_setting("openai_api_key").ok()??;
     if api_key.is_empty() {
         return None;
@@ -751,7 +751,7 @@ fn write_digest_results(
 }
 
 /// Simple HTML tag stripping for generating plain text from HTML content.
-fn strip_html_tags(html: &str) -> String {
+pub fn strip_html_tags(html: &str) -> String {
     let mut result = String::with_capacity(html.len());
     let mut in_tag = false;
     for ch in html.chars() {

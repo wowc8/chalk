@@ -120,6 +120,124 @@ fn list_teaching_templates(
         .collect()
 }
 
+// ── HTML File Import ────────────────────────────────────────
+
+/// Import a local HTML file and extract a teaching template from it.
+///
+/// Runs the HTML through the same template extraction pipeline used by
+/// Google Drive digest. Stores the extracted template in the database
+/// and returns a summary of what was extracted.
+#[tauri::command]
+async fn import_html_file(
+    state: tauri::State<'_, AppState>,
+    path: String,
+) -> Result<serde_json::Value, String> {
+    use tracing::info;
+
+    // Read the HTML file from disk.
+    let html = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read file: {e}"))?;
+
+    if html.is_empty() {
+        return Err("File is empty".into());
+    }
+
+    let file_name = std::path::Path::new(&path)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("imported.html")
+        .to_string();
+
+    // Use a stable source_doc_id based on the file name so re-imports overwrite.
+    let source_doc_id = format!("html-import:{}", file_name);
+
+    // Try AI-assisted extraction if an API key is configured, otherwise heuristic.
+    let ai_provider = digest::create_ai_provider_from_db(&state.db);
+    let (schema, method) = match ai_provider {
+        Some(provider) => {
+            info!(file_name = file_name.as_str(), "Using AI to identify planning template table from HTML import");
+            digest::template_extractor::extract_template_with_ai(&html, provider.as_ref()).await
+        }
+        None => {
+            info!(file_name = file_name.as_str(), "No AI provider — using heuristic for HTML import");
+            (digest::template_extractor::extract_template(&html), "heuristic")
+        }
+    };
+
+    let template_json = serde_json::to_string(&schema)
+        .map_err(|e| format!("Failed to serialize template: {e}"))?;
+
+    // Delete any previous template from this same file, then store the new one.
+    state.db.with_transaction(|conn| {
+        database::Database::delete_teaching_templates_by_source(conn, &source_doc_id)
+            .map_err(|e| database::DatabaseError::Sqlite(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ABORT),
+                Some(format!("{e}")),
+            )))?;
+        database::Database::create_teaching_template_on_conn(
+            conn,
+            Some(&source_doc_id),
+            Some(&file_name),
+            &template_json,
+        )
+        .map_err(|e| database::DatabaseError::Sqlite(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ABORT),
+            Some(format!("{e}")),
+        )))?;
+        Ok(())
+    }).map_err(|e| format!("Failed to store template: {e}"))?;
+
+    // Also extract lessons and store as reference docs for RAG context.
+    let lessons = digest::extract_lessons_from_doc(&html);
+    let ref_docs_created = if !lessons.is_empty() {
+        state.db.with_transaction(|conn| {
+            let mut created = Vec::new();
+            for lesson in &lessons {
+                let ref_doc_id = uuid::Uuid::new_v4().to_string();
+                let content_text = digest::strip_html_tags(&lesson.content);
+                conn.execute(
+                    "INSERT INTO reference_docs (id, source_doc_id, source_doc_name, title, content_html, content_text)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    rusqlite::params![
+                        ref_doc_id,
+                        source_doc_id,
+                        file_name,
+                        lesson.title,
+                        lesson.content,
+                        content_text,
+                    ],
+                )?;
+                created.push(ref_doc_id);
+            }
+            Ok(created)
+        }).map_err(|e| format!("Failed to store reference docs: {e}"))?
+    } else {
+        Vec::new()
+    };
+
+    info!(
+        file_name = file_name.as_str(),
+        method = method,
+        time_slots = schema.time_slots.len(),
+        daily_routine = schema.daily_routine.len(),
+        colors = schema.color_scheme.mappings.len(),
+        lessons = lessons.len(),
+        ref_docs = ref_docs_created.len(),
+        "HTML file imported successfully"
+    );
+
+    Ok(serde_json::json!({
+        "file_name": file_name,
+        "method": method,
+        "time_slots": schema.time_slots.len(),
+        "daily_routine_events": schema.daily_routine.len(),
+        "colors": schema.color_scheme.mappings.len(),
+        "lessons_extracted": lessons.len(),
+        "ref_docs_created": ref_docs_created.len(),
+        "template": schema,
+    }))
+}
+
 // ── App Settings Tauri Commands ─────────────────────────────
 
 #[tauri::command]
@@ -351,6 +469,7 @@ pub fn run() {
             toggle_feature_flag,
             get_active_teaching_template,
             list_teaching_templates,
+            import_html_file,
             cache_get,
             cache_clear,
             cache_stats,
