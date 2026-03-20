@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { motion, AnimatePresence } from "framer-motion";
 import { useConnectors, type ConnectionDetails, type PendingOp } from "../hooks/useConnectors";
 import { useAiConfig } from "../hooks/useChat";
@@ -162,6 +163,9 @@ export function SettingsPanel({ open, onClose, onReconnect }: SettingsPanelProps
               {/* AI Assistant */}
               <AiSettingsSection />
 
+              {/* Import Template */}
+              <ImportHtmlSection addToast={addToast} />
+
               {/* Privacy & Crash Reporting */}
               <section className="mb-8">
                 <h3 className="text-xs font-semibold text-chalk-muted uppercase tracking-wider mb-4">
@@ -259,6 +263,101 @@ export function SettingsPanel({ open, onClose, onReconnect }: SettingsPanelProps
         </motion.div>
       )}
     </AnimatePresence>
+  );
+}
+
+// ── Import HTML Section ───────────────────────────────────────────
+
+interface ImportResult {
+  file_name: string;
+  time_slots: number;
+  daily_routine_events: number;
+  colors: number;
+  lessons_extracted: number;
+  method: string;
+}
+
+function ImportHtmlSection({
+  addToast,
+}: {
+  addToast: (msg: string, type: "success" | "error") => void;
+}) {
+  const [importing, setImporting] = useState(false);
+  const [lastResult, setLastResult] = useState<ImportResult | null>(null);
+
+  const handleImport = async () => {
+    try {
+      const path = await openFileDialog({
+        multiple: false,
+        filters: [{ name: "HTML Files", extensions: ["html", "htm"] }],
+      });
+      if (!path) return;
+      setImporting(true);
+      const result = await invoke<ImportResult>("import_html_file", { path });
+      setLastResult(result);
+      addToast(
+        `Imported "${result.file_name}" — ${result.time_slots} time slots, ${result.daily_routine_events} routine events`,
+        "success"
+      );
+    } catch (e) {
+      addToast(`Import failed: ${e}`, "error");
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  return (
+    <section className="mb-8">
+      <h3 className="text-xs font-semibold text-chalk-muted uppercase tracking-wider mb-4">
+        Import Template
+      </h3>
+
+      <div className="bg-chalk-board-dark/60 rounded-lg border border-chalk-white/5 p-4 space-y-3">
+        <p className="text-xs text-chalk-muted">
+          Import a lesson plan template from a local HTML file. The file will be
+          analyzed to extract your schedule structure, time slots, colors, and
+          recurring events.
+        </p>
+
+        <motion.button
+          whileHover={{ scale: 1.02 }}
+          whileTap={{ scale: 0.98 }}
+          disabled={importing}
+          onClick={handleImport}
+          className="px-4 py-2 bg-chalk-blue/10 border border-chalk-blue/30 rounded-lg text-chalk-blue text-sm hover:bg-chalk-blue/20 transition-colors disabled:opacity-50 flex items-center gap-2"
+        >
+          {importing ? (
+            <>
+              <motion.span
+                animate={{ rotate: 360 }}
+                transition={{
+                  duration: 1,
+                  repeat: Infinity,
+                  ease: "linear",
+                }}
+                className="inline-block w-3.5 h-3.5 border-2 border-chalk-blue border-t-transparent rounded-full"
+              />
+              Importing...
+            </>
+          ) : (
+            <>
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+              </svg>
+              Import HTML File
+            </>
+          )}
+        </motion.button>
+
+        {lastResult && (
+          <div className="text-xs text-chalk-muted space-y-0.5 pt-1 border-t border-chalk-white/5">
+            <p className="text-chalk-dust font-medium">{lastResult.file_name}</p>
+            <p>Detection: {lastResult.method} | {lastResult.time_slots} time slots | {lastResult.colors} colors</p>
+            <p>{lastResult.daily_routine_events} routine events | {lastResult.lessons_extracted} lessons extracted</p>
+          </div>
+        )}
+      </div>
+    </section>
   );
 }
 
