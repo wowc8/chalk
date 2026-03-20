@@ -1861,4 +1861,5 @@ mod tests {
         assert!(!prompt.contains("continue for all"),
             "Prompt should NOT truncate the skeleton");
     }
+
 }

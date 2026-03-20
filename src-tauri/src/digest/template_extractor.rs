@@ -470,7 +470,58 @@ pub fn extract_template(html: &str) -> TeachingTemplateSchema {
         selected
     };
     let recurring_elements = extract_recurring_elements(routine_tables);
-    let daily_routine = extract_daily_routine(routine_tables);
+    let raw_daily_routine = extract_daily_routine(routine_tables);
+
+    // When aggregating across many weekly tables, the same time slot may
+    // accumulate multiple name variants (e.g., "Lunch Prep/Let's Find Out!",
+    // "Lunch Prep Let's Find Out! (Friends)", etc.). Deduplicate by keeping
+    // only the SHORTEST name for each time slot — shorter names are more
+    // generic and better represent the recurring activity. Events without
+    // a time slot are kept as-is.
+    let daily_routine = deduplicate_daily_routine(raw_daily_routine)
+        .into_iter()
+        // Filter out events with malformed time slots (e.g., "8:15-:00")
+        // and clean up truncated names (trailing open parens, etc.).
+        .map(|mut ev| {
+            // Validate time_slot: each side of the range must have digits
+            // before the colon (e.g., "8:15-9:00" not "8:15-:00").
+            if let Some(ref ts) = ev.time_slot {
+                let valid = ts.split('-').all(|part| {
+                    let p = part.trim();
+                    if let Some(colon_pos) = p.find(':') {
+                        colon_pos > 0 && p[..colon_pos].chars().any(|c| c.is_ascii_digit())
+                    } else {
+                        false
+                    }
+                });
+                if !valid {
+                    ev.time_slot = None;
+                }
+            }
+            // Clean up names with trailing punctuation.
+            let trimmed = ev.name.trim_end_matches(|c: char| c == '(' || c == '/' || c == ':' || c == ' ');
+            if trimmed.len() < ev.name.len() {
+                ev.name = trimmed.to_string();
+            }
+            ev
+        })
+        // Remove events that became duplicates after cleanup, and drop
+        // no-slot events whose name already has a slotted version.
+        .fold(Vec::new(), |mut acc: Vec<DailyRoutineEvent>, ev| {
+            let name_lower = ev.name.to_lowercase();
+            let key = format!("{}@{}", name_lower, ev.time_slot.as_deref().unwrap_or(""));
+            let is_dup = acc.iter().any(|e| {
+                format!("{}@{}", e.name.to_lowercase(), e.time_slot.as_deref().unwrap_or("")) == key
+            });
+            // Drop no-slot events if a slotted version with the same name exists.
+            let has_slotted = ev.time_slot.is_none() && acc.iter().any(|e| {
+                e.time_slot.is_some() && e.name.to_lowercase() == name_lower
+            });
+            if !is_dup && !has_slotted {
+                acc.push(ev);
+            }
+            acc
+        });
 
     TeachingTemplateSchema {
         color_scheme,
@@ -480,6 +531,107 @@ pub fn extract_template(html: &str) -> TeachingTemplateSchema {
         recurring_elements,
         daily_routine,
     }
+}
+
+/// Extract a grouping prefix for deduplicating similar activity names.
+///
+/// Uses the first 2 "words" (split on whitespace and punctuation) to group
+/// variants like "Lunch Prep/Let's Find Out!" and "Lunch Prep 2D Shape".
+/// Single-word names use just that word as prefix, so "Breath" groups with
+/// "Breath Bear Breath".
+fn activity_prefix(name: &str) -> String {
+    let words: Vec<&str> = name
+        .split(|c: char| c.is_whitespace() || c == '/' || c == '(' || c == ':')
+        .filter(|w| !w.is_empty())
+        .take(2)
+        .collect();
+    // Use first word only if the name itself is a single word — this ensures
+    // "Breath" and "Breath Bear Breath" share the prefix "breath".
+    if words.len() <= 1 {
+        words.join("").to_lowercase()
+    } else {
+        words.join(" ").to_lowercase()
+    }
+}
+
+/// Deduplicate daily routine events that are variants of the same activity.
+///
+/// When aggregating across many weekly plan tables, the same core activity (e.g.,
+/// "Lunch Prep") may appear as many name variants ("Lunch Prep Let's Find Out!",
+/// "Lunch Prep 2D Shape Song", etc.). This function groups events by time slot,
+/// then within each slot groups events whose names share a common prefix (first 2
+/// words), keeping only the shortest (most generic) name from each group.
+///
+/// Events with genuinely different activities at the same time slot (e.g.,
+/// "Science" and "Writing" alternating days) are preserved.
+fn deduplicate_daily_routine(events: Vec<DailyRoutineEvent>) -> Vec<DailyRoutineEvent> {
+    let mut by_slot: HashMap<String, Vec<DailyRoutineEvent>> = HashMap::new();
+    let mut no_slot: Vec<DailyRoutineEvent> = Vec::new();
+
+    for ev in events {
+        match &ev.time_slot {
+            Some(ts) => by_slot.entry(ts.clone()).or_default().push(ev),
+            None => no_slot.push(ev),
+        }
+    }
+
+    let mut result = Vec::new();
+
+    for (_slot, group) in &mut by_slot {
+        // Within each time slot, group events by their first-2-words prefix.
+        // Events sharing a prefix (e.g., "Lunch Prep") are variants — keep
+        // only the shortest one. Events with different prefixes are distinct.
+        let mut prefix_groups: HashMap<String, Vec<&DailyRoutineEvent>> = HashMap::new();
+        for ev in group.iter() {
+            let prefix = activity_prefix(&ev.name);
+            prefix_groups.entry(prefix).or_default().push(ev);
+        }
+
+        let mut slot_results: Vec<DailyRoutineEvent> = Vec::new();
+        for (_prefix, mut variants) in prefix_groups {
+            // Sort by name length — shortest first (most generic).
+            variants.sort_by_key(|e| e.name.len());
+            if let Some(best) = variants.into_iter().next() {
+                slot_results.push(best.clone());
+            }
+        }
+
+        // Second pass: if one event's name is a prefix of another's, keep only the shorter.
+        // This handles cases like "Breath" and "Breath Bear Breath" which have
+        // different 2-word prefixes but the shorter is clearly the canonical name.
+        slot_results.sort_by_key(|e| e.name.len());
+        let mut final_results: Vec<DailyRoutineEvent> = Vec::new();
+        for ev in &slot_results {
+            let name_lower = ev.name.to_lowercase();
+            let is_subsumed = final_results.iter().any(|existing| {
+                let existing_lower = existing.name.to_lowercase();
+                name_lower.starts_with(&existing_lower)
+                    && name_lower.len() > existing_lower.len()
+            });
+            if !is_subsumed {
+                final_results.push(ev.clone());
+            }
+        }
+        result.extend(final_results);
+    }
+
+    // Deduplicate no-slot events by first-2-words prefix.
+    let mut seen_prefixes: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for ev in &no_slot {
+        let prefix = activity_prefix(&ev.name);
+        if seen_prefixes.insert(prefix) {
+            result.push(ev.clone());
+        }
+    }
+
+    // Sort by time slot for consistent ordering.
+    result.sort_by(|a, b| {
+        let a_ts = a.time_slot.as_deref().unwrap_or("zz");
+        let b_ts = b.time_slot.as_deref().unwrap_or("zz");
+        a_ts.cmp(b_ts).then(a.name.cmp(&b.name))
+    });
+
+    result
 }
 
 /// Extract color-to-category mappings from inline styles in the HTML.
@@ -815,13 +967,17 @@ fn extract_table_structure(tables: &[ParsedTable]) -> TableStructure {
     };
 
     // Extract row categories from the first column of data rows.
+    // For schedule grids, the first column is time slots — skip row_categories
+    // to avoid capturing lesson content text from irregular rows.
     let mut row_categories = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for row in main_table.rows.iter().skip(h_idx + 1) {
-        if let Some(first_cell) = row.cells.first() {
-            let text = first_cell.text.trim().to_string();
-            if !text.is_empty() && !is_time_like(&text) && seen.insert(text.clone()) {
-                row_categories.push(text);
+    if !is_schedule && !is_transposed {
+        let mut seen = std::collections::HashSet::new();
+        for row in main_table.rows.iter().skip(h_idx + 1) {
+            if let Some(first_cell) = row.cells.first() {
+                let text = first_cell.text.trim().to_string();
+                if !text.is_empty() && !is_time_like(&text) && seen.insert(text.clone()) {
+                    row_categories.push(text);
+                }
             }
         }
     }
@@ -1078,14 +1234,8 @@ fn extract_recurring_elements(tables: &[ParsedTable]) -> RecurringElements {
 
                 // In schedule grids, day column cells are activities/subjects.
                 if is_schedule && i > 0 {
-                    // Normalize: take the first line or first few words as the activity name.
-                    let activity = text
-                        .lines()
-                        .next()
-                        .unwrap_or(&text)
-                        .trim()
-                        .to_string();
-                    if !activity.is_empty() && activity.len() < 60 {
+                    let activity = normalize_activity_name(&text);
+                    if !activity.is_empty() {
                         *activity_counts.entry(activity).or_insert(0) += 1;
                     }
                 }
@@ -1093,7 +1243,13 @@ fn extract_recurring_elements(tables: &[ParsedTable]) -> RecurringElements {
         }
     }
 
-    // Filter to items appearing 2+ times (recurring).
+    // Filter to items appearing frequently enough to be "recurring".
+    // With many tables (e.g., 33 weekly plans × 5 days = 165 cells), raise
+    // the threshold proportionally to avoid capturing one-off activities.
+    let num_tables = tables.len();
+    // Require at least 3 occurrences, or 1/table if many tables.
+    let activity_threshold = if num_tables > 5 { num_tables } else { 2 };
+
     let mut subjects: Vec<String> = first_col_counts
         .into_iter()
         .filter(|(_, count)| *count >= 2)
@@ -1103,7 +1259,7 @@ fn extract_recurring_elements(tables: &[ParsedTable]) -> RecurringElements {
 
     let mut activities: Vec<String> = activity_counts
         .into_iter()
-        .filter(|(_, count)| *count >= 2)
+        .filter(|(_, count)| *count >= activity_threshold)
         .map(|(name, _)| name)
         .collect();
     activities.sort();
