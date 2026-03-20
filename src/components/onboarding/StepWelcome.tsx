@@ -2,31 +2,45 @@ import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { motion } from "framer-motion";
+import { GRADE_LEVELS } from "../../types/schedule";
 
 interface Props {
-  onNext: (name: string) => void;
+  onNext: (data: { name: string; gradeLevel: string; schoolName: string }) => void;
   onSkip?: () => void;
   onRestore?: () => void;
+  initialName?: string;
+  initialGrade?: string;
+  initialSchool?: string;
 }
 
-export function StepWelcome({ onNext, onSkip, onRestore }: Props) {
-  const [name, setName] = useState("");
+export function StepWelcome({
+  onNext,
+  onSkip,
+  onRestore,
+  initialName = "",
+  initialGrade = "",
+  initialSchool = "",
+}: Props) {
+  const [name, setName] = useState(initialName);
+  const [gradeLevel, setGradeLevel] = useState(initialGrade);
+  const [schoolName, setSchoolName] = useState(initialSchool);
   const [restoring, setRestoring] = useState(false);
 
   const handleNext = () => {
-    onNext(name.trim());
+    onNext({ name: name.trim(), gradeLevel, schoolName: schoolName.trim() });
   };
 
   const handleRestore = async () => {
     try {
       const path = await open({
         multiple: false,
-        filters: [{ name: "Chalk Backup", extensions: ["chalk-backup.zip", "zip"] }],
+        filters: [
+          { name: "Chalk Backup", extensions: ["chalk-backup.zip", "zip"] },
+        ],
       });
       if (!path) return;
       setRestoring(true);
       await invoke("import_backup", { path });
-      // Re-vectorize in background
       invoke("vectorize_all_plans").catch(() => {});
       onRestore?.();
     } catch (e) {
@@ -34,6 +48,9 @@ export function StepWelcome({ onNext, onSkip, onRestore }: Props) {
       setRestoring(false);
     }
   };
+
+  const inputCls =
+    "w-full max-w-xs mx-auto block px-4 py-2.5 bg-chalk-board-dark/60 border border-chalk-white/8 rounded-lg text-sm text-chalk-white caret-chalk-white placeholder-chalk-muted focus:outline-none focus:border-chalk-blue/40 transition-colors text-center";
 
   return (
     <div className="text-center">
@@ -55,40 +72,88 @@ export function StepWelcome({ onNext, onSkip, onRestore }: Props) {
         transition={{ delay: 0.2 }}
         className="text-chalk-dust text-base mb-6 leading-relaxed"
       >
-        Your AI-powered lesson plan assistant. Connect your
-        Google Drive so Chalk can learn from your teaching history.
+        Your AI-powered lesson plan assistant. Let's get to know your
+        classroom so Chalk can build plans that fit your schedule.
       </motion.p>
 
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.4 }}
-        className="mb-8"
+        transition={{ delay: 0.3 }}
+        className="space-y-4 mb-8"
       >
-        <label
-          htmlFor="teacher-name"
-          className="block text-sm text-chalk-muted mb-2"
-        >
-          What should we call you?
-        </label>
-        <input
-          id="teacher-name"
-          type="text"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") handleNext();
-          }}
-          placeholder="Your first name"
-          className="w-full max-w-xs mx-auto block px-4 py-2.5 bg-chalk-board-dark/60 border border-chalk-white/8 rounded-lg text-sm text-chalk-white caret-chalk-white placeholder-chalk-muted focus:outline-none focus:border-chalk-blue/40 transition-colors text-center"
-          autoFocus
-        />
+        {/* Teacher name */}
+        <div>
+          <label
+            htmlFor="teacher-name"
+            className="block text-sm text-chalk-muted mb-2"
+          >
+            What should we call you?
+          </label>
+          <input
+            id="teacher-name"
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handleNext();
+            }}
+            placeholder="Your first name"
+            className={inputCls}
+            autoFocus
+          />
+        </div>
+
+        {/* Grade level */}
+        <div>
+          <label
+            htmlFor="grade-level"
+            className="block text-sm text-chalk-muted mb-2"
+          >
+            What grade do you teach?
+          </label>
+          <select
+            id="grade-level"
+            value={gradeLevel}
+            onChange={(e) => setGradeLevel(e.target.value)}
+            className={`${inputCls} appearance-none`}
+          >
+            <option value="">Select grade level</option>
+            {GRADE_LEVELS.map((g) => (
+              <option key={g} value={g}>
+                {g}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {/* School name (optional) */}
+        <div>
+          <label
+            htmlFor="school-name"
+            className="block text-sm text-chalk-muted mb-2"
+          >
+            School name{" "}
+            <span className="text-chalk-muted/60">(optional)</span>
+          </label>
+          <input
+            id="school-name"
+            type="text"
+            value={schoolName}
+            onChange={(e) => setSchoolName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handleNext();
+            }}
+            placeholder="e.g. Sunnydale Elementary"
+            className={inputCls}
+          />
+        </div>
       </motion.div>
 
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.6 }}
+        transition={{ delay: 0.5 }}
       >
         <button
           onClick={handleNext}
@@ -101,7 +166,7 @@ export function StepWelcome({ onNext, onSkip, onRestore }: Props) {
       <motion.div
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
-        transition={{ delay: 0.8 }}
+        transition={{ delay: 0.7 }}
         className="flex items-center justify-center gap-4 mt-4"
       >
         {onSkip && (

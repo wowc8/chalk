@@ -2,12 +2,17 @@ import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { motion, AnimatePresence } from "framer-motion";
 import { StepWelcome } from "./StepWelcome";
+import { StepSchoolCalendar, type CalendarExceptionDraft } from "./StepSchoolCalendar";
+import { StepDailySchedule } from "./StepDailySchedule";
+import { StepWeeklySpecials } from "./StepWeeklySpecials";
+import { StepScheduleReview } from "./StepScheduleReview";
 import { StepGoogleAuth } from "./StepGoogleAuth";
 import { StepFolderSelect } from "./StepFolderSelect";
 import { StepInitialDigest } from "./StepInitialDigest";
 import { StepComplete } from "./StepComplete";
 
 import { useTeacherName } from "../../hooks/useTeacherName";
+import type { DraftEvent } from "../../types/schedule";
 
 export interface OnboardingStatus {
   oauth_configured: boolean;
@@ -19,11 +24,12 @@ export interface OnboardingStatus {
   selected_folder_name: string | null;
 }
 
-/** Default flow skips the manual OAuth config step — embedded credentials
- *  are used automatically via PKCE. The oauth-config step is kept in the
- *  array so users can still be routed there from Settings (advanced). */
 const STEPS = [
   "welcome",
+  "school-calendar",
+  "daily-schedule",
+  "weekly-specials",
+  "schedule-review",
   "google-auth",
   "folder-select",
   "initial-digest",
@@ -41,21 +47,23 @@ export function OnboardingWizard({
 }) {
   const [step, setStep] = useState<Step>("welcome");
   const [direction, setDirection] = useState(1);
-
   const [error, setError] = useState<string | null>(null);
   const { name: teacherName, setName: saveTeacherName } = useTeacherName();
+
+  // Wizard-level state shared across steps
+  const [gradeLevel, setGradeLevel] = useState("");
+  const [schoolName, setSchoolName] = useState("");
+  const [calendarData, setCalendarData] = useState<{
+    yearStart: string;
+    yearEnd: string | null;
+    exceptions: CalendarExceptionDraft[];
+  } | null>(null);
+  const [dailyEvents, setDailyEvents] = useState<DraftEvent[]>([]);
+  const [specials, setSpecials] = useState<DraftEvent[]>([]);
 
   useEffect(() => {
     invoke("initialize_oauth").catch(() => {});
   }, []);
-
-  const handleWelcomeNext = useCallback(
-    (name: string) => {
-      if (name) saveTeacherName(name);
-      goTo("google-auth");
-    },
-    [saveTeacherName],
-  );
 
   const goTo = (next: Step) => {
     const curIdx = STEPS.indexOf(step);
@@ -64,6 +72,59 @@ export function OnboardingWizard({
     setError(null);
     setStep(next);
   };
+
+  // Step 1: Welcome
+  const handleWelcomeNext = useCallback(
+    (data: { name: string; gradeLevel: string; schoolName: string }) => {
+      if (data.name) saveTeacherName(data.name);
+      if (data.gradeLevel) {
+        setGradeLevel(data.gradeLevel);
+        invoke("set_app_setting", {
+          key: "grade_level",
+          value: data.gradeLevel,
+        }).catch(() => {});
+      }
+      if (data.schoolName) {
+        setSchoolName(data.schoolName);
+        invoke("set_app_setting", {
+          key: "school_name",
+          value: data.schoolName,
+        }).catch(() => {});
+      }
+      goTo("school-calendar");
+    },
+    [saveTeacherName],
+  );
+
+  // Step 2: School Calendar
+  const handleCalendarNext = useCallback(
+    (data: {
+      yearStart: string;
+      yearEnd: string | null;
+      exceptions: CalendarExceptionDraft[];
+    }) => {
+      setCalendarData(data);
+      goTo("daily-schedule");
+    },
+    [],
+  );
+
+  // Step 3: Daily Schedule
+  const handleDailyNext = useCallback((events: DraftEvent[]) => {
+    setDailyEvents(events);
+    goTo("weekly-specials");
+  }, []);
+
+  // Step 4: Weekly Specials
+  const handleSpecialsNext = useCallback((newSpecials: DraftEvent[]) => {
+    setSpecials(newSpecials);
+    goTo("schedule-review");
+  }, []);
+
+  // Step 5: Schedule Review — saves to DB, then moves to Google Auth
+  const handleReviewNext = useCallback(() => {
+    goTo("google-auth");
+  }, []);
 
   const stepIndex = STEPS.indexOf(step);
 
@@ -129,12 +190,49 @@ export function OnboardingWizard({
                 onNext={handleWelcomeNext}
                 onSkip={onComplete}
                 onRestore={onComplete}
+                initialName={teacherName ?? ""}
+                initialGrade={gradeLevel}
+                initialSchool={schoolName}
+              />
+            )}
+            {step === "school-calendar" && (
+              <StepSchoolCalendar
+                onNext={handleCalendarNext}
+                onBack={() => goTo("welcome")}
+                initialYearStart={calendarData?.yearStart}
+                initialYearEnd={calendarData?.yearEnd}
+                initialExceptions={calendarData?.exceptions}
+              />
+            )}
+            {step === "daily-schedule" && (
+              <StepDailySchedule
+                onNext={handleDailyNext}
+                onBack={() => goTo("school-calendar")}
+                gradeLevel={gradeLevel}
+                initialEvents={dailyEvents}
+              />
+            )}
+            {step === "weekly-specials" && (
+              <StepWeeklySpecials
+                onNext={handleSpecialsNext}
+                onBack={() => goTo("daily-schedule")}
+                dailyEvents={dailyEvents}
+                initialSpecials={specials}
+              />
+            )}
+            {step === "schedule-review" && (
+              <StepScheduleReview
+                onNext={handleReviewNext}
+                onBack={() => goTo("weekly-specials")}
+                dailyEvents={dailyEvents}
+                specials={specials}
+                calendarData={calendarData}
               />
             )}
             {step === "google-auth" && (
               <StepGoogleAuth
                 onNext={() => goTo("folder-select")}
-                onBack={() => goTo("welcome")}
+                onBack={() => goTo("schedule-review")}
                 setError={setError}
               />
             )}

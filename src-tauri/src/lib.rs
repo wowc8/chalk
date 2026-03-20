@@ -716,6 +716,52 @@ fn delete_calendar_exception(
         .map_err(|e| format!("{e}"))
 }
 
+// ── Event Occurrence Tauri Commands ─────────────────────────
+
+#[tauri::command]
+fn create_event_occurrence(
+    state: tauri::State<AppState>,
+    input: database::NewEventOccurrence,
+) -> Result<database::EventOccurrence, String> {
+    state
+        .db
+        .create_event_occurrence(&input)
+        .map_err(|e| format!("{e}"))
+}
+
+#[tauri::command]
+fn list_event_occurrences(
+    state: tauri::State<AppState>,
+    event_id: String,
+) -> Result<Vec<database::EventOccurrence>, String> {
+    state
+        .db
+        .list_event_occurrences(&event_id)
+        .map_err(|e| format!("{e}"))
+}
+
+#[tauri::command]
+fn delete_event_occurrence(
+    state: tauri::State<AppState>,
+    id: String,
+) -> Result<(), String> {
+    state
+        .db
+        .delete_event_occurrence(&id)
+        .map_err(|e| format!("{e}"))
+}
+
+#[tauri::command]
+fn list_calendar_exceptions(
+    state: tauri::State<AppState>,
+    calendar_id: String,
+) -> Result<Vec<database::CalendarException>, String> {
+    state
+        .db
+        .list_calendar_exceptions(&calendar_id)
+        .map_err(|e| format!("{e}"))
+}
+
 // ── App Settings Tauri Commands ─────────────────────────────
 
 #[tauri::command]
@@ -964,6 +1010,10 @@ pub fn run() {
             update_school_calendar,
             add_calendar_exception,
             delete_calendar_exception,
+            create_event_occurrence,
+            list_event_occurrences,
+            delete_event_occurrence,
+            list_calendar_exceptions,
             cache_get,
             cache_clear,
             cache_stats,
