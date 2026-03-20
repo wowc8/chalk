@@ -189,6 +189,14 @@ fn embedded_migrations() -> Vec<Migration> {
                 include_str!("../../migrations/009_teaching_templates.down.sql").to_string(),
             ),
         },
+        Migration {
+            version: 10,
+            description: "ltp_documents".to_string(),
+            up_sql: include_str!("../../migrations/010_ltp_documents.up.sql").to_string(),
+            down_sql: Some(
+                include_str!("../../migrations/010_ltp_documents.down.sql").to_string(),
+            ),
+        },
     ]
 }
 
@@ -351,13 +359,13 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
     }
 
     #[test]
     fn test_embedded_migrations_match_file_count() {
         let migrations = embedded_migrations();
-        assert_eq!(migrations.len(), 9);
+        assert_eq!(migrations.len(), 10);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(migrations[0].description, "initial_schema");
         assert_eq!(migrations[1].version, 2);
@@ -376,6 +384,8 @@ mod tests {
         assert_eq!(migrations[7].description, "reference_docs");
         assert_eq!(migrations[8].version, 9);
         assert_eq!(migrations[8].description, "teaching_templates");
+        assert_eq!(migrations[9].version, 10);
+        assert_eq!(migrations[9].description, "ltp_documents");
     }
 
     #[test]
@@ -385,7 +395,7 @@ mod tests {
         assert_eq!(current_version(&conn).unwrap(), 0);
 
         run_all(&conn).unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 9);
+        assert_eq!(current_version(&conn).unwrap(), 10);
     }
 
     #[test]
@@ -393,6 +403,11 @@ mod tests {
         let conn = test_conn();
 
         run_all(&conn).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 10);
+
+        // Rollback version 10 (ltp_documents).
+        let rolled_back = rollback_last(&conn, None).unwrap();
+        assert_eq!(rolled_back, Some(10));
         assert_eq!(current_version(&conn).unwrap(), 9);
 
         // Rollback version 9 (teaching_templates).
@@ -450,10 +465,10 @@ mod tests {
         let conn = test_conn();
 
         run_all(&conn).unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 9);
+        assert_eq!(current_version(&conn).unwrap(), 10);
 
         // Rollback all.
-        for _ in 0..9 {
+        for _ in 0..10 {
             rollback_last(&conn, None).unwrap();
         }
         assert_eq!(current_version(&conn).unwrap(), 0);
@@ -564,7 +579,7 @@ mod tests {
         let migrations =
             discover_migrations(Path::new("/nonexistent/migrations/dir")).unwrap();
         // Falls back to embedded migrations.
-        assert_eq!(migrations.len(), 9);
+        assert_eq!(migrations.len(), 10);
     }
 
     #[test]
@@ -593,6 +608,6 @@ mod tests {
 
         // Run all — should apply remaining versions.
         run_all(&conn).unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 9);
+        assert_eq!(current_version(&conn).unwrap(), 10);
     }
 }

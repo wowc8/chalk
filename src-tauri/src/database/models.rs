@@ -184,6 +184,60 @@ pub struct DailyRoutineEvent {
     pub bg_color: Option<String>,
 }
 
+// ── LTP Documents ────────────────────────────────────────────
+
+/// An imported Long-Term Plan document (LTP or school calendar HTML file).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LtpDocument {
+    pub id: String,
+    pub filename: String,
+    pub file_hash: String,
+    pub school_year: Option<String>,
+    pub doc_type: String,
+    pub raw_html: String,
+    pub imported_at: String,
+    pub updated_at: String,
+}
+
+/// A parsed grid cell from an LTP document (resolved W3C grid output).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LtpGridCell {
+    pub id: String,
+    pub document_id: String,
+    pub row_index: i32,
+    pub col_index: i32,
+    pub subject: Option<String>,
+    pub month: Option<String>,
+    pub content_html: Option<String>,
+    pub content_text: Option<String>,
+    pub background_color: Option<String>,
+    pub unit_name: Option<String>,
+    pub unit_color: Option<String>,
+}
+
+/// A school calendar entry parsed from a calendar-type LTP document.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchoolCalendarEntry {
+    pub id: String,
+    pub document_id: String,
+    pub date: Option<String>,
+    pub day_number: Option<i32>,
+    pub unit_name: Option<String>,
+    pub unit_color: Option<String>,
+    pub is_holiday: bool,
+    pub holiday_name: Option<String>,
+    pub notes: Option<String>,
+}
+
+/// Result of an LTP import operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum LtpImportResult {
+    /// Document was imported (new or updated).
+    Imported(LtpDocument),
+    /// Document was skipped because content hash matches existing.
+    Skipped { id: String, filename: String },
+}
+
 // ── Tags ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
