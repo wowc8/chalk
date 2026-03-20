@@ -163,10 +163,39 @@ fn import_ltp_document(
 
     match result {
         database::LtpImportResult::Imported(doc) => {
+            // Parse the LTP HTML and store grid cells.
+            let parse_result = digest::ltp_parser::parse_ltp_html(&raw_html);
+            let cells_stored = parse_result.cells.len();
+
+            for cell in &parse_result.cells {
+                if let Err(e) = state.db.insert_ltp_grid_cell(
+                    &doc.id,
+                    cell.row_index,
+                    cell.col_index,
+                    cell.subject.as_deref(),
+                    cell.month.as_deref(),
+                    cell.content_html.as_deref(),
+                    cell.content_text.as_deref(),
+                    cell.background_color.as_deref(),
+                    cell.unit_name.as_deref(),
+                    cell.unit_color.as_deref(),
+                ) {
+                    tracing::warn!(
+                        row = cell.row_index,
+                        col = cell.col_index,
+                        error = %e,
+                        "Failed to insert LTP grid cell"
+                    );
+                }
+            }
+
             tracing::info!(
                 filename = doc.filename.as_str(),
                 doc_type = doc.doc_type.as_str(),
-                "LTP document imported"
+                cells_stored,
+                months = parse_result.month_headers.len(),
+                subjects = parse_result.subject_labels.len(),
+                "LTP document imported and parsed"
             );
             Ok(serde_json::json!({
                 "status": "imported",
@@ -174,6 +203,9 @@ fn import_ltp_document(
                 "filename": doc.filename,
                 "doc_type": doc.doc_type,
                 "school_year": doc.school_year,
+                "cells_parsed": cells_stored,
+                "months": parse_result.month_headers,
+                "subjects": parse_result.subject_labels,
             }))
         }
         database::LtpImportResult::Skipped { id, filename } => {
