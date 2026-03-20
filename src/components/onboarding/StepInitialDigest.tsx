@@ -43,27 +43,33 @@ export function StepInitialDigest({
     setProgressMessage("Connecting to Google Drive...");
     setProgressPercent(0);
 
-    unlistenRef.current = await listen<DigestProgress>(
-      "digest:progress",
-      (event) => {
-        const { phase, current, total, current_document } = event.payload;
-        if (phase === "downloading") {
-          const pct = total > 0 ? Math.round((current / total) * 50) : 0;
-          setProgressPercent(Math.min(pct, 50));
-          setProgressMessage(
-            `Downloading ${total} file${total !== 1 ? "s" : ""}...`
-          );
-        } else if (phase === "analyzing") {
-          const pct = total > 0 ? 50 + Math.round((current / total) * 40) : 50;
-          setProgressPercent(Math.min(pct, 90));
-          setProgressMessage(
-            current_document
-              ? `Analyzing your lesson plans... (${current}/${total})`
-              : "Analyzing your lesson plans..."
-          );
+    try {
+      unlistenRef.current = await listen<DigestProgress>(
+        "digest:progress",
+        (event) => {
+          const { phase, current, total, current_document } = event.payload;
+          if (phase === "downloading") {
+            const pct = total > 0 ? Math.round((current / total) * 50) : 0;
+            setProgressPercent(Math.min(pct, 50));
+            setProgressMessage(
+              `Downloading ${total} file${total !== 1 ? "s" : ""}...`
+            );
+          } else if (phase === "analyzing") {
+            const pct =
+              total > 0 ? 50 + Math.round((current / total) * 40) : 50;
+            setProgressPercent(Math.min(pct, 90));
+            setProgressMessage(
+              current_document
+                ? `Analyzing your lesson plans... (${current}/${total})`
+                : "Analyzing your lesson plans..."
+            );
+          }
         }
-      }
-    );
+      );
+    } catch {
+      // Event listener unavailable (e.g. in test environment) — progress
+      // will stay at the initial message until the invoke resolves.
+    }
   };
 
   const stopListening = () => {
