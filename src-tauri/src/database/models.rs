@@ -166,6 +166,24 @@ pub struct RecurringElements {
     pub activities: Vec<String>,
 }
 
+/// Classification of a recurring event for prompt generation.
+/// - `fixed`: Same content every day (breakfast, lunch, recess, dismissal).
+/// - `variable`: Same time slot but content should change daily (centers, lessons, morning work).
+/// - `day_specific`: Only occurs on certain days (PE on Monday, Drama on Wednesday).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutineEventType {
+    Fixed,
+    Variable,
+    DaySpecific,
+}
+
+impl Default for RoutineEventType {
+    fn default() -> Self {
+        RoutineEventType::Fixed
+    }
+}
+
 /// A recurring event that appears consistently across most days at a similar time,
 /// detected purely by frequency analysis (≥60% of day columns at the same time slot).
 /// Examples: breakfast, lunch, recess, gym, specials, dismissal, morning meeting.
@@ -182,6 +200,9 @@ pub struct DailyRoutineEvent {
     /// Extracted from the most common cell background-color at this time slot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bg_color: Option<String>,
+    /// Classification: fixed (same daily), variable (different content daily), or day_specific.
+    #[serde(default)]
+    pub event_type: RoutineEventType,
 }
 
 // ── LTP Documents ────────────────────────────────────────────
@@ -247,6 +268,26 @@ pub struct LtpSubjectContext {
     pub content: String,
 }
 
+/// Per-day activity details extracted from LTP grid cells.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LtpDailyDetail {
+    /// Day of the week (e.g., "Monday").
+    pub day: String,
+    /// Activity entries for this day (center names, materials, small group tasks).
+    pub entries: Vec<String>,
+}
+
+/// A relationship between paired events (e.g., "New Center Intro" introduces "Centers: 60 Min").
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventRelationship {
+    /// The introductory/setup event name.
+    pub intro_event: String,
+    /// The main event that follows.
+    pub main_event: String,
+    /// Description of the relationship.
+    pub description: String,
+}
+
 /// Structured LTP context for a given date, ready for AI prompt injection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LtpContext {
@@ -258,6 +299,12 @@ pub struct LtpContext {
     pub subjects: Vec<LtpSubjectContext>,
     /// Calendar notes for the week (holidays, half days, etc.).
     pub calendar_notes: Vec<String>,
+    /// Per-day activity details from LTP cells (centers, materials, small groups).
+    #[serde(default)]
+    pub daily_details: Vec<LtpDailyDetail>,
+    /// Paired event relationships detected from the template.
+    #[serde(default)]
+    pub event_relationships: Vec<EventRelationship>,
 }
 
 // ── Tags ─────────────────────────────────────────────────────

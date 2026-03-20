@@ -20,7 +20,7 @@ use tracing::{info, warn};
 use crate::chat::provider::{AiProvider, CompletionMessage};
 use crate::database::{
     ColorMapping, ColorScheme, ContentPatterns, DailyRoutineEvent, RecurringElements,
-    TableStructure, TeachingTemplateSchema,
+    RoutineEventType, TableStructure, TeachingTemplateSchema,
 };
 use crate::errors::ChalkError;
 
@@ -1329,6 +1329,54 @@ fn extract_recurring_elements(tables: &[ParsedTable]) -> RecurringElements {
 /// a `DailyRoutineEvent` along with which specific days it occurs on.
 ///
 /// No hardcoded keyword list is used — any recurring event is detected dynamically.
+/// Classify a routine event as fixed, variable, or day-specific based on its name
+/// and how many days it appears on.
+fn classify_routine_event(name: &str, days: &[String], total_days: usize) -> RoutineEventType {
+    let lower = name.to_lowercase();
+
+    // Fixed: meals, breaks, transitions that are truly identical every day.
+    let fixed_keywords = [
+        "breakfast", "lunch", "recess", "dismissal", "snack", "pack up",
+        "rest time", "nap", "arrival", "car line", "bus",
+    ];
+    if fixed_keywords.iter().any(|kw| lower.contains(kw)) {
+        return RoutineEventType::Fixed;
+    }
+
+    // Day-specific: appears on fewer days than the total (e.g., PE on Mon/Wed only).
+    if days.len() < total_days {
+        // Check if it's a special/elective.
+        let special_keywords = [
+            "pe", "drama", "music", "art", "library", "mandarin", "spanish",
+            "french", "stem", "lab", "chapel", "assembly", "gym",
+        ];
+        if special_keywords.iter().any(|kw| lower.contains(kw)) {
+            return RoutineEventType::DaySpecific;
+        }
+        // Fewer days but not a recognized special — still day-specific.
+        if days.len() <= total_days / 2 {
+            return RoutineEventType::DaySpecific;
+        }
+    }
+
+    // Variable: instructional blocks that should have different content each day.
+    let variable_keywords = [
+        "center", "small group", "lesson", "morning work", "journal",
+        "writing", "reading", "math", "ela", "science", "social studies",
+        "circle", "calendar", "phonics", "read aloud",
+    ];
+    if variable_keywords.iter().any(|kw| lower.contains(kw)) {
+        return RoutineEventType::Variable;
+    }
+
+    // Default: if it appears every day, treat as fixed; otherwise variable.
+    if days.len() >= total_days {
+        RoutineEventType::Fixed
+    } else {
+        RoutineEventType::Variable
+    }
+}
+
 fn extract_daily_routine(tables: &[ParsedTable]) -> Vec<DailyRoutineEvent> {
     let mut routine_events: Vec<DailyRoutineEvent> = Vec::new();
     let mut seen_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1399,6 +1447,7 @@ fn extract_daily_routine(tables: &[ParsedTable]) -> Vec<DailyRoutineEvent> {
                                 time_slot: time_slot.clone(),
                                 days: days.clone(),
                                 bg_color: bg_color.clone(),
+                                event_type: classify_routine_event(display_name, days, num_days),
                             });
                         }
                     }
@@ -1454,6 +1503,7 @@ fn extract_daily_routine(tables: &[ParsedTable]) -> Vec<DailyRoutineEvent> {
                                 time_slot: time_slot.clone(),
                                 days: days.clone(),
                                 bg_color: bg_color.clone(),
+                                event_type: classify_routine_event(display_name, days, num_days),
                             });
                         }
                     }
@@ -1706,6 +1756,7 @@ mod tests {
                 time_slot: Some("12:00-12:30".to_string()),
                 days: vec!["Monday".to_string(), "Tuesday".to_string(), "Wednesday".to_string(), "Thursday".to_string(), "Friday".to_string()],
                 bg_color: None,
+                event_type: RoutineEventType::Fixed,
             }],
         };
 
