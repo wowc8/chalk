@@ -6,6 +6,7 @@ import { StepSchoolCalendar, type CalendarExceptionDraft } from "./StepSchoolCal
 import { StepDailySchedule } from "./StepDailySchedule";
 import { StepWeeklySpecials } from "./StepWeeklySpecials";
 import { StepScheduleReview } from "./StepScheduleReview";
+import { StepAiSetup } from "./StepAiSetup";
 import { StepGoogleAuth } from "./StepGoogleAuth";
 import { StepFolderSelect } from "./StepFolderSelect";
 import { StepInitialDigest } from "./StepInitialDigest";
@@ -27,6 +28,7 @@ export interface OnboardingStatus {
 const STEPS = [
   "welcome",
   "school-calendar",
+  "ai-setup",
   "google-auth",
   "folder-select",
   "initial-digest",
@@ -105,7 +107,7 @@ export function OnboardingWizard({
       exceptions: CalendarExceptionDraft[];
     }) => {
       setCalendarData(data);
-      goTo("google-auth");
+      goTo("ai-setup");
     },
     [],
   );
@@ -220,10 +222,18 @@ export function OnboardingWizard({
                 initialExceptions={calendarData?.exceptions}
               />
             )}
+            {step === "ai-setup" && (
+              <StepAiSetup
+                onNext={() => goTo("google-auth")}
+                onBack={() => goTo("school-calendar")}
+                onSkip={() => goTo("google-auth")}
+                setError={setError}
+              />
+            )}
             {step === "google-auth" && (
               <StepGoogleAuth
                 onNext={() => goTo("folder-select")}
-                onBack={() => goTo("school-calendar")}
+                onBack={() => goTo("ai-setup")}
                 setError={setError}
               />
             )}

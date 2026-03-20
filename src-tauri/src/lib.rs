@@ -1172,6 +1172,7 @@ pub fn run() {
             chat::vectorize_all_plans,
             chat::save_ai_config,
             chat::get_ai_config,
+            chat::validate_openai_key,
             backup::export_backup,
             backup::import_backup,
             backup::get_backup_info,

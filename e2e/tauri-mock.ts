@@ -186,6 +186,10 @@ export async function setupTauriMocks(
 
         // --- Schedule / Calendar commands ---
 
+        validate_openai_key: () => true,
+        save_ai_config: () => null,
+        get_ai_config: () => ({ has_api_key: false, base_url: "https://api.openai.com/v1", model: "gpt-4o-mini" }),
+
         get_app_setting: () => null,
         set_app_setting: () => null,
 
@@ -241,8 +245,8 @@ export async function setupTauriMocks(
           return id;
         },
         invoke: (cmd: string, args: Record<string, unknown> = {}) => {
-          // Handle Tauri event plugin commands (listen/unlisten/emit) as no-ops.
-          if (cmd.startsWith("plugin:event|")) {
+          // Handle Tauri plugin commands (event, shell, etc.) as no-ops.
+          if (cmd.startsWith("plugin:event|") || cmd.startsWith("plugin:shell|") || cmd.startsWith("plugin:opener|")) {
             return Promise.resolve(0);
           }
 
