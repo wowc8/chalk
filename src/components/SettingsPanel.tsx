@@ -5,6 +5,10 @@ import { motion, AnimatePresence } from "framer-motion";
 import { useConnectors, type ConnectionDetails, type PendingOp } from "../hooks/useConnectors";
 import { useAiConfig } from "../hooks/useChat";
 import { useToast } from "./Toast";
+import { SettingsMyProfile } from "./settings/SettingsMyProfile";
+import { SettingsSchoolCalendar } from "./settings/SettingsSchoolCalendar";
+import { SettingsDailySchedule } from "./settings/SettingsDailySchedule";
+import { SettingsWeeklySpecials } from "./settings/SettingsWeeklySpecials";
 
 const spring = { type: "spring" as const, stiffness: 300, damping: 30 };
 
@@ -114,6 +118,18 @@ export function SettingsPanel({ open, onClose, onReconnect }: SettingsPanelProps
                   </svg>
                 </button>
               </div>
+
+              {/* My Profile */}
+              <SettingsMyProfile addToast={addToast} />
+
+              {/* School Calendar */}
+              <SettingsSchoolCalendar addToast={addToast} />
+
+              {/* Daily Schedule */}
+              <SettingsDailySchedule addToast={addToast} />
+
+              {/* Weekly Specials */}
+              <SettingsWeeklySpecials addToast={addToast} />
 
               {/* Connections Section */}
               <section className="mb-8">
