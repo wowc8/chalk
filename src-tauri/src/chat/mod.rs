@@ -1920,6 +1920,21 @@ pub fn get_ai_config(state: tauri::State<'_, AppState>) -> Result<serde_json::Va
     }))
 }
 
+/// Validate an OpenAI API key by making a lightweight models-list request.
+/// Returns Ok(true) if the key is valid, Ok(false) if rejected, or Err on network failure.
+#[tauri::command]
+pub async fn validate_openai_key(api_key: String) -> Result<bool, String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("https://api.openai.com/v1/models")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {e}"))?;
+
+    Ok(resp.status().is_success())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

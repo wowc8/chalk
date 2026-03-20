@@ -13,18 +13,29 @@
  * No real Google API calls or Rust backend required — all Tauri
  * commands are intercepted by the mock layer in `tauri-mock.ts`.
  *
- * Flow: Welcome → School Calendar → Sign In → Select Source → Scan
- *       → Daily Schedule → Weekly Specials → Schedule Review → Done
+ * Flow: Welcome → School Calendar → AI Setup → Sign In → Select Source
+ *       → Scan → Daily Schedule → Weekly Specials → Schedule Review → Done
  */
 
 import { test, expect } from "@playwright/test";
 import { setupTauriMocks, MOCK_ITEMS } from "./tauri-mock";
 
 // ---------------------------------------------------------------------------
-// Helper: navigate through sign-in + import steps (steps 3-5)
+// Helper: navigate through AI Setup step (step 3)
+// ---------------------------------------------------------------------------
+async function completeAiSetupStep(page: import("@playwright/test").Page) {
+  await expect(
+    page.getByRole("heading", { name: "Power Up with AI" }),
+  ).toBeVisible();
+  // Skip for now (tests don't need a real key)
+  await page.getByText(/Skip for now/i).click();
+}
+
+// ---------------------------------------------------------------------------
+// Helper: navigate through sign-in + import steps (steps 4-6)
 // ---------------------------------------------------------------------------
 async function completeImportSteps(page: import("@playwright/test").Page) {
-  // Step 3: Sign In
+  // Step 4: Sign In
   await expect(
     page.getByRole("heading", { name: "Sign in with Google" }),
   ).toBeVisible();
@@ -120,9 +131,9 @@ test("welcome step renders and Get Started advances to school calendar", async (
 });
 
 // ---------------------------------------------------------------------------
-// 3. Calendar advances to Google sign-in (new order)
+// 3. Calendar advances to AI Setup (new order)
 // ---------------------------------------------------------------------------
-test("school calendar advances to sign-in", async ({
+test("school calendar advances to AI setup", async ({
   page,
 }) => {
   await setupTauriMocks(page);
@@ -137,9 +148,9 @@ test("school calendar advances to sign-in", async ({
   ).toBeVisible();
   await page.getByRole("button", { name: "Next" }).click();
 
-  // Should advance to sign-in (not daily schedule)
+  // Should advance to AI Setup
   await expect(
-    page.getByRole("heading", { name: "Sign in with Google" }),
+    page.getByRole("heading", { name: "Power Up with AI" }),
   ).toBeVisible();
 });
 
@@ -152,9 +163,10 @@ test("import step advances to daily schedule after scan", async ({
   await setupTauriMocks(page);
   await page.goto("/");
 
-  // Navigate through welcome + calendar
+  // Navigate through welcome + calendar + AI setup
   await page.getByRole("button", { name: "Get Started" }).click();
   await page.getByRole("button", { name: "Next" }).click();
+  await completeAiSetupStep(page);
 
   // Complete import steps
   await completeImportSteps(page);
@@ -191,9 +203,10 @@ test("daily schedule shows pre-filled events from LTP extraction", async ({
   });
   await page.goto("/");
 
-  // Navigate through welcome + calendar + import
+  // Navigate through welcome + calendar + AI setup + import
   await page.getByRole("button", { name: "Get Started" }).click();
   await page.getByRole("button", { name: "Next" }).click();
+  await completeAiSetupStep(page);
   await completeImportSteps(page);
 
   // Should show pre-filled confirmation
@@ -232,13 +245,16 @@ test("full onboarding flow reaches completion", async ({ page }) => {
   ).toBeVisible();
   await page.getByRole("button", { name: "Next" }).click();
 
-  // Steps 3-5: Sign In + Select Source + Import
+  // Step 3: AI Setup
+  await completeAiSetupStep(page);
+
+  // Steps 4-6: Sign In + Select Source + Import
   await completeImportSteps(page);
 
-  // Steps 6-8: Daily Schedule + Specials + Review
+  // Steps 7-9: Daily Schedule + Specials + Review
   await completeScheduleSteps(page);
 
-  // Step 9: Complete
+  // Step 10: Complete
   await expect(
     page.getByRole("heading", { name: /You're All Set/i }),
   ).toBeVisible();
@@ -248,15 +264,15 @@ test("full onboarding flow reaches completion", async ({ page }) => {
 });
 
 // ---------------------------------------------------------------------------
-// 7. Wizard progress indicators are rendered (9 steps)
+// 7. Wizard progress indicators are rendered (10 steps)
 // ---------------------------------------------------------------------------
 test("progress indicators are displayed for each step", async ({ page }) => {
   await setupTauriMocks(page);
   await page.goto("/");
 
-  // The OnboardingWizard renders 9 rounded-full indicator dots (one per step)
+  // The OnboardingWizard renders 10 rounded-full indicator dots (one per step)
   const dots = page.locator(".rounded-full.w-2\\.5.h-2\\.5");
-  await expect(dots).toHaveCount(9);
+  await expect(dots).toHaveCount(10);
 });
 
 // ---------------------------------------------------------------------------
