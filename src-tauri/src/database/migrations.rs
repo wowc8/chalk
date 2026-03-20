@@ -205,6 +205,14 @@ fn embedded_migrations() -> Vec<Migration> {
                 include_str!("../../migrations/011_schedule_schema.down.sql").to_string(),
             ),
         },
+        Migration {
+            version: 12,
+            description: "lesson_plan_dates".to_string(),
+            up_sql: include_str!("../../migrations/012_lesson_plan_dates.up.sql").to_string(),
+            down_sql: Some(
+                include_str!("../../migrations/012_lesson_plan_dates.down.sql").to_string(),
+            ),
+        },
     ]
 }
 
@@ -367,13 +375,13 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 11);
+        assert_eq!(version, 12);
     }
 
     #[test]
     fn test_embedded_migrations_match_file_count() {
         let migrations = embedded_migrations();
-        assert_eq!(migrations.len(), 11);
+        assert_eq!(migrations.len(), 12);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(migrations[0].description, "initial_schema");
         assert_eq!(migrations[1].version, 2);
@@ -396,6 +404,8 @@ mod tests {
         assert_eq!(migrations[9].description, "ltp_documents");
         assert_eq!(migrations[10].version, 11);
         assert_eq!(migrations[10].description, "schedule_schema");
+        assert_eq!(migrations[11].version, 12);
+        assert_eq!(migrations[11].description, "lesson_plan_dates");
     }
 
     #[test]
@@ -405,7 +415,7 @@ mod tests {
         assert_eq!(current_version(&conn).unwrap(), 0);
 
         run_all(&conn).unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 10);
+        assert_eq!(current_version(&conn).unwrap(), 12);
     }
 
     #[test]
@@ -413,7 +423,12 @@ mod tests {
         let conn = test_conn();
 
         run_all(&conn).unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 10);
+        assert_eq!(current_version(&conn).unwrap(), 12);
+
+        // Rollback version 12 (lesson_plan_dates).
+        let rolled_back = rollback_last(&conn, None).unwrap();
+        assert_eq!(rolled_back, Some(12));
+        assert_eq!(current_version(&conn).unwrap(), 11);
 
         // Rollback version 11 (schedule_schema).
         let rolled_back = rollback_last(&conn, None).unwrap();
@@ -480,17 +495,17 @@ mod tests {
         let conn = test_conn();
 
         run_all(&conn).unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 10);
+        assert_eq!(current_version(&conn).unwrap(), 12);
 
         // Rollback all.
-        for _ in 0..11 {
+        for _ in 0..12 {
             rollback_last(&conn, None).unwrap();
         }
         assert_eq!(current_version(&conn).unwrap(), 0);
 
         // Reapply all.
         run_all(&conn).unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 10);
+        assert_eq!(current_version(&conn).unwrap(), 12);
 
         // Verify tables exist after reapply.
         let table_count: i32 = conn
@@ -594,7 +609,7 @@ mod tests {
         let migrations =
             discover_migrations(Path::new("/nonexistent/migrations/dir")).unwrap();
         // Falls back to embedded migrations.
-        assert_eq!(migrations.len(), 11);
+        assert_eq!(migrations.len(), 12);
     }
 
     #[test]
@@ -623,6 +638,6 @@ mod tests {
 
         // Run all — should apply remaining versions.
         run_all(&conn).unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 10);
+        assert_eq!(current_version(&conn).unwrap(), 12);
     }
 }

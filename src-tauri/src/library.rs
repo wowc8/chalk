@@ -1,6 +1,6 @@
 use crate::database::{
     FtsSearchResult, HybridSearchResult, LessonPlan, LibraryPlanCard, LibraryQuery, NewLessonPlan,
-    NewTag, PlanVersion, Tag,
+    NewTag, PlanVersion, SchoolYearGroup, Tag,
 };
 use crate::rag::embeddings::EmbeddingClient;
 use crate::AppState;
@@ -184,6 +184,9 @@ pub fn create_plan(
         source_type: source_type.unwrap_or_else(|| "created".to_string()),
         version: 1,
         tags: Vec::new(),
+        week_start_date: plan.week_start_date,
+        week_end_date: plan.week_end_date,
+        school_year: plan.school_year,
         created_at: plan.created_at,
         updated_at: plan.updated_at,
     })
@@ -224,7 +227,7 @@ pub fn update_plan_title(
             return Err(crate::database::DatabaseError::NotFound);
         }
         conn.query_row(
-            "SELECT id, subject_id, title, content, source_doc_id, source_table_index, learning_objectives, status, created_at, updated_at
+            "SELECT id, subject_id, title, content, source_doc_id, source_table_index, learning_objectives, status, week_start_date, week_end_date, school_year, created_at, updated_at
              FROM lesson_plans WHERE id = ?1",
             rusqlite::params![id],
             |row| {
@@ -237,8 +240,11 @@ pub fn update_plan_title(
                     source_table_index: row.get(5)?,
                     learning_objectives: row.get(6)?,
                     status: row.get(7)?,
-                    created_at: row.get(8)?,
-                    updated_at: row.get(9)?,
+                    week_start_date: row.get(8)?,
+                    week_end_date: row.get(9)?,
+                    school_year: row.get(10)?,
+                    created_at: row.get(11)?,
+                    updated_at: row.get(12)?,
                 })
             },
         )
@@ -338,6 +344,51 @@ pub fn revert_plan_version(
     state
         .db
         .revert_plan_to_version(&plan_id, version)
+        .map_err(|e| format!("{}", e))
+}
+
+/// List lesson plans grouped by school year and month for the chronological library view.
+#[tauri::command]
+pub fn list_library_plans_chronological(
+    state: tauri::State<'_, AppState>,
+    search: Option<String>,
+) -> Result<Vec<SchoolYearGroup>, String> {
+    state
+        .db
+        .list_library_plans_chronological(search.as_deref())
+        .map_err(|e| format!("{}", e))
+}
+
+/// Update date metadata on a lesson plan.
+#[tauri::command]
+pub fn update_plan_dates(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    week_start_date: Option<String>,
+    week_end_date: Option<String>,
+    school_year: Option<String>,
+) -> Result<LessonPlan, String> {
+    state
+        .db
+        .update_lesson_plan_dates(
+            &id,
+            week_start_date.as_deref(),
+            week_end_date.as_deref(),
+            school_year.as_deref(),
+        )
+        .map_err(|e| format!("{}", e))
+}
+
+/// Duplicate a lesson plan as a new editable template.
+#[tauri::command]
+pub fn duplicate_plan_as_template(
+    state: tauri::State<'_, AppState>,
+    source_plan_id: String,
+    new_title: String,
+) -> Result<LessonPlan, String> {
+    state
+        .db
+        .duplicate_plan_as_template(&source_plan_id, &new_title)
         .map_err(|e| format!("{}", e))
 }
 
@@ -901,5 +952,167 @@ mod tests {
 
         let updated = db.get_lesson_plan(&plan.id).unwrap();
         assert_eq!(updated.status, "finalized");
+    }
+
+    #[test]
+    fn test_update_plan_dates() {
+        let db = test_db();
+
+        let subject = db
+            .create_subject(&crate::database::NewSubject {
+                name: "Math".into(),
+                grade_level: None,
+                description: None,
+            })
+            .unwrap();
+        let plan = db
+            .create_lesson_plan(&NewLessonPlan {
+                subject_id: subject.id.clone(),
+                title: "Week 1 Math".into(),
+                content: Some("Addition basics".into()),
+                source_doc_id: None,
+                source_table_index: None,
+                learning_objectives: None,
+            })
+            .unwrap();
+
+        // Initially no dates
+        assert!(plan.week_start_date.is_none());
+        assert!(plan.school_year.is_none());
+
+        // Set dates
+        let updated = db
+            .update_lesson_plan_dates(
+                &plan.id,
+                Some("2024-09-02"),
+                Some("2024-09-06"),
+                Some("2024-25"),
+            )
+            .unwrap();
+        assert_eq!(updated.week_start_date.as_deref(), Some("2024-09-02"));
+        assert_eq!(updated.week_end_date.as_deref(), Some("2024-09-06"));
+        assert_eq!(updated.school_year.as_deref(), Some("2024-25"));
+    }
+
+    #[test]
+    fn test_chronological_library_grouping() {
+        let db = test_db();
+
+        let subject = db
+            .create_subject(&crate::database::NewSubject {
+                name: "Science".into(),
+                grade_level: None,
+                description: None,
+            })
+            .unwrap();
+
+        // Create plans in different months and school years
+        let plan1 = db
+            .create_lesson_plan(&NewLessonPlan {
+                subject_id: subject.id.clone(),
+                title: "Sep Week 1".into(),
+                content: Some("Content".into()),
+                source_doc_id: None,
+                source_table_index: None,
+                learning_objectives: None,
+            })
+            .unwrap();
+        db.update_lesson_plan_dates(&plan1.id, Some("2024-09-02"), Some("2024-09-06"), Some("2024-25"))
+            .unwrap();
+
+        let plan2 = db
+            .create_lesson_plan(&NewLessonPlan {
+                subject_id: subject.id.clone(),
+                title: "Sep Week 2".into(),
+                content: Some("Content".into()),
+                source_doc_id: None,
+                source_table_index: None,
+                learning_objectives: None,
+            })
+            .unwrap();
+        db.update_lesson_plan_dates(&plan2.id, Some("2024-09-09"), Some("2024-09-13"), Some("2024-25"))
+            .unwrap();
+
+        let plan3 = db
+            .create_lesson_plan(&NewLessonPlan {
+                subject_id: subject.id.clone(),
+                title: "Oct Week 1".into(),
+                content: Some("Content".into()),
+                source_doc_id: None,
+                source_table_index: None,
+                learning_objectives: None,
+            })
+            .unwrap();
+        db.update_lesson_plan_dates(&plan3.id, Some("2024-10-07"), Some("2024-10-11"), Some("2024-25"))
+            .unwrap();
+
+        let plan4 = db
+            .create_lesson_plan(&NewLessonPlan {
+                subject_id: subject.id.clone(),
+                title: "Last Year Sep".into(),
+                content: Some("Content".into()),
+                source_doc_id: None,
+                source_table_index: None,
+                learning_objectives: None,
+            })
+            .unwrap();
+        db.update_lesson_plan_dates(&plan4.id, Some("2023-09-04"), Some("2023-09-08"), Some("2023-24"))
+            .unwrap();
+
+        // Query chronological library
+        let groups = db.list_library_plans_chronological(None).unwrap();
+        assert_eq!(groups.len(), 2); // two school years
+
+        // Most recent school year first
+        assert_eq!(groups[0].school_year, "2024-25");
+        assert_eq!(groups[1].school_year, "2023-24");
+
+        // 2024-25 has 2 months
+        assert_eq!(groups[0].months.len(), 2);
+        assert_eq!(groups[0].months[0].month_name, "September");
+        assert_eq!(groups[0].months[0].plans.len(), 2);
+        assert_eq!(groups[0].months[1].month_name, "October");
+        assert_eq!(groups[0].months[1].plans.len(), 1);
+
+        // 2023-24 has 1 month
+        assert_eq!(groups[1].months.len(), 1);
+        assert_eq!(groups[1].months[0].month_name, "September");
+    }
+
+    #[test]
+    fn test_duplicate_plan_as_template() {
+        let db = test_db();
+
+        let subject = db
+            .create_subject(&crate::database::NewSubject {
+                name: "English".into(),
+                grade_level: None,
+                description: None,
+            })
+            .unwrap();
+        let plan = db
+            .create_lesson_plan(&NewLessonPlan {
+                subject_id: subject.id.clone(),
+                title: "Week 5 Lesson".into(),
+                content: Some("<p>Shakespeare analysis</p>".into()),
+                source_doc_id: None,
+                source_table_index: None,
+                learning_objectives: Some("Students analyze themes".into()),
+            })
+            .unwrap();
+
+        let copy = db
+            .duplicate_plan_as_template(&plan.id, "Week 5 Lesson (copy)")
+            .unwrap();
+        assert_eq!(copy.title, "Week 5 Lesson (copy)");
+        assert_eq!(copy.content, "<p>Shakespeare analysis</p>");
+        assert_eq!(
+            copy.learning_objectives.as_deref(),
+            Some("Students analyze themes")
+        );
+        assert_eq!(copy.status, "draft");
+        assert_ne!(copy.id, plan.id);
+        // Copy should not have dates
+        assert!(copy.week_start_date.is_none());
     }
 }

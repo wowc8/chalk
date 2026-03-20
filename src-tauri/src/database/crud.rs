@@ -540,7 +540,7 @@ impl Database {
         id: &str,
     ) -> Result<LessonPlan> {
         conn.query_row(
-            "SELECT id, subject_id, title, content, source_doc_id, source_table_index, learning_objectives, status, created_at, updated_at
+            "SELECT id, subject_id, title, content, source_doc_id, source_table_index, learning_objectives, status, week_start_date, week_end_date, school_year, created_at, updated_at
              FROM lesson_plans WHERE id = ?1",
             params![id],
             |row| {
@@ -553,8 +553,11 @@ impl Database {
                     source_table_index: row.get(5)?,
                     learning_objectives: row.get(6)?,
                     status: row.get(7)?,
-                    created_at: row.get(8)?,
-                    updated_at: row.get(9)?,
+                    week_start_date: row.get(8)?,
+                    week_end_date: row.get(9)?,
+                    school_year: row.get(10)?,
+                    created_at: row.get(11)?,
+                    updated_at: row.get(12)?,
                 })
             },
         )
@@ -567,7 +570,7 @@ impl Database {
     pub fn list_lesson_plans_by_subject(&self, subject_id: &str) -> Result<Vec<LessonPlan>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, subject_id, title, content, source_doc_id, source_table_index, learning_objectives, status, created_at, updated_at
+                "SELECT id, subject_id, title, content, source_doc_id, source_table_index, learning_objectives, status, week_start_date, week_end_date, school_year, created_at, updated_at
                  FROM lesson_plans WHERE subject_id = ?1 ORDER BY updated_at DESC",
             )?;
             let rows = stmt.query_map(params![subject_id], |row| {
@@ -580,8 +583,11 @@ impl Database {
                     source_table_index: row.get(5)?,
                     learning_objectives: row.get(6)?,
                     status: row.get(7)?,
-                    created_at: row.get(8)?,
-                    updated_at: row.get(9)?,
+                    week_start_date: row.get(8)?,
+                    week_end_date: row.get(9)?,
+                    school_year: row.get(10)?,
+                    created_at: row.get(11)?,
+                    updated_at: row.get(12)?,
                 })
             })?;
             Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -639,6 +645,7 @@ impl Database {
             let mut stmt = conn.prepare(
                 "SELECT lp.id, lp.subject_id, lp.title, lp.content, lp.source_doc_id,
                         lp.source_table_index, lp.learning_objectives, lp.status,
+                        lp.week_start_date, lp.week_end_date, lp.school_year,
                         lp.created_at, lp.updated_at
                  FROM lesson_plans lp
                  LEFT JOIN _vec_id_map vm ON vm.plan_id = lp.id
@@ -655,8 +662,11 @@ impl Database {
                     source_table_index: row.get(5)?,
                     learning_objectives: row.get(6)?,
                     status: row.get(7)?,
-                    created_at: row.get(8)?,
-                    updated_at: row.get(9)?,
+                    week_start_date: row.get(8)?,
+                    week_end_date: row.get(9)?,
+                    school_year: row.get(10)?,
+                    created_at: row.get(11)?,
+                    updated_at: row.get(12)?,
                 })
             })?;
             Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -1123,7 +1133,7 @@ impl Database {
     pub fn list_library_plans(&self, query: &LibraryQuery) -> Result<Vec<LibraryPlanCard>> {
         let result = self.with_conn(|conn| {
             let mut sql = String::from(
-                "SELECT DISTINCT lp.id, lp.title, lp.status, lp.source_type, lp.version, lp.created_at, lp.updated_at
+                "SELECT DISTINCT lp.id, lp.title, lp.status, lp.source_type, lp.version, lp.week_start_date, lp.week_end_date, lp.school_year, lp.created_at, lp.updated_at
                  FROM lesson_plans lp",
             );
             let mut conditions: Vec<String> = Vec::new();
@@ -1192,8 +1202,11 @@ impl Database {
                     source_type: row.get(3)?,
                     version: row.get(4)?,
                     tags: Vec::new(), // populated below
-                    created_at: row.get(5)?,
-                    updated_at: row.get(6)?,
+                    week_start_date: row.get(5)?,
+                    week_end_date: row.get(6)?,
+                    school_year: row.get(7)?,
+                    created_at: row.get(8)?,
+                    updated_at: row.get(9)?,
                 })
             })?;
 
@@ -1238,7 +1251,7 @@ impl Database {
                                 .collect::<Vec<_>>()
                                 .join(", ");
                             let sql = format!(
-                                "SELECT lp.id, lp.title, lp.status, lp.source_type, lp.version, lp.created_at, lp.updated_at
+                                "SELECT lp.id, lp.title, lp.status, lp.source_type, lp.version, lp.week_start_date, lp.week_end_date, lp.school_year, lp.created_at, lp.updated_at
                                  FROM lesson_plans lp
                                  WHERE lp.id IN ({})",
                                 placeholders
@@ -1253,8 +1266,11 @@ impl Database {
                                     source_type: row.get(3)?,
                                     version: row.get(4)?,
                                     tags: Vec::new(),
-                                    created_at: row.get(5)?,
-                                    updated_at: row.get(6)?,
+                                    week_start_date: row.get(5)?,
+                                    week_end_date: row.get(6)?,
+                                    school_year: row.get(7)?,
+                                    created_at: row.get(8)?,
+                                    updated_at: row.get(9)?,
                                 })
                             })?;
                             let mut plans: Vec<LibraryPlanCard> = rows.collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1291,6 +1307,175 @@ impl Database {
         }
 
         Ok(result)
+    }
+
+    /// Update date metadata on a lesson plan.
+    pub fn update_lesson_plan_dates(
+        &self,
+        id: &str,
+        week_start_date: Option<&str>,
+        week_end_date: Option<&str>,
+        school_year: Option<&str>,
+    ) -> Result<LessonPlan> {
+        self.with_conn(|conn| {
+            let updated = conn.execute(
+                "UPDATE lesson_plans SET week_start_date = ?1, week_end_date = ?2, school_year = ?3, updated_at = datetime('now') WHERE id = ?4",
+                params![week_start_date, week_end_date, school_year, id],
+            )?;
+            if updated == 0 {
+                return Err(DatabaseError::NotFound);
+            }
+            self.get_lesson_plan_inner(conn, id)
+        })
+    }
+
+    /// List all lesson plans that have date metadata, grouped by school year and month.
+    pub fn list_library_plans_chronological(
+        &self,
+        search: Option<&str>,
+    ) -> Result<Vec<SchoolYearGroup>> {
+        self.with_conn(|conn| {
+            let mut sql = String::from(
+                "SELECT DISTINCT lp.id, lp.title, lp.status, lp.source_type, lp.version, lp.week_start_date, lp.week_end_date, lp.school_year, lp.created_at, lp.updated_at
+                 FROM lesson_plans lp",
+            );
+            let mut conditions: Vec<String> = vec![
+                "lp.week_start_date IS NOT NULL".to_string(),
+                "lp.school_year IS NOT NULL".to_string(),
+            ];
+            let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+            let mut param_index = 1;
+
+            if let Some(search_term) = search {
+                if !search_term.is_empty() {
+                    let sanitized = super::fts::sanitize_fts_query(search_term);
+                    if !sanitized.is_empty() {
+                        sql.push_str(
+                            " INNER JOIN lesson_plans_fts fts ON fts.rowid = lp.rowid",
+                        );
+                        conditions.push(format!("lesson_plans_fts MATCH ?{}", param_index));
+                        param_index += 1;
+                        param_values.push(Box::new(sanitized));
+                    }
+                }
+            }
+
+            let _ = param_index;
+
+            if !conditions.is_empty() {
+                sql.push_str(" WHERE ");
+                sql.push_str(&conditions.join(" AND "));
+            }
+
+            sql.push_str(" ORDER BY lp.school_year DESC, lp.week_start_date ASC");
+
+            let mut stmt = conn.prepare(&sql)?;
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                param_values.iter().map(|p| p.as_ref()).collect();
+
+            let rows = stmt.query_map(param_refs.as_slice(), |row| {
+                Ok(LibraryPlanCard {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    status: row.get(2)?,
+                    source_type: row.get(3)?,
+                    version: row.get(4)?,
+                    tags: Vec::new(),
+                    week_start_date: row.get(5)?,
+                    week_end_date: row.get(6)?,
+                    school_year: row.get(7)?,
+                    created_at: row.get(8)?,
+                    updated_at: row.get(9)?,
+                })
+            })?;
+
+            let mut plans: Vec<LibraryPlanCard> =
+                rows.collect::<std::result::Result<Vec<_>, _>>()?;
+
+            // Fetch tags for each plan
+            for plan in &mut plans {
+                let mut tag_stmt = conn.prepare(
+                    "SELECT t.id, t.name, t.color, t.created_at
+                     FROM tags t
+                     INNER JOIN plan_tags pt ON pt.tag_id = t.id
+                     WHERE pt.plan_id = ?1
+                     ORDER BY t.name",
+                )?;
+                let tag_rows = tag_stmt.query_map(params![plan.id], |row| {
+                    Ok(Tag {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        color: row.get(2)?,
+                        created_at: row.get(3)?,
+                    })
+                })?;
+                plan.tags = tag_rows.collect::<std::result::Result<Vec<_>, _>>()?;
+            }
+
+            // Group into school year → month structure
+            let month_names = [
+                "", "January", "February", "March", "April", "May", "June",
+                "July", "August", "September", "October", "November", "December",
+            ];
+
+            // Use BTreeMap to maintain order (school_year DESC handled by reversing at end)
+            let mut year_map: std::collections::BTreeMap<String, std::collections::BTreeMap<u32, Vec<LibraryPlanCard>>> =
+                std::collections::BTreeMap::new();
+
+            for plan in plans {
+                let sy = plan.school_year.clone().unwrap_or_default();
+                let month_num = plan.week_start_date.as_deref()
+                    .and_then(|d| d.get(5..7))
+                    .and_then(|m| m.parse::<u32>().ok())
+                    .unwrap_or(1);
+
+                year_map.entry(sy).or_default()
+                    .entry(month_num).or_default()
+                    .push(plan);
+            }
+
+            let mut groups: Vec<SchoolYearGroup> = year_map.into_iter().map(|(sy, months)| {
+                let month_groups: Vec<MonthGroup> = months.into_iter().map(|(m, plans)| {
+                    MonthGroup {
+                        month: m,
+                        month_name: month_names.get(m as usize).unwrap_or(&"Unknown").to_string(),
+                        plans,
+                    }
+                }).collect();
+                SchoolYearGroup {
+                    school_year: sy,
+                    months: month_groups,
+                }
+            }).collect();
+            // Most recent school year first
+            groups.reverse();
+
+            Ok(groups)
+        })
+    }
+
+    /// Duplicate a lesson plan as a new template (copy content, clear dates, set as draft).
+    pub fn duplicate_plan_as_template(
+        &self,
+        source_plan_id: &str,
+        new_title: &str,
+    ) -> Result<LessonPlan> {
+        let source = self.get_lesson_plan(source_plan_id)?;
+        let id = uuid::Uuid::new_v4().to_string();
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO lesson_plans (id, subject_id, title, content, learning_objectives, status, source_type)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'draft', 'created')",
+                params![
+                    id,
+                    source.subject_id,
+                    new_title,
+                    source.content,
+                    source.learning_objectives,
+                ],
+            )?;
+            self.get_lesson_plan_inner(conn, &id)
+        })
     }
 
     // ── App Settings ──────────────────────────────────────────
