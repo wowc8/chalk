@@ -55,6 +55,9 @@ pub struct DigestProgressPayload {
     pub total: u32,
     pub current_document: Option<String>,
     pub tables_found: u32,
+    /// Which phase: "downloading" (parallel fetch) or "analyzing" (local processing).
+    #[serde(default)]
+    pub phase: Option<String>,
 }
 
 /// Digest complete event — emitted when scanning finishes.
@@ -217,11 +220,13 @@ mod tests {
             total: 10,
             current_document: Some("Biology Unit.gdoc".into()),
             tables_found: 7,
+            phase: Some("downloading".into()),
         };
         let json = serde_json::to_value(&payload).unwrap();
         assert_eq!(json["current"], 3);
         assert_eq!(json["total"], 10);
         assert_eq!(json["tables_found"], 7);
+        assert_eq!(json["phase"], "downloading");
     }
 
     #[test]

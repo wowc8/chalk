@@ -225,6 +225,11 @@ export async function setupTauriMocks(
           return id;
         },
         invoke: (cmd: string, args: Record<string, unknown> = {}) => {
+          // Handle Tauri event plugin commands (listen/unlisten/emit) as no-ops.
+          if (cmd.startsWith("plugin:event|")) {
+            return Promise.resolve(0);
+          }
+
           const handler = handlers[cmd];
           if (!handler) {
             console.warn(`[tauri-mock] unhandled command: ${cmd}`, args);

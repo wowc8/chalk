@@ -14,13 +14,19 @@ pub mod ltp_parser;
 pub mod parser;
 pub mod template_extractor;
 
+use futures_util::stream::{self, StreamExt};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::chat::provider::{AiProvider, AiProviderConfig, AiProviderFactory};
 use crate::database::{CancellationToken, Database, TeachingTemplateSchema};
 use crate::errors::{ChalkError, ErrorCode, ErrorDomain};
+
+/// Maximum number of concurrent Google Drive HTML export requests.
+const PARALLEL_DOWNLOAD_LIMIT: usize = 8;
 
 /// A single lesson plan extracted from a table row.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -534,32 +540,28 @@ pub(crate) fn capitalize_header(header: &str) -> String {
     }
 }
 
-/// Fetch a single document's data from Google and extract lessons (no DB writes).
-///
-/// When an AI provider is available, uses it to identify the correct planning
-/// template table. The template schema is pre-computed here (async) so it's
-/// ready for the synchronous DB transaction in `write_digest_results()`.
-async fn fetch_document(
-    access_token: &str,
+/// Process already-downloaded HTML: parse tables, extract lessons, identify
+/// templates. This is the local-only portion of what `fetch_document` does,
+/// separated so downloads can happen in parallel before processing.
+async fn process_downloaded_html(
     doc_id: &str,
     doc_name: &str,
+    html: &str,
     ai_provider: Option<&dyn AiProvider>,
 ) -> Result<FetchedDoc, ChalkError> {
-    let html = fetch_doc_html(access_token, doc_id).await?;
-    let tables = parser::extract_tables(&html);
+    let tables = parser::extract_tables(html);
     let tables_found = tables.len();
-    let lessons = extract_lessons_from_doc(&html);
+    let lessons = extract_lessons_from_doc(html);
 
-    // Pre-compute template schema using AI if available, otherwise heuristic.
     let (template_schema, table_id_method) = if !html.is_empty() {
         let (schema, method) = match ai_provider {
             Some(provider) => {
                 info!(doc_id, doc_name, "Using AI to identify planning template table");
-                template_extractor::extract_template_with_ai(&html, provider).await
+                template_extractor::extract_template_with_ai(html, provider).await
             }
             None => {
                 info!(doc_id, doc_name, "No AI provider — using heuristic table identification");
-                (template_extractor::extract_template(&html), "heuristic")
+                (template_extractor::extract_template(html), "heuristic")
             }
         };
         if !schema.table_structure.columns.is_empty() {
@@ -1045,6 +1047,7 @@ pub async fn digest_folder(
     access_token: &str,
     folder_id: &str,
     cancel: &CancellationToken,
+    app_handle: Option<&tauri::AppHandle>,
 ) -> Result<DigestSummary, ChalkError> {
     let client = reqwest::Client::new();
 
@@ -1088,11 +1091,86 @@ pub async fn digest_folder(
         info!("No AI provider configured — using heuristic table identification");
     }
 
-    // Phase 2: Fetch each document's content from Google (network I/O, no DB writes).
-    // Template extraction (including AI calls) happens here in the async phase.
-    let mut fetched_docs = Vec::new();
+    // Phase 2a: Parallel batch download — fetch raw HTML from Google Drive
+    // concurrently (up to PARALLEL_DOWNLOAD_LIMIT at once). No parsing yet.
+    let total_files = files_to_process.len();
+    info!(total_files, "Phase 2a: downloading {} file(s) in parallel (limit {})", total_files, PARALLEL_DOWNLOAD_LIMIT);
 
-    for (doc_id, doc_name) in &files_to_process {
+    // Emit "downloading" progress event.
+    if let Some(app) = app_handle {
+        crate::events::emit_digest_progress(app, crate::events::DigestProgressPayload {
+            current: 0,
+            total: total_files as u32,
+            current_document: None,
+            tables_found: 0,
+            phase: Some("downloading".into()),
+        });
+    }
+
+    let access_token_arc = Arc::new(access_token.to_string());
+    let download_counter = Arc::new(AtomicU32::new(0));
+
+    let downloaded: Vec<(String, String, Result<String, ChalkError>)> = stream::iter(
+        files_to_process.iter().cloned(),
+    )
+    .map(|(doc_id, doc_name)| {
+        let token = Arc::clone(&access_token_arc);
+        let counter = Arc::clone(&download_counter);
+        async move {
+            let result = fetch_doc_html(&token, &doc_id).await;
+            counter.fetch_add(1, Ordering::Relaxed);
+            (doc_id, doc_name, result)
+        }
+    })
+    .buffer_unordered(PARALLEL_DOWNLOAD_LIMIT)
+    .collect()
+    .await;
+
+    // Check cancellation after downloads complete.
+    if cancel.is_cancelled() {
+        return Err(ChalkError::new(
+            ErrorDomain::Digest,
+            ErrorCode::DigestCancelled,
+            "Digest cancelled by user",
+        ));
+    }
+
+    let mut raw_docs: Vec<(String, String, String)> = Vec::new();
+    for (doc_id, doc_name, result) in downloaded {
+        match result {
+            Ok(html) => raw_docs.push((doc_id, doc_name, html)),
+            Err(e) => {
+                warn!(doc_id = doc_id.as_str(), doc_name = doc_name.as_str(), error = %e, "Failed to download document — skipping");
+            }
+        }
+    }
+
+    info!(
+        downloaded = raw_docs.len(),
+        skipped = total_files - raw_docs.len(),
+        "Phase 2a complete — all downloads finished"
+    );
+
+    // Phase 2b: Local processing — parse HTML, extract lessons and templates.
+    // This runs sequentially (CPU-bound parsing + optional AI calls).
+    let analyze_total = raw_docs.len();
+    info!("Phase 2b: analyzing {} document(s) locally", analyze_total);
+
+    // Emit "analyzing" progress event.
+    if let Some(app) = app_handle {
+        crate::events::emit_digest_progress(app, crate::events::DigestProgressPayload {
+            current: 0,
+            total: analyze_total as u32,
+            current_document: None,
+            tables_found: 0,
+            phase: Some("analyzing".into()),
+        });
+    }
+
+    let mut fetched_docs = Vec::new();
+    let mut analyze_idx: u32 = 0;
+
+    for (doc_id, doc_name, html) in &raw_docs {
         if cancel.is_cancelled() {
             return Err(ChalkError::new(
                 ErrorDomain::Digest,
@@ -1101,15 +1179,26 @@ pub async fn digest_folder(
             ));
         }
 
-        match fetch_document(
-            access_token,
+        analyze_idx += 1;
+        if let Some(app) = app_handle {
+            crate::events::emit_digest_progress(app, crate::events::DigestProgressPayload {
+                current: analyze_idx,
+                total: analyze_total as u32,
+                current_document: Some(doc_name.clone()),
+                tables_found: 0,
+                phase: Some("analyzing".into()),
+            });
+        }
+
+        match process_downloaded_html(
             doc_id,
             doc_name,
+            html,
             ai_provider.as_ref().map(|p| p.as_ref()),
         ).await {
             Ok(doc) => fetched_docs.push(doc),
             Err(e) => {
-                warn!(doc_id = doc_id.as_str(), doc_name = doc_name.as_str(), error = %e, "Failed to fetch document — skipping");
+                warn!(doc_id = doc_id.as_str(), doc_name = doc_name.as_str(), error = %e, "Failed to process document — skipping");
             }
         }
     }
