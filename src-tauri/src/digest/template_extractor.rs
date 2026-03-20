@@ -1064,9 +1064,40 @@ fn extract_table_structure_with_ai(
 
     let column_count = headers.len();
 
+    // Clean up column names: for schedule grids, use canonical day names
+    // instead of raw header text (which may include "Monday 8:15-3:05 3/23 ...").
+    let header_lower: Vec<String> = headers.iter().map(|h| h.to_lowercase()).collect();
+    let is_schedule = ai_id.layout_type == "schedule_grid"
+        || ai_id.column_semantic == "days_of_week"
+        || detect_schedule_columns(&header_lower).is_some();
+
+    let clean_columns = if is_schedule {
+        if let Some((_tc, day_cols)) = detect_schedule_columns(&header_lower) {
+            let mut cols = Vec::with_capacity(column_count);
+            for (i, h) in headers.iter().enumerate() {
+                if let Some((_, day_name)) = day_cols.iter().find(|(ci, _)| *ci == i) {
+                    cols.push(day_name.clone());
+                } else {
+                    // First column (time/day) — keep a clean label.
+                    let lower = h.to_lowercase();
+                    if lower.contains("time") || lower.contains("day") {
+                        cols.push("Day/Time".to_string());
+                    } else {
+                        cols.push(h.clone());
+                    }
+                }
+            }
+            cols
+        } else {
+            headers
+        }
+    } else {
+        headers
+    };
+
     TableStructure {
         layout_type: ai_id.layout_type.clone(),
-        columns: headers,
+        columns: clean_columns,
         row_categories,
         column_count,
         column_semantic: Some(ai_id.column_semantic.clone()),
@@ -2415,6 +2446,47 @@ mod tests {
         assert!(structure.columns.contains(&"Monday".to_string()));
         // Should NOT contain reference table columns.
         assert!(!structure.columns.iter().any(|c| c.contains("2022")));
+    }
+
+    #[test]
+    fn test_extract_table_structure_with_ai_cleans_dirty_headers() {
+        // Simulate real-world headers: day names with dates, notes, and link text.
+        let html = r#"<html><body>
+            <table>
+                <tr>
+                    <th>Day/Time LP 2022-2023 LP 2023/2024 LP 2024/2025 TK Long Term Plan</th>
+                    <th>Monday 8:15-3:05 8/11 PD NO SCHOOL</th>
+                    <th>Tuesday 8:15-3:05 8/12 First Day of School 8:15-12:30</th>
+                    <th>Wednesday 8:15-3:05 8/13</th>
+                    <th>Thursday 8:15-3:05 8/14</th>
+                    <th>Friday 8:15-3:05 8/15</th>
+                </tr>
+                <tr><td>9:00-9:30</td><td>Math</td><td>Reading</td><td>Math</td><td>Reading</td><td>Math</td></tr>
+            </table>
+        </body></html>"#;
+        let tables = parser::extract_tables(html);
+
+        let ai_id = AiTableIdentification {
+            table_index: 0,
+            column_semantic: "days_of_week".to_string(),
+            row_semantic: "time_slots".to_string(),
+            layout_type: "schedule_grid".to_string(),
+        };
+
+        let structure = extract_table_structure_with_ai(&tables, &ai_id);
+
+        assert_eq!(structure.layout_type, "schedule_grid");
+        // Headers should be cleaned to canonical day names.
+        assert_eq!(structure.columns[0], "Day/Time");
+        assert_eq!(structure.columns[1], "Monday");
+        assert_eq!(structure.columns[2], "Tuesday");
+        assert_eq!(structure.columns[3], "Wednesday");
+        assert_eq!(structure.columns[4], "Thursday");
+        assert_eq!(structure.columns[5], "Friday");
+        // Should NOT contain raw text like dates or notes.
+        assert!(!structure.columns.iter().any(|c| c.contains("8/11")));
+        assert!(!structure.columns.iter().any(|c| c.contains("PD NO SCHOOL")));
+        assert!(!structure.columns.iter().any(|c| c.contains("LP 2022")));
     }
 
     #[test]
