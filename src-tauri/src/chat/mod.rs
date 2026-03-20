@@ -460,10 +460,19 @@ fn format_template_instructions(template_json: &str) -> String {
 
     // ── HTML Skeleton Example ──
     if ts.layout_type == "schedule_grid" && !schema.time_slots.is_empty() && !ts.columns.is_empty() {
+        // Build a lookup: time_slot string → routine event name, so the skeleton
+        // can pre-fill recurring events instead of showing generic placeholders.
+        let routine_by_slot: std::collections::HashMap<&str, &str> = schema
+            .daily_routine
+            .iter()
+            .filter_map(|ev| ev.time_slot.as_deref().map(|ts| (ts, ev.name.as_str())))
+            .collect();
+
         instructions.push_str("### HTML Output Format\n");
         instructions.push_str(
             "Generate a complete `<table>` with this structure. Here is the skeleton — \
-             fill every cell with specific lesson content:\n\n```html\n<table>\n  <tr>\n"
+             fill every cell with specific lesson content. Note that recurring/routine events \
+             are already placed in their correct time slots:\n\n```html\n<table>\n  <tr>\n"
         );
 
         let header_style = cs.mappings.iter()
@@ -493,12 +502,20 @@ fn format_template_instructions(template_json: &str) -> String {
             for day in &day_names {
                 instructions.push_str("  <tr>\n");
                 instructions.push_str(&format!("    <td{header_style}>{day}</td>\n"));
-                for _ in 0..example_slots.len() {
-                    instructions.push_str(&format!(
-                        "    <td{activity_style}>\
-                         <strong>Activity Name</strong><br/>Specific details...\
-                         </td>\n"
-                    ));
+                for slot in &example_slots {
+                    if let Some(routine_name) = routine_by_slot.get(slot.as_str()) {
+                        instructions.push_str(&format!(
+                            "    <td{activity_style}>\
+                             <strong>{routine_name}</strong>\
+                             </td>\n"
+                        ));
+                    } else {
+                        instructions.push_str(&format!(
+                            "    <td{activity_style}>\
+                             <strong>Activity Name</strong><br/>Specific details...\
+                             </td>\n"
+                        ));
+                    }
                 }
                 instructions.push_str("  </tr>\n");
             }
@@ -514,12 +531,23 @@ fn format_template_instructions(template_json: &str) -> String {
             for slot in &example_slots {
                 instructions.push_str("  <tr>\n");
                 instructions.push_str(&format!("    <td>{slot}</td>\n"));
-                for _ in 1..ts.columns.len() {
-                    instructions.push_str(&format!(
-                        "    <td{activity_style}>\
-                         <strong>Activity Name</strong><br/>Specific details...\
-                         </td>\n"
-                    ));
+                if let Some(routine_name) = routine_by_slot.get(slot.as_str()) {
+                    // This time slot has a recurring event — fill all day columns with it.
+                    for _ in 1..ts.columns.len() {
+                        instructions.push_str(&format!(
+                            "    <td{activity_style}>\
+                             <strong>{routine_name}</strong>\
+                             </td>\n"
+                        ));
+                    }
+                } else {
+                    for _ in 1..ts.columns.len() {
+                        instructions.push_str(&format!(
+                            "    <td{activity_style}>\
+                             <strong>Activity Name</strong><br/>Specific details...\
+                             </td>\n"
+                        ));
+                    }
                 }
                 instructions.push_str("  </tr>\n");
             }
@@ -534,13 +562,23 @@ fn format_template_instructions(template_json: &str) -> String {
         instructions.push_str(
             "**CRITICAL:** Generate ALL time slot columns, ALL day rows, and fill EVERY cell. \
              An empty cell is better than a missing column. The output must be a complete weekly schedule, \
-             not a partial plan.\n"
+             not a partial plan.\n\n"
         );
     } else {
         instructions.push_str(
             "**CRITICAL:** Generate ALL time slot rows, ALL day columns, and fill EVERY cell. \
              An empty cell is better than a missing row. The output must be a complete weekly schedule, \
-             not a partial plan.\n"
+             not a partial plan.\n\n"
+        );
+    }
+
+    if !schema.daily_routine.is_empty() {
+        instructions.push_str(
+            "**REMINDER — RECURRING EVENTS ARE MANDATORY:** Every recurring event listed in the \
+             Daily Routine Events section above MUST appear in your generated plan at its designated \
+             time slot. These are non-negotiable — they represent the teacher's fixed daily schedule \
+             (meals, recess, dismissal, etc.). Place them FIRST, then fill remaining slots with \
+             lesson content.\n"
         );
     }
 
@@ -1576,6 +1614,17 @@ mod tests {
 
         // Should contain single-lesson exclusion instruction.
         assert!(result.contains("single lesson"), "Missing single-lesson exclusion guidance");
+
+        // Skeleton should pre-fill routine events at matching time slots.
+        // "Recess" has time_slot "9:00-9:15" which matches a time_slot in the schema,
+        // so the skeleton row for 9:00-9:15 should show "Recess" instead of "Activity Name".
+        // The skeleton only shows the first 3 time slots: 8:00-8:45, 9:00-9:15, 11:30-12:00.
+        // "Recess" at 9:00-9:15 and "Lunch" at 11:30-12:00 should appear in the skeleton.
+        assert!(result.contains("<strong>Recess</strong>"), "Skeleton should pre-fill Recess at its time slot");
+        assert!(result.contains("<strong>Lunch</strong>"), "Skeleton should pre-fill Lunch at its time slot");
+
+        // The mandatory reminder should be present.
+        assert!(result.contains("RECURRING EVENTS ARE MANDATORY"), "Missing mandatory recurring events reminder");
     }
 
     #[test]
@@ -1586,6 +1635,22 @@ mod tests {
 
         // Should NOT have the daily routine section when empty.
         assert!(!result.contains("Daily Routine Events"));
+    }
+
+    #[test]
+    fn test_format_template_instructions_skeleton_prefills_routine_events() {
+        // Standard layout: 3 time slots, 2 have routine events, 1 does not.
+        let template = r##"{"color_scheme":{"mappings":[]},"table_structure":{"layout_type":"schedule_grid","columns":["Time","Monday","Tuesday","Wednesday"],"row_categories":[],"column_count":4},"time_slots":["8:00-8:30","9:00-9:30","11:30-12:00"],"content_patterns":{"cell_content_types":[],"has_links":false,"has_rich_formatting":false},"recurring_elements":{"subjects":[],"activities":[]},"daily_routine":[{"name":"Morning Circle","time_slot":"8:00-8:30"},{"name":"Lunch","time_slot":"11:30-12:00"}]}"##;
+
+        let result = format_template_instructions(template);
+
+        // Routine slots should show the event name, not "Activity Name".
+        assert!(result.contains("<strong>Morning Circle</strong>"), "Skeleton should pre-fill Morning Circle");
+        assert!(result.contains("<strong>Lunch</strong>"), "Skeleton should pre-fill Lunch");
+
+        // Non-routine slot (9:00-9:30) should still show generic placeholder.
+        // Check that "Activity Name" still appears (for the non-routine slot).
+        assert!(result.contains("<strong>Activity Name</strong>"), "Non-routine slots should keep generic placeholder");
     }
 
     #[test]
@@ -1622,9 +1687,15 @@ mod tests {
         // Daily routine should still be present.
         assert!(result.contains("Recess"));
 
+        // Skeleton should pre-fill Recess at 9:00-9:30 in transposed layout.
+        assert!(result.contains("<strong>Recess</strong>"), "Transposed skeleton should pre-fill Recess");
+
         // Critical instruction should reference columns, not rows.
         assert!(result.contains("ALL time slot columns"));
         assert!(result.contains("ALL day rows"));
+
+        // Mandatory reminder should be present.
+        assert!(result.contains("RECURRING EVENTS ARE MANDATORY"), "Missing mandatory reminder in transposed");
     }
 
     #[test]
