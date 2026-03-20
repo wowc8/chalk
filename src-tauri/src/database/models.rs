@@ -238,6 +238,28 @@ pub enum LtpImportResult {
     Skipped { id: String, filename: String },
 }
 
+// ── LTP Context ─────────────────────────────────────────────
+
+/// Subject-level LTP content for a given month.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LtpSubjectContext {
+    pub subject: String,
+    pub content: String,
+}
+
+/// Structured LTP context for a given date, ready for AI prompt injection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LtpContext {
+    /// The month name (e.g., "March").
+    pub month: String,
+    /// The current unit name (e.g., "Unit 3: Wind and Water"), if known.
+    pub unit_name: Option<String>,
+    /// Subject-by-subject LTP content for this month.
+    pub subjects: Vec<LtpSubjectContext>,
+    /// Calendar notes for the week (holidays, half days, etc.).
+    pub calendar_notes: Vec<String>,
+}
+
 // ── Tags ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
