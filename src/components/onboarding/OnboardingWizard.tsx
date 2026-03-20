@@ -27,12 +27,12 @@ export interface OnboardingStatus {
 const STEPS = [
   "welcome",
   "school-calendar",
-  "daily-schedule",
-  "weekly-specials",
-  "schedule-review",
   "google-auth",
   "folder-select",
   "initial-digest",
+  "daily-schedule",
+  "weekly-specials",
+  "schedule-review",
   "complete",
 ] as const;
 
@@ -60,6 +60,7 @@ export function OnboardingWizard({
   } | null>(null);
   const [dailyEvents, setDailyEvents] = useState<DraftEvent[]>([]);
   const [specials, setSpecials] = useState<DraftEvent[]>([]);
+  const [extractedEvents, setExtractedEvents] = useState<DraftEvent[]>([]);
 
   useEffect(() => {
     invoke("initialize_oauth").catch(() => {});
@@ -104,26 +105,41 @@ export function OnboardingWizard({
       exceptions: CalendarExceptionDraft[];
     }) => {
       setCalendarData(data);
-      goTo("daily-schedule");
+      goTo("google-auth");
     },
     [],
   );
 
-  // Step 3: Daily Schedule
+  // Step 5: Import complete — extract schedule from LTPs, then advance
+  const handleImportNext = useCallback(
+    (imported: DraftEvent[]) => {
+      if (imported.length > 0) {
+        setExtractedEvents(imported);
+        // Pre-fill daily events if user hasn't manually set any
+        if (dailyEvents.length === 0) {
+          setDailyEvents(imported);
+        }
+      }
+      goTo("daily-schedule");
+    },
+    [dailyEvents.length],
+  );
+
+  // Step 6: Daily Schedule
   const handleDailyNext = useCallback((events: DraftEvent[]) => {
     setDailyEvents(events);
     goTo("weekly-specials");
   }, []);
 
-  // Step 4: Weekly Specials
+  // Step 7: Weekly Specials
   const handleSpecialsNext = useCallback((newSpecials: DraftEvent[]) => {
     setSpecials(newSpecials);
     goTo("schedule-review");
   }, []);
 
-  // Step 5: Schedule Review — saves to DB, then moves to Google Auth
+  // Step 8: Schedule Review — saves to DB, then moves to complete
   const handleReviewNext = useCallback(() => {
-    goTo("google-auth");
+    goTo("complete");
   }, []);
 
   const stepIndex = STEPS.indexOf(step);
@@ -204,12 +220,34 @@ export function OnboardingWizard({
                 initialExceptions={calendarData?.exceptions}
               />
             )}
+            {step === "google-auth" && (
+              <StepGoogleAuth
+                onNext={() => goTo("folder-select")}
+                onBack={() => goTo("school-calendar")}
+                setError={setError}
+              />
+            )}
+            {step === "folder-select" && (
+              <StepFolderSelect
+                onNext={() => goTo("initial-digest")}
+                onBack={() => goTo("google-auth")}
+                setError={setError}
+              />
+            )}
+            {step === "initial-digest" && (
+              <StepInitialDigest
+                onNext={handleImportNext}
+                onBack={() => goTo("folder-select")}
+                setError={setError}
+              />
+            )}
             {step === "daily-schedule" && (
               <StepDailySchedule
                 onNext={handleDailyNext}
-                onBack={() => goTo("school-calendar")}
+                onBack={() => goTo("initial-digest")}
                 gradeLevel={gradeLevel}
                 initialEvents={dailyEvents}
+                extractedEvents={extractedEvents}
               />
             )}
             {step === "weekly-specials" && (
@@ -227,27 +265,6 @@ export function OnboardingWizard({
                 dailyEvents={dailyEvents}
                 specials={specials}
                 calendarData={calendarData}
-              />
-            )}
-            {step === "google-auth" && (
-              <StepGoogleAuth
-                onNext={() => goTo("folder-select")}
-                onBack={() => goTo("schedule-review")}
-                setError={setError}
-              />
-            )}
-            {step === "folder-select" && (
-              <StepFolderSelect
-                onNext={() => goTo("initial-digest")}
-                onBack={() => goTo("google-auth")}
-                setError={setError}
-              />
-            )}
-            {step === "initial-digest" && (
-              <StepInitialDigest
-                onNext={() => goTo("complete")}
-                onBack={() => goTo("folder-select")}
-                setError={setError}
               />
             )}
             {step === "complete" && (

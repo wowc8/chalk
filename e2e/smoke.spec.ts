@@ -5,65 +5,79 @@
  * server with mocked Tauri IPC, verifying that:
  *   1. The app launches and renders.
  *   2. The onboarding wizard progresses through every step.
- *   3. Schedule capture steps work (calendar, daily, specials, review).
- *   4. Mock OAuth PKCE flow completes.
- *   5. Folder selection works.
- *   6. The initial import (digest) completes.
- *   7. The completion screen renders.
+ *   3. Google Auth + Import happen BEFORE schedule capture.
+ *   4. AI-extracted schedule pre-fills the Daily Schedule step.
+ *   5. Schedule capture steps work (daily, specials, review).
+ *   6. The completion screen renders.
  *
  * No real Google API calls or Rust backend required — all Tauri
  * commands are intercepted by the mock layer in `tauri-mock.ts`.
  *
- * Flow: Welcome → School Calendar → Daily Schedule → Weekly Specials
- *       → Schedule Review → Sign In → Select Source → Scan → Done
+ * Flow: Welcome → School Calendar → Sign In → Select Source → Scan
+ *       → Daily Schedule → Weekly Specials → Schedule Review → Done
  */
 
 import { test, expect } from "@playwright/test";
 import { setupTauriMocks, MOCK_ITEMS } from "./tauri-mock";
 
 // ---------------------------------------------------------------------------
-// Helper: navigate through schedule steps (steps 2-5)
+// Helper: navigate through sign-in + import steps (steps 3-5)
+// ---------------------------------------------------------------------------
+async function completeImportSteps(page: import("@playwright/test").Page) {
+  // Step 3: Sign In
+  await expect(
+    page.getByRole("heading", { name: "Sign in with Google" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: /Sign in with Google/i }).click();
+
+  // Step 4: Select Source
+  await expect(
+    page.getByRole("heading", { name: /Select Your Lesson Plans/i }),
+  ).toBeVisible();
+  await page.getByText("Master Plans").click();
+  await page.getByRole("button", { name: /Select & Continue/i }).click();
+
+  // Step 5: Import
+  await expect(
+    page.getByRole("heading", { name: /Import Your Archive/i }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: /Start Import/i }).click();
+  await page.getByRole("button", { name: /Continue/i }).click();
+}
+
+// ---------------------------------------------------------------------------
+// Helper: navigate through schedule steps (steps 6-8)
 // ---------------------------------------------------------------------------
 async function completeScheduleSteps(page: import("@playwright/test").Page) {
-  // Step 2: School Calendar — click Next (dates optional)
-  await expect(
-    page.getByRole("heading", { name: "School Calendar" }),
-  ).toBeVisible();
-  await page.getByRole("button", { name: "Next" }).click();
-
-  // Step 3: Daily Schedule — pick "I'll Type It Out", then Next
+  // Step 6: Daily Schedule — pick "I'll Type It Out", then Next
   await expect(
     page.getByRole("heading", { name: "Daily Schedule" }),
   ).toBeVisible();
-  await page.getByText("I'll Type It Out").click();
-  await page.getByRole("button", { name: "Next" }).click();
+  // May show confirmation or method picker depending on whether events were extracted
+  const typeItOut = page.getByText("I'll Type It Out");
+  if (await typeItOut.isVisible().catch(() => false)) {
+    await typeItOut.click();
+  }
+  // Click Next or Looks Good depending on mode
+  const looksGood = page.getByRole("button", { name: /Looks Good/i });
+  const next = page.getByRole("button", { name: "Next" });
+  if (await looksGood.isVisible().catch(() => false)) {
+    await looksGood.click();
+  } else {
+    await next.click();
+  }
 
-  // Step 4: Weekly Specials — click Next (no specials needed)
+  // Step 7: Weekly Specials — click Next (no specials needed)
   await expect(
     page.getByRole("heading", { name: "Weekly Specials" }),
   ).toBeVisible();
   await page.getByRole("button", { name: "Next" }).click();
 
-  // Step 5: Schedule Review — click "Looks Good!"
+  // Step 8: Schedule Review — click "Looks Good!"
   await expect(
     page.getByRole("heading", { name: "Schedule Review" }),
   ).toBeVisible();
   await page.getByRole("button", { name: /Looks Good/i }).click();
-}
-
-// ---------------------------------------------------------------------------
-// Helper: navigate through the sign-in step
-// ---------------------------------------------------------------------------
-async function completeSignIn(page: import("@playwright/test").Page) {
-  await page.getByRole("button", { name: /Sign in with Google/i }).click();
-}
-
-// ---------------------------------------------------------------------------
-// Helper: select a folder by name and confirm
-// ---------------------------------------------------------------------------
-async function selectFolder(page: import("@playwright/test").Page, name: string) {
-  await page.getByText(name).click();
-  await page.getByRole("button", { name: /Select & Continue/i }).click();
 }
 
 // ---------------------------------------------------------------------------
@@ -106,9 +120,9 @@ test("welcome step renders and Get Started advances to school calendar", async (
 });
 
 // ---------------------------------------------------------------------------
-// 3. Schedule steps flow through to Google sign-in
+// 3. Calendar advances to Google sign-in (new order)
 // ---------------------------------------------------------------------------
-test("schedule steps advance through calendar, daily, specials, review to sign-in", async ({
+test("school calendar advances to sign-in", async ({
   page,
 }) => {
   await setupTauriMocks(page);
@@ -117,108 +131,90 @@ test("schedule steps advance through calendar, daily, specials, review to sign-i
   // Advance past welcome
   await page.getByRole("button", { name: "Get Started" }).click();
 
-  // Complete all schedule steps
-  await completeScheduleSteps(page);
+  // Step 2: School Calendar — click Next
+  await expect(
+    page.getByRole("heading", { name: "School Calendar" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Next" }).click();
 
-  // Should advance to sign-in
+  // Should advance to sign-in (not daily schedule)
   await expect(
     page.getByRole("heading", { name: "Sign in with Google" }),
   ).toBeVisible();
 });
 
 // ---------------------------------------------------------------------------
-// 4. Google sign-in step — OAuth PKCE flow
+// 4. Import step advances to Daily Schedule
 // ---------------------------------------------------------------------------
-test("sign-in step fetches auth URL, exchanges code, and advances to folder select", async ({
+test("import step advances to daily schedule after scan", async ({
   page,
 }) => {
   await setupTauriMocks(page);
   await page.goto("/");
 
-  // Navigate through welcome + schedule steps
+  // Navigate through welcome + calendar
   await page.getByRole("button", { name: "Get Started" }).click();
-  await completeScheduleSteps(page);
+  await page.getByRole("button", { name: "Next" }).click();
 
+  // Complete import steps
+  await completeImportSteps(page);
+
+  // Should now be on Daily Schedule (not Complete)
   await expect(
-    page.getByRole("heading", { name: "Sign in with Google" }),
-  ).toBeVisible();
-
-  // Complete the sign-in flow
-  await completeSignIn(page);
-
-  // Should advance to folder selection
-  await expect(
-    page.getByRole("heading", { name: /Select Your Lesson Plans/i }),
+    page.getByRole("heading", { name: "Daily Schedule" }),
   ).toBeVisible();
 });
 
 // ---------------------------------------------------------------------------
-// 5. Folder selection — picks a folder and passes permission check
+// 5. Daily Schedule shows pre-filled confirmation with extracted events
 // ---------------------------------------------------------------------------
-test("folder step lists items and selecting one advances to import", async ({
+test("daily schedule shows pre-filled events from LTP extraction", async ({
   page,
 }) => {
-  await setupTauriMocks(page);
+  await setupTauriMocks(page, {
+    extractedEvents: [
+      { id: "ext-0", name: "Lunch", event_type: "fixed", occurrences: [
+        { day_of_week: 0, start_time: "11:30", end_time: "12:00" },
+        { day_of_week: 1, start_time: "11:30", end_time: "12:00" },
+        { day_of_week: 2, start_time: "11:30", end_time: "12:00" },
+        { day_of_week: 3, start_time: "11:30", end_time: "12:00" },
+        { day_of_week: 4, start_time: "11:30", end_time: "12:00" },
+      ]},
+      { id: "ext-1", name: "Recess", event_type: "fixed", occurrences: [
+        { day_of_week: 0, start_time: "10:00", end_time: "10:20" },
+        { day_of_week: 1, start_time: "10:00", end_time: "10:20" },
+        { day_of_week: 2, start_time: "10:00", end_time: "10:20" },
+        { day_of_week: 3, start_time: "10:00", end_time: "10:20" },
+        { day_of_week: 4, start_time: "10:00", end_time: "10:20" },
+      ]},
+    ],
+  });
   await page.goto("/");
 
-  // Navigate through previous steps
+  // Navigate through welcome + calendar + import
   await page.getByRole("button", { name: "Get Started" }).click();
-  await completeScheduleSteps(page);
-  await completeSignIn(page);
+  await page.getByRole("button", { name: "Next" }).click();
+  await completeImportSteps(page);
 
-  // Now on folder selection step
+  // Should show pre-filled confirmation
   await expect(
-    page.getByRole("heading", { name: /Select Your Lesson Plans/i }),
+    page.getByRole("heading", { name: "Daily Schedule" }),
   ).toBeVisible();
+  await expect(page.getByText("what we figured out")).toBeVisible();
+  await expect(page.getByText("Lunch")).toBeVisible();
+  await expect(page.getByText("Recess")).toBeVisible();
 
-  // Wait for items to load
-  for (const item of MOCK_ITEMS) {
-    await expect(page.getByText(item.name)).toBeVisible();
-  }
+  // Confirm with "Looks Good!"
+  await page.getByRole("button", { name: /Looks Good/i }).click();
 
-  // Select the "Master Plans" folder and confirm
-  await selectFolder(page, "Master Plans");
-
-  // Should advance to import step
+  // Should advance to Weekly Specials
   await expect(
-    page.getByRole("heading", { name: /Import Your Archive/i }),
+    page.getByRole("heading", { name: "Weekly Specials" }),
   ).toBeVisible();
 });
 
 // ---------------------------------------------------------------------------
-// 6. Initial import — triggers scan and completes
-// ---------------------------------------------------------------------------
-test("import step scans documents and advances to complete", async ({
-  page,
-}) => {
-  await setupTauriMocks(page);
-  await page.goto("/");
-
-  // Navigate through all previous steps
-  await page.getByRole("button", { name: "Get Started" }).click();
-  await completeScheduleSteps(page);
-  await completeSignIn(page);
-  await selectFolder(page, "Master Plans");
-
-  // Now on import step
-  await expect(
-    page.getByRole("heading", { name: /Import Your Archive/i }),
-  ).toBeVisible();
-
-  // Trigger the import
-  await page.getByRole("button", { name: /Start Import/i }).click();
-
-  // Wait for scan to complete and show Continue button
-  await page.getByRole("button", { name: /Continue/i }).click();
-
-  // Should advance to the complete step
-  await expect(
-    page.getByRole("heading", { name: /You're All Set/i }),
-  ).toBeVisible();
-});
-
-// ---------------------------------------------------------------------------
-// 7. Full flow — end-to-end through all steps to completion
+// 6. Full flow — end-to-end through all steps to completion
 // ---------------------------------------------------------------------------
 test("full onboarding flow reaches completion", async ({ page }) => {
   await setupTauriMocks(page);
@@ -230,27 +226,17 @@ test("full onboarding flow reaches completion", async ({ page }) => {
   ).toBeVisible();
   await page.getByRole("button", { name: "Get Started" }).click();
 
-  // Steps 2-5: Schedule capture
+  // Step 2: School Calendar
+  await expect(
+    page.getByRole("heading", { name: "School Calendar" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Next" }).click();
+
+  // Steps 3-5: Sign In + Select Source + Import
+  await completeImportSteps(page);
+
+  // Steps 6-8: Daily Schedule + Specials + Review
   await completeScheduleSteps(page);
-
-  // Step 6: Sign In
-  await expect(
-    page.getByRole("heading", { name: "Sign in with Google" }),
-  ).toBeVisible();
-  await completeSignIn(page);
-
-  // Step 7: Select Source
-  await expect(
-    page.getByRole("heading", { name: /Select Your Lesson Plans/i }),
-  ).toBeVisible();
-  await selectFolder(page, "Master Plans");
-
-  // Step 8: Import
-  await expect(
-    page.getByRole("heading", { name: /Import Your Archive/i }),
-  ).toBeVisible();
-  await page.getByRole("button", { name: /Start Import/i }).click();
-  await page.getByRole("button", { name: /Continue/i }).click();
 
   // Step 9: Complete
   await expect(
@@ -262,7 +248,7 @@ test("full onboarding flow reaches completion", async ({ page }) => {
 });
 
 // ---------------------------------------------------------------------------
-// 8. Wizard progress indicators are rendered (9 steps now)
+// 7. Wizard progress indicators are rendered (9 steps)
 // ---------------------------------------------------------------------------
 test("progress indicators are displayed for each step", async ({ page }) => {
   await setupTauriMocks(page);
@@ -274,7 +260,7 @@ test("progress indicators are displayed for each step", async ({ page }) => {
 });
 
 // ---------------------------------------------------------------------------
-// 9. Back navigation works
+// 8. Back navigation works
 // ---------------------------------------------------------------------------
 test("back button returns to previous step", async ({ page }) => {
   await setupTauriMocks(page);
@@ -294,7 +280,7 @@ test("back button returns to previous step", async ({ page }) => {
 });
 
 // ---------------------------------------------------------------------------
-// 10. Status auto-resume — app resumes at correct step from saved status
+// 9. Status auto-resume — app resumes at correct step from saved status
 // ---------------------------------------------------------------------------
 test("app resumes at welcome step when oauth is already complete", async ({
   page,
