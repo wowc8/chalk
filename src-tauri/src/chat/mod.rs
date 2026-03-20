@@ -427,17 +427,18 @@ fn format_template_instructions(template_json: &str) -> String {
              This is how the teacher visually organizes their schedule.\n\n"
         );
         instructions.push_str(
-            "**CRITICAL — TEXT CONTRAST:** When using colored cell backgrounds, you MUST ensure \
-             the text inside is clearly readable. Use **black text** (`color: #000000` or no color override) on \
-             light/pastel backgrounds (yellow, light green, light pink, light blue, white). Use **white text** \
-             (`color: #FFFFFF`) on dark backgrounds (dark purple, dark blue, dark green, dark red). \
-             Apply text color via `style=\"background-color: BG; color: TEXT\"` on the `<td>`/`<th>` element. \
-             **NEVER use grey text on colored backgrounds** — it is unreadable. When in doubt, use black text \
-             (`#000000`) which has high contrast on most light/pastel backgrounds.\n\n"
+            "**CRITICAL — TEXT CONTRAST:** EVERY `<td>` or `<th>` that has a `background-color` MUST also \
+             include `color: #000000` (black text). This is mandatory — without it, the dark-theme editor \
+             renders light/white text on colored backgrounds, making content unreadable. \
+             Always write: `style=\"background-color: BG; color: #000000\"`. \
+             The ONLY exception is very dark backgrounds (e.g., dark purple #2d1b69, dark navy #1a1a2e) — \
+             use `color: #FFFFFF` for those. For ALL pastel/medium colors (yellow, green, blue, pink, \
+             orange, light purple, etc.), use `color: #000000`. **NEVER omit the color property** on \
+             colored cells.\n\n"
         );
         for mapping in &cs.mappings {
             instructions.push_str(&format!(
-                "- `{}` → {} cells → use `style=\"background-color: {}\"`\n",
+                "- `{}` → {} cells → use `style=\"background-color: {}; color: #000000\"`\n",
                 mapping.color, mapping.category, mapping.color
             ));
         }
@@ -487,7 +488,7 @@ fn format_template_instructions(template_json: &str) -> String {
 
         let header_style = cs.mappings.iter()
             .find(|m| m.category == "header")
-            .map(|m| format!(" style=\"background-color: {}\"", m.color))
+            .map(|m| format!(" style=\"background-color: {}; color: #000000\"", m.color))
             .unwrap_or_default();
         if is_transposed {
             // Transposed: first header is "Day", remaining headers are time slots.
@@ -505,7 +506,7 @@ fn format_template_instructions(template_json: &str) -> String {
             for slot in &schema.time_slots {
                 if let Some((routine_name, bg)) = routine_by_slot.get(slot.as_str()) {
                     let cell_style = bg
-                        .map(|c| format!(" style=\"background-color: {}\"", c))
+                        .map(|c| format!(" style=\"background-color: {}; color: #000000\"", c))
                         .unwrap_or_default();
                     instructions.push_str(&format!(
                         "    <td{cell_style}>\
@@ -537,7 +538,7 @@ fn format_template_instructions(template_json: &str) -> String {
                     // This time slot has a recurring event — fill all day columns with it.
                     // Use the event's actual bg_color if known; otherwise no background.
                     let cell_style = bg
-                        .map(|c| format!(" style=\"background-color: {}\"", c))
+                        .map(|c| format!(" style=\"background-color: {}; color: #000000\"", c))
                         .unwrap_or_default();
                     for _ in 1..ts.columns.len() {
                         instructions.push_str(&format!(
