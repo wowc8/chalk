@@ -2442,4 +2442,83 @@ mod tests {
         assert!(routine_names.contains(&"Breakfast"), "Missing Breakfast: {:?}", routine_names);
         assert!(routine_names.contains(&"Lunch"), "Missing Lunch: {:?}", routine_names);
     }
+
+    /// Integration test: a realistic TK teacher schedule with AM/PM formatted
+    /// times and 15+ time slots (matching the structure from the bug report).
+    /// Verifies that ALL time slots, recurring events, and colors are extracted.
+    #[test]
+    fn test_extract_template_tk_full_day_schedule_am_pm() {
+        let html = r#"<html><body>
+            <table>
+                <tr>
+                    <th style="background-color:#9900ff">Day/Time</th>
+                    <th style="background-color:#9900ff">Monday</th>
+                    <th style="background-color:#9900ff">Tuesday</th>
+                    <th style="background-color:#9900ff">Wednesday</th>
+                    <th style="background-color:#9900ff">Thursday</th>
+                    <th style="background-color:#9900ff">Friday</th>
+                </tr>
+                <tr><td>8:15 AM-8:30 AM</td><td style="background-color:#ffff00">Soft Start Breakfast</td><td style="background-color:#ffff00">Soft Start Breakfast</td><td style="background-color:#ffff00">Soft Start Breakfast</td><td style="background-color:#ffff00">Soft Start Breakfast</td><td style="background-color:#ffff00">Soft Start Breakfast</td></tr>
+                <tr><td>8:30 AM-9:00 AM</td><td>Morning Circle</td><td>Morning Circle</td><td>Morning Circle</td><td>Morning Circle</td><td>Morning Circle</td></tr>
+                <tr><td>9:00 AM-9:10 AM</td><td style="background-color:#d9ead3">Snack/Recess</td><td style="background-color:#d9ead3">Snack/Recess</td><td style="background-color:#d9ead3">Snack/Recess</td><td style="background-color:#d9ead3">Snack/Recess</td><td style="background-color:#d9ead3">Snack/Recess</td></tr>
+                <tr><td>9:10 AM-9:30 AM</td><td>Calendar Math</td><td>Calendar Math</td><td>Calendar Math</td><td>Calendar Math</td><td>Calendar Math</td></tr>
+                <tr><td>9:30 AM-10:00 AM</td><td>ELA Mini Lesson</td><td>ELA Mini Lesson</td><td>ELA Mini Lesson</td><td>ELA Mini Lesson</td><td>ELA Mini Lesson</td></tr>
+                <tr><td>10:00 AM-10:30 AM</td><td>Centers/Small Group</td><td>Centers/Small Group</td><td>Centers/Small Group</td><td>Centers/Small Group</td><td>Centers/Small Group</td></tr>
+                <tr><td>10:30 AM-11:00 AM</td><td>Math Lesson</td><td>Math Lesson</td><td>Math Lesson</td><td>Math Lesson</td><td>Math Lesson</td></tr>
+                <tr><td>11:00 AM-11:15 AM</td><td style="background-color:#d9ead3">Recess</td><td style="background-color:#d9ead3">Recess</td><td style="background-color:#d9ead3">Recess</td><td style="background-color:#d9ead3">Recess</td><td style="background-color:#d9ead3">Recess</td></tr>
+                <tr><td>11:15 AM-11:30 AM</td><td>Lunch Prep</td><td>Lunch Prep</td><td>Lunch Prep</td><td>Lunch Prep</td><td>Lunch Prep</td></tr>
+                <tr><td>11:30 AM-12:00 PM</td><td style="background-color:#fce5cd">TK Lunch</td><td style="background-color:#fce5cd">TK Lunch</td><td style="background-color:#fce5cd">TK Lunch</td><td style="background-color:#fce5cd">TK Lunch</td><td style="background-color:#fce5cd">TK Lunch</td></tr>
+                <tr><td>12:00 PM-12:45 PM</td><td>Rest Time</td><td>Rest Time</td><td>Rest Time</td><td>Rest Time</td><td>Rest Time</td></tr>
+                <tr><td>12:45 PM-1:15 PM</td><td>Science/Social Studies</td><td>Science/Social Studies</td><td>Science/Social Studies</td><td>Science/Social Studies</td><td>Science/Social Studies</td></tr>
+                <tr><td>1:15 PM-1:45 PM</td><td>Mandarin</td><td>PE</td><td>Mandarin</td><td>Art</td><td>Music</td></tr>
+                <tr><td>1:45 PM-2:00 PM</td><td style="background-color:#d9ead3">Recess</td><td style="background-color:#d9ead3">Recess</td><td style="background-color:#d9ead3">Recess</td><td style="background-color:#d9ead3">Recess</td><td style="background-color:#d9ead3">Recess</td></tr>
+                <tr><td>2:00 PM-2:30 PM</td><td>Read Aloud/Art</td><td>Read Aloud/Art</td><td>Read Aloud/Art</td><td>Read Aloud/Art</td><td>Read Aloud/Art</td></tr>
+                <tr><td>2:30 PM-2:40 PM</td><td>Pack Up</td><td>Pack Up</td><td>Pack Up</td><td>Pack Up</td><td>Pack Up</td></tr>
+                <tr><td>2:40 PM-3:00 PM</td><td style="background-color:#c9daf8">Dismissal</td><td style="background-color:#c9daf8">Dismissal</td><td style="background-color:#c9daf8">Dismissal</td><td style="background-color:#c9daf8">Dismissal</td><td style="background-color:#c9daf8">Dismissal</td></tr>
+            </table>
+        </body></html>"#;
+
+        let template = extract_template(html);
+
+        // Should detect as a schedule grid.
+        assert_eq!(template.table_structure.layout_type, "schedule_grid");
+        assert_eq!(template.table_structure.column_count, 6);
+
+        // ALL 17 time slots must be extracted — not 4, not 10, all 17.
+        assert_eq!(
+            template.time_slots.len(), 17,
+            "Expected 17 time slots, got {}: {:?}",
+            template.time_slots.len(), template.time_slots
+        );
+
+        // Spot-check specific AM/PM formatted times are preserved exactly.
+        assert!(template.time_slots.contains(&"8:15 AM-8:30 AM".to_string()),
+            "Missing 8:15 AM-8:30 AM: {:?}", template.time_slots);
+        assert!(template.time_slots.contains(&"11:30 AM-12:00 PM".to_string()),
+            "Missing 11:30 AM-12:00 PM: {:?}", template.time_slots);
+        assert!(template.time_slots.contains(&"2:40 PM-3:00 PM".to_string()),
+            "Missing 2:40 PM-3:00 PM: {:?}", template.time_slots);
+
+        // Daily routine events: all events appearing in ≥40% of days should be detected.
+        let routine_names: Vec<&str> = template.daily_routine.iter()
+            .map(|e| e.name.as_str()).collect();
+        assert!(routine_names.contains(&"Soft Start Breakfast"),
+            "Missing Soft Start Breakfast: {:?}", routine_names);
+        assert!(routine_names.contains(&"Snack/Recess"),
+            "Missing Snack/Recess: {:?}", routine_names);
+        assert!(routine_names.contains(&"TK Lunch"),
+            "Missing TK Lunch: {:?}", routine_names);
+        assert!(routine_names.contains(&"Rest Time"),
+            "Missing Rest Time: {:?}", routine_names);
+        assert!(routine_names.contains(&"Dismissal"),
+            "Missing Dismissal: {:?}", routine_names);
+
+        // Color scheme should detect header color and activity colors.
+        assert!(!template.color_scheme.mappings.is_empty(),
+            "Color scheme should not be empty");
+        let all_colors: Vec<&str> = template.color_scheme.mappings.iter()
+            .map(|m| m.color.as_str()).collect();
+        assert!(all_colors.contains(&"#9900ff"),
+            "Missing purple header color: {:?}", all_colors);
+    }
 }

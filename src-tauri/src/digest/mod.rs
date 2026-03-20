@@ -125,16 +125,27 @@ pub(crate) const DAY_NAMES: &[&str] = &[
 /// dots, hyphens/dashes, and whitespace — the hallmarks of a time range.
 fn is_time_like(text: &str) -> bool {
     let trimmed = text.trim();
-    if trimmed.is_empty() || trimmed.len() > 30 {
+    if trimmed.is_empty() || trimmed.len() > 40 {
         return false;
     }
     let has_digit = trimmed.chars().any(|c| c.is_ascii_digit());
     let has_separator = trimmed.chars().any(|c| c == ':' || c == '.');
-    let time_chars = trimmed
+    // Strip AM/PM markers before computing the time-character ratio so that
+    // formats like "8:15 AM-9:00 AM" or "8:15AM - 9:00PM" pass the check.
+    let stripped = trimmed
+        .replace("AM", "")
+        .replace("PM", "")
+        .replace("am", "")
+        .replace("pm", "")
+        .replace("a.m.", "")
+        .replace("p.m.", "");
+    let stripped = stripped.trim();
+    let time_chars = stripped
         .chars()
         .filter(|c| c.is_ascii_digit() || ":.-–—/ ".contains(*c))
         .count();
-    has_digit && has_separator && time_chars * 4 >= trimmed.len() * 3
+    let total = stripped.len().max(1);
+    has_digit && has_separator && time_chars * 4 >= total * 3
 }
 
 /// Check if text is a structural or section header rather than lesson content.
@@ -1524,6 +1535,13 @@ mod tests {
         assert!(is_time_like("9:00 - 9:30"));
         assert!(is_time_like("9.00-9.30"));
         assert!(is_time_like("  9:10  "));
+        // AM/PM format (common in US teacher schedules).
+        assert!(is_time_like("8:15 AM"));
+        assert!(is_time_like("8:15 AM-9:00 AM"));
+        assert!(is_time_like("8:15 AM - 9:00 AM"));
+        assert!(is_time_like("8:15AM-9:00AM"));
+        assert!(is_time_like("3:40 PM"));
+        assert!(is_time_like("12:00 PM-12:30 PM"));
         assert!(!is_time_like(""));
         assert!(!is_time_like("Math"));
         assert!(!is_time_like("Photosynthesis Lab"));
