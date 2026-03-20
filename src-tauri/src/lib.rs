@@ -319,6 +319,167 @@ fn get_school_calendar_entries(
         .collect())
 }
 
+/// Import a Long-Term Plan from a Google Sheets URL.
+///
+/// Accepts a Google Sheets URL, converts it to an HTML export URL,
+/// downloads the HTML, and runs it through the existing LTP parser.
+#[tauri::command]
+async fn import_ltp_from_url(
+    state: tauri::State<'_, AppState>,
+    url: String,
+    school_year: Option<String>,
+    doc_type: Option<String>,
+) -> Result<serde_json::Value, String> {
+    use sha2::{Digest, Sha256};
+
+    // Extract sheet ID from Google Sheets URL and build export URL.
+    let export_url = convert_sheets_url_to_export(&url)?;
+
+    // Download the HTML.
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&export_url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch URL: {e}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "HTTP {} when fetching spreadsheet",
+            response.status()
+        ));
+    }
+
+    let raw_html = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read response body: {e}"))?;
+
+    if raw_html.is_empty() {
+        return Err("Downloaded HTML is empty".into());
+    }
+
+    // Derive a filename from the URL.
+    let filename = extract_filename_from_url(&url);
+    let file_hash = format!("{:x}", Sha256::digest(raw_html.as_bytes()));
+    let doc_type = doc_type.unwrap_or_else(|| "ltp".to_string());
+
+    let result = state
+        .db
+        .import_ltp_document(
+            &filename,
+            &file_hash,
+            school_year.as_deref(),
+            &doc_type,
+            &raw_html,
+        )
+        .map_err(|e| format!("{e}"))?;
+
+    match result {
+        database::LtpImportResult::Imported(doc) => {
+            let parse_result = digest::ltp_parser::parse_ltp_html(&raw_html);
+            let cells_stored = parse_result.cells.len();
+
+            for cell in &parse_result.cells {
+                if let Err(e) = state.db.insert_ltp_grid_cell(
+                    &doc.id,
+                    cell.row_index,
+                    cell.col_index,
+                    cell.subject.as_deref(),
+                    cell.month.as_deref(),
+                    cell.content_html.as_deref(),
+                    cell.content_text.as_deref(),
+                    cell.background_color.as_deref(),
+                    cell.unit_name.as_deref(),
+                    cell.unit_color.as_deref(),
+                ) {
+                    tracing::warn!(
+                        row = cell.row_index,
+                        col = cell.col_index,
+                        error = %e,
+                        "Failed to insert LTP grid cell"
+                    );
+                }
+            }
+
+            tracing::info!(
+                filename = doc.filename.as_str(),
+                doc_type = doc.doc_type.as_str(),
+                cells_stored,
+                months = parse_result.month_headers.len(),
+                subjects = parse_result.subject_labels.len(),
+                "LTP document imported from URL and parsed"
+            );
+            Ok(serde_json::json!({
+                "status": "imported",
+                "id": doc.id,
+                "filename": doc.filename,
+                "doc_type": doc.doc_type,
+                "school_year": doc.school_year,
+                "cells_parsed": cells_stored,
+                "months": parse_result.month_headers,
+                "subjects": parse_result.subject_labels,
+            }))
+        }
+        database::LtpImportResult::Skipped { id, filename } => {
+            tracing::info!(
+                filename = filename.as_str(),
+                "LTP document from URL skipped (unchanged)"
+            );
+            Ok(serde_json::json!({
+                "status": "skipped",
+                "id": id,
+                "filename": filename,
+            }))
+        }
+    }
+}
+
+/// Convert a Google Sheets URL to an HTML export URL.
+///
+/// Accepts URLs like:
+///   https://docs.google.com/spreadsheets/d/SHEET_ID/edit...
+///   https://docs.google.com/spreadsheets/d/SHEET_ID/...
+/// Returns:
+///   https://docs.google.com/spreadsheets/d/SHEET_ID/export?format=html
+fn convert_sheets_url_to_export(url: &str) -> Result<String, String> {
+    // Match the sheet ID from the URL path.
+    let prefix = "/spreadsheets/d/";
+    let start = url
+        .find(prefix)
+        .ok_or_else(|| "Not a valid Google Sheets URL. Expected a URL containing /spreadsheets/d/".to_string())?
+        + prefix.len();
+
+    let rest = &url[start..];
+    let sheet_id = rest
+        .split('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "Could not extract sheet ID from URL".to_string())?;
+
+    Ok(format!(
+        "https://docs.google.com/spreadsheets/d/{}/export?format=html",
+        sheet_id
+    ))
+}
+
+/// Extract a reasonable filename from a Google Sheets URL.
+fn extract_filename_from_url(url: &str) -> String {
+    let prefix = "/spreadsheets/d/";
+    if let Some(start) = url.find(prefix) {
+        let rest = &url[start + prefix.len()..];
+        if let Some(sheet_id) = rest.split('/').next() {
+            let short_id = if sheet_id.len() > 12 {
+                &sheet_id[..12]
+            } else {
+                sheet_id
+            };
+            return format!("gsheet-{}.html", short_id);
+        }
+    }
+    "url-import.html".to_string()
+}
+
 /// Delete an imported LTP document and its associated grid cells/calendar entries.
 #[tauri::command]
 fn delete_ltp_document(
@@ -696,6 +857,7 @@ pub fn run() {
             set_feature_flag,
             toggle_feature_flag,
             import_ltp_document,
+            import_ltp_from_url,
             list_ltp_documents,
             delete_ltp_document,
             get_ltp_grid_cells,
@@ -748,4 +910,56 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_convert_sheets_url_edit() {
+        let url = "https://docs.google.com/spreadsheets/d/1aBcDeFgHiJkLmNoPqRsTuVwXyZ/edit#gid=0";
+        let result = convert_sheets_url_to_export(url).unwrap();
+        assert_eq!(
+            result,
+            "https://docs.google.com/spreadsheets/d/1aBcDeFgHiJkLmNoPqRsTuVwXyZ/export?format=html"
+        );
+    }
+
+    #[test]
+    fn test_convert_sheets_url_bare() {
+        let url = "https://docs.google.com/spreadsheets/d/ABCDEF123456/";
+        let result = convert_sheets_url_to_export(url).unwrap();
+        assert_eq!(
+            result,
+            "https://docs.google.com/spreadsheets/d/ABCDEF123456/export?format=html"
+        );
+    }
+
+    #[test]
+    fn test_convert_sheets_url_invalid() {
+        let url = "https://example.com/not-a-spreadsheet";
+        assert!(convert_sheets_url_to_export(url).is_err());
+    }
+
+    #[test]
+    fn test_extract_filename_from_url_long_id() {
+        let url = "https://docs.google.com/spreadsheets/d/1aBcDeFgHiJkLmNoPqRsTuVwXyZ/edit";
+        let filename = extract_filename_from_url(url);
+        assert_eq!(filename, "gsheet-1aBcDeFgHiJk.html");
+    }
+
+    #[test]
+    fn test_extract_filename_from_url_short_id() {
+        let url = "https://docs.google.com/spreadsheets/d/SHORT/edit";
+        let filename = extract_filename_from_url(url);
+        assert_eq!(filename, "gsheet-SHORT.html");
+    }
+
+    #[test]
+    fn test_extract_filename_from_url_invalid() {
+        let url = "https://example.com/whatever";
+        let filename = extract_filename_from_url(url);
+        assert_eq!(filename, "url-import.html");
+    }
 }
