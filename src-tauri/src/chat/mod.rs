@@ -413,12 +413,110 @@ pub fn get_ltp_context(
         }
     }
 
+    // Build per-day details from LTP cells that have day-specific content.
+    // LTP cells with different content per subject+month represent daily activities.
+    let daily_details = extract_daily_details(&cells);
+
+    // Detect event relationships from the daily routine patterns.
+    // E.g., "New Center Intro" followed by "Centers: X Minutes" are paired.
+    let event_relationships = detect_event_relationships(&cells);
+
     Ok(Some(LtpContext {
         month: month_name.to_string(),
         unit_name,
         subjects,
         calendar_notes,
+        daily_details,
+        event_relationships,
     }))
+}
+
+/// Extract per-day activity details from LTP grid cells.
+/// Groups cells by column index (which often corresponds to days or sub-periods)
+/// and extracts activity-level content for each.
+fn extract_daily_details(cells: &[crate::database::LtpGridCell]) -> Vec<crate::database::LtpDailyDetail> {
+    use crate::database::LtpDailyDetail;
+    use std::collections::BTreeMap;
+
+    // Group non-empty content by col_index to capture per-column (per-day/period) variety.
+    let mut by_col: BTreeMap<i32, Vec<String>> = BTreeMap::new();
+    for cell in cells {
+        if let Some(ref text) = cell.content_text {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() && trimmed.len() > 3 {
+                by_col.entry(cell.col_index).or_default().push(trimmed.to_string());
+            }
+        }
+    }
+
+    // Only include if there are multiple columns with distinct content (i.e., daily variety).
+    if by_col.len() < 2 {
+        return Vec::new();
+    }
+
+    // Map column indices to day names if they look like a 5-day week pattern.
+    let day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
+    let cols: Vec<i32> = by_col.keys().copied().collect();
+
+    cols.into_iter()
+        .enumerate()
+        .filter_map(|(i, col)| {
+            let entries = by_col.get(&col)?;
+            if entries.is_empty() {
+                return None;
+            }
+            let day = if i < day_names.len() {
+                day_names[i].to_string()
+            } else {
+                format!("Column {}", col)
+            };
+            // Deduplicate and limit entries to keep prompt concise.
+            let mut unique: Vec<String> = Vec::new();
+            for e in entries {
+                if !unique.contains(e) && unique.len() < 8 {
+                    unique.push(e.clone());
+                }
+            }
+            Some(LtpDailyDetail { day, entries: unique })
+        })
+        .collect()
+}
+
+/// Detect paired event relationships from LTP cell content.
+/// Looks for patterns like "New Center Intro" followed by "Centers: X Min"
+/// to tell the AI these events are related.
+fn detect_event_relationships(cells: &[crate::database::LtpGridCell]) -> Vec<crate::database::EventRelationship> {
+    use crate::database::EventRelationship;
+
+    let mut relationships = Vec::new();
+
+    // Scan cell content for common paired event patterns.
+    let mut has_center_intro = false;
+    let mut has_centers_block = false;
+
+    for cell in cells {
+        if let Some(ref text) = cell.content_text {
+            let lower = text.to_lowercase();
+            if lower.contains("center intro") || lower.contains("new center") {
+                has_center_intro = true;
+            }
+            if lower.contains("centers:") || lower.contains("center time") || lower.contains("centers -") {
+                has_centers_block = true;
+            }
+        }
+    }
+
+    if has_center_intro && has_centers_block {
+        relationships.push(EventRelationship {
+            intro_event: "New Center Intro".to_string(),
+            main_event: "Centers (time block)".to_string(),
+            description: "The intro event describes what will be in the following centers session. \
+                Generate specific, different center activities (materials, themes, small group tasks) for each day."
+                .to_string(),
+        });
+    }
+
+    relationships
 }
 
 /// Format LTP context as a prompt section for AI injection.
@@ -436,6 +534,35 @@ pub fn format_ltp_context(context: &crate::database::LtpContext) -> String {
         for subj in &context.subjects {
             out.push_str(&format!("• {}: {}\n", subj.subject, subj.content));
         }
+    }
+
+    // Per-day activity details from LTP cells (centers, small groups, materials).
+    if !context.daily_details.is_empty() {
+        out.push_str("\n### Per-Day Activity Details from LTP\n");
+        out.push_str(
+            "Use these specific activities to vary content across the week. \
+             Each day should draw from its own LTP entries below:\n\n"
+        );
+        for detail in &context.daily_details {
+            out.push_str(&format!("**{}:**\n", detail.day));
+            for entry in &detail.entries {
+                out.push_str(&format!("  • {}\n", entry));
+            }
+        }
+        out.push('\n');
+    }
+
+    // Event relationship hints (paired events like "New Center Intro" → "Centers: 60 Min").
+    if !context.event_relationships.is_empty() {
+        out.push_str("### Event Relationships\n");
+        out.push_str(
+            "These events are paired — the first event introduces or sets up the second. \
+             Generate specific, matching content for both:\n\n"
+        );
+        for rel in &context.event_relationships {
+            out.push_str(&format!("• \"{}\" → \"{}\": {}\n", rel.intro_event, rel.main_event, rel.description));
+        }
+        out.push('\n');
     }
 
     if !context.calendar_notes.is_empty() {
@@ -623,6 +750,75 @@ fn format_template_instructions(template_json: &str) -> String {
         );
     }
 
+    // ── Daily Variation Mandate ──
+    instructions.push_str("### Daily Variation — CRITICAL\n\n");
+    instructions.push_str(
+        "Each day of the week MUST have **different** lesson activities. Do NOT copy Monday's \
+         content across all days. Only truly recurring events (breakfast, lunch, recess, \
+         dismissal, snack) should repeat identically. All other slots — lessons, centers, \
+         small groups, morning work, instructional blocks — MUST vary day to day.\n\n"
+    );
+
+    // Classify routine events and give the AI specific guidance per type.
+    {
+        use crate::database::RoutineEventType;
+
+        let fixed: Vec<&str> = schema.daily_routine.iter()
+            .filter(|e| e.event_type == RoutineEventType::Fixed)
+            .map(|e| e.name.as_str())
+            .collect();
+        let variable: Vec<&str> = schema.daily_routine.iter()
+            .filter(|e| e.event_type == RoutineEventType::Variable)
+            .map(|e| e.name.as_str())
+            .collect();
+        let day_specific: Vec<&str> = schema.daily_routine.iter()
+            .filter(|e| e.event_type == RoutineEventType::DaySpecific)
+            .map(|e| e.name.as_str())
+            .collect();
+
+        if !fixed.is_empty() {
+            instructions.push_str(&format!(
+                "**Fixed recurring** (same every day): {}\n",
+                fixed.join(", ")
+            ));
+        }
+        if !variable.is_empty() {
+            instructions.push_str(&format!(
+                "**Variable recurring** (same time slot, different content each day): {}\n",
+                variable.join(", ")
+            ));
+        }
+        if !day_specific.is_empty() {
+            instructions.push_str(&format!(
+                "**Day-specific** (only on certain days): {}\n",
+                day_specific.join(", ")
+            ));
+        }
+        if !fixed.is_empty() || !variable.is_empty() || !day_specific.is_empty() {
+            instructions.push('\n');
+        }
+    }
+
+    instructions.push_str(
+        "**Event Relationships:** When a schedule has an introductory event (e.g., \"New Center Intro\") \
+         followed by a block event (e.g., \"Centers: 60 Minutes\"), the intro describes what will happen \
+         in the following block. Generate specific center details — materials, activities, small group \
+         tasks — that are **different each day** the pair appears.\n\n"
+    );
+
+    instructions.push_str(
+        "**Per-Day Specials:** Specials like PE, Drama, Music, and Art occur on **specific days only**. \
+         When a special is scheduled on a given day, surrounding time slots shift accordingly. Do NOT \
+         force a rigid identical time grid across all days — adapt the schedule per day based on which \
+         specials are present.\n\n"
+    );
+
+    instructions.push_str(
+        "**LTP-Informed Variety:** If Long-Term Plan context is provided, use it to pull **different** \
+         activities, themes, materials, and focuses for each day of the week while staying within the \
+         current unit. Distribute LTP activities across the week rather than repeating the same ones.\n\n"
+    );
+
     // ── Color Scheme ──
     let cs = &schema.color_scheme;
     if !cs.mappings.is_empty() {
@@ -689,7 +885,8 @@ fn format_template_instructions(template_json: &str) -> String {
         instructions.push_str("### HTML Output Format\n");
         instructions.push_str(
             "Generate a complete `<table>` with this structure. Here is the skeleton — \
-             fill every cell with specific lesson content. Note that recurring/routine events \
+             fill every cell with specific lesson content that is **UNIQUE per day**. \
+             Do NOT repeat the same activity across multiple days. Recurring/routine events \
              are already placed in their correct time slots:\n\n```html\n<table>\n  <tr>\n"
         );
 
@@ -729,7 +926,7 @@ fn format_template_instructions(template_json: &str) -> String {
                 }
             }
             instructions.push_str("  </tr>\n");
-            instructions.push_str("  <!-- Repeat for Tuesday, Wednesday, Thursday, Friday -->\n");
+            instructions.push_str("  <!-- Repeat for Tuesday, Wednesday, Thursday, Friday with DIFFERENT lesson content each day -->\n");
         } else {
             // Standard: columns are day headers, rows are time slots.
             for col in &ts.columns {
@@ -755,12 +952,14 @@ fn format_template_instructions(template_json: &str) -> String {
                         ));
                     }
                 } else {
-                    for _ in 1..ts.columns.len() {
-                        instructions.push_str(
+                    // Non-routine slot: each day column must have DIFFERENT content.
+                    for i in 1..ts.columns.len() {
+                        let day_hint = ts.columns.get(i).map(|s| s.as_str()).unwrap_or("Day");
+                        instructions.push_str(&format!(
                             "    <td>\
-                             <strong>Activity Name</strong><br/>Specific details...\
+                             <strong>[{day_hint} Activity]</strong><br/>Unique details for this day...\
                              </td>\n"
-                        );
+                        ));
                     }
                 }
                 instructions.push_str("  </tr>\n");
@@ -1912,9 +2111,9 @@ mod tests {
         assert!(result.contains("<strong>Morning Circle</strong>"), "Skeleton should pre-fill Morning Circle");
         assert!(result.contains("<strong>Lunch</strong>"), "Skeleton should pre-fill Lunch");
 
-        // Non-routine slot (9:00-9:30) should still show generic placeholder.
-        // Check that "Activity Name" still appears (for the non-routine slot).
-        assert!(result.contains("<strong>Activity Name</strong>"), "Non-routine slots should keep generic placeholder");
+        // Non-routine slot (9:00-9:30) should still show per-day placeholder hints.
+        // Check that day-specific placeholders appear (for the non-routine slot).
+        assert!(result.contains("[Monday Activity]"), "Non-routine slots should show per-day placeholder: {}", result);
     }
 
     #[test]
@@ -2160,6 +2359,8 @@ mod tests {
                 },
             ],
             calendar_notes: vec!["2025-03-20: SPRING BK".to_string()],
+            daily_details: vec![],
+            event_relationships: vec![],
         };
 
         let result = format_ltp_context(&ctx);
@@ -2181,12 +2382,93 @@ mod tests {
             unit_name: None,
             subjects: vec![],
             calendar_notes: vec![],
+            daily_details: vec![],
+            event_relationships: vec![],
         };
 
         let result = format_ltp_context(&ctx);
         assert!(result.contains("Month: August"));
         assert!(!result.contains("Subject Guidance"));
         assert!(!result.contains("Calendar Notes"));
+    }
+
+    #[test]
+    fn test_format_ltp_context_with_daily_details() {
+        use crate::database::{LtpContext, LtpDailyDetail, EventRelationship};
+
+        let ctx = LtpContext {
+            month: "March".to_string(),
+            unit_name: Some("Unit 5".to_string()),
+            subjects: vec![],
+            calendar_notes: vec![],
+            daily_details: vec![
+                LtpDailyDetail {
+                    day: "Monday".to_string(),
+                    entries: vec!["PE 11:00-11:40".to_string()],
+                },
+                LtpDailyDetail {
+                    day: "Tuesday".to_string(),
+                    entries: vec!["New Center Intro: House/Trains".to_string()],
+                },
+            ],
+            event_relationships: vec![
+                EventRelationship {
+                    intro_event: "New Center Intro".to_string(),
+                    main_event: "Centers (time block)".to_string(),
+                    description: "The intro sets up center activities".to_string(),
+                },
+            ],
+        };
+
+        let result = format_ltp_context(&ctx);
+        assert!(result.contains("Per-Day Activity Details"));
+        assert!(result.contains("Monday"));
+        assert!(result.contains("PE 11:00-11:40"));
+        assert!(result.contains("Tuesday"));
+        assert!(result.contains("House/Trains"));
+        assert!(result.contains("Event Relationships"));
+        assert!(result.contains("New Center Intro"));
+        assert!(result.contains("Centers (time block)"));
+    }
+
+    #[test]
+    fn test_daily_variation_mandate_in_template() {
+        // Verify that the daily variation section appears in template instructions.
+        let template = r##"{"color_scheme":{"mappings":[]},"table_structure":{"layout_type":"schedule_grid","columns":["Time","Monday","Tuesday"],"row_categories":[],"column_count":3},"time_slots":["9:00-10:00"],"content_patterns":{"cell_content_types":[],"has_links":false,"has_rich_formatting":false},"recurring_elements":{"subjects":[],"activities":[]},"daily_routine":[]}"##;
+
+        let result = format_template_instructions(template);
+        assert!(result.contains("Daily Variation"), "Should include daily variation section");
+        assert!(result.contains("MUST have **different** lesson activities"), "Should mandate different activities");
+        assert!(result.contains("Event Relationships"), "Should include event relationship guidance");
+        assert!(result.contains("Per-Day Specials"), "Should include per-day specials guidance");
+        assert!(result.contains("LTP-Informed Variety"), "Should include LTP variety guidance");
+    }
+
+    #[test]
+    fn test_routine_event_classification_in_template() {
+        use crate::database::{DailyRoutineEvent, RoutineEventType};
+
+        // Template with classified events.
+        let template = serde_json::json!({
+            "color_scheme": {"mappings": []},
+            "table_structure": {"layout_type": "schedule_grid", "columns": ["Time", "Mon", "Tue"], "row_categories": [], "column_count": 3},
+            "time_slots": ["9:00-10:00", "10:00-11:00", "11:00-12:00"],
+            "content_patterns": {"cell_content_types": [], "has_links": false, "has_rich_formatting": false},
+            "recurring_elements": {"subjects": [], "activities": []},
+            "daily_routine": [
+                {"name": "Lunch", "time_slot": "11:00-12:00", "days": ["Mon", "Tue"], "event_type": "fixed"},
+                {"name": "Centers/Small Group", "time_slot": "9:00-10:00", "days": ["Mon", "Tue"], "event_type": "variable"},
+                {"name": "PE", "time_slot": "10:00-11:00", "days": ["Mon"], "event_type": "day_specific"},
+            ]
+        });
+
+        let result = format_template_instructions(&template.to_string());
+        assert!(result.contains("Fixed recurring"), "Should list fixed events: {}", result);
+        assert!(result.contains("Lunch"), "Lunch should be in fixed list");
+        assert!(result.contains("Variable recurring"), "Should list variable events");
+        assert!(result.contains("Centers/Small Group"), "Centers should be in variable list");
+        assert!(result.contains("Day-specific"), "Should list day-specific events");
+        assert!(result.contains("PE"), "PE should be in day-specific list");
     }
 
     #[test]
@@ -2202,6 +2484,8 @@ mod tests {
                 content: "Shapes".to_string(),
             }],
             calendar_notes: vec![],
+            daily_details: vec![],
+            event_relationships: vec![],
         };
 
         let messages = build_messages(&history, "Plan a lesson", "", None, None, Some(&ltp_ctx));
