@@ -5,10 +5,68 @@ import { useSchoolCalendar } from "../../hooks/useScheduleData";
 import type {
   NewSchoolCalendar,
   NewCalendarException,
+  CalendarException,
 } from "../../types/schedule";
 
 interface Props {
   addToast: (msg: string, type: "success" | "error") => void;
+}
+
+/** Group consecutive exceptions with the same label + type into ranges. */
+interface ExceptionGroup {
+  label: string;
+  exception_type: string;
+  startDate: string;
+  endDate: string;
+  ids: string[];
+}
+
+function groupExceptions(exceptions: CalendarException[]): ExceptionGroup[] {
+  if (exceptions.length === 0) return [];
+
+  const sorted = [...exceptions].sort((a, b) => a.date.localeCompare(b.date));
+  const groups: ExceptionGroup[] = [];
+  let current: ExceptionGroup | null = null;
+
+  for (const ex of sorted) {
+    if (
+      current &&
+      current.label === ex.label &&
+      current.exception_type === ex.exception_type &&
+      isNextDay(current.endDate, ex.date)
+    ) {
+      current.endDate = ex.date;
+      current.ids.push(ex.id);
+    } else {
+      if (current) groups.push(current);
+      current = {
+        label: ex.label,
+        exception_type: ex.exception_type,
+        startDate: ex.date,
+        endDate: ex.date,
+        ids: [ex.id],
+      };
+    }
+  }
+  if (current) groups.push(current);
+  return groups;
+}
+
+function isNextDay(dateA: string, dateB: string): boolean {
+  const a = new Date(dateA + "T00:00:00");
+  const b = new Date(dateB + "T00:00:00");
+  return b.getTime() - a.getTime() === 86400000;
+}
+
+function expandDateRange(start: string, end: string): string[] {
+  const dates: string[] = [];
+  const d = new Date(start + "T00:00:00");
+  const last = new Date(end + "T00:00:00");
+  while (d <= last) {
+    dates.push(d.toISOString().slice(0, 10));
+    d.setDate(d.getDate() + 1);
+  }
+  return dates;
 }
 
 export function SettingsSchoolCalendar({ addToast }: Props) {
@@ -29,7 +87,8 @@ export function SettingsSchoolCalendar({ addToast }: Props) {
   }
 
   // Exception form
-  const [newDate, setNewDate] = useState("");
+  const [newStartDate, setNewStartDate] = useState("");
+  const [newEndDate, setNewEndDate] = useState("");
   const [newType, setNewType] = useState<"no_school" | "half_day" | "early_release">("no_school");
   const [newLabel, setNewLabel] = useState("");
 
@@ -52,28 +111,43 @@ export function SettingsSchoolCalendar({ addToast }: Props) {
   };
 
   const handleAddException = async () => {
-    if (!newDate || !calendar) return;
+    if (!newStartDate || !calendar) return;
+    const endDate = newEndDate || newStartDate;
+    if (endDate < newStartDate) return;
+    const label = newLabel.trim() || typeLabel(newType);
+    const dates = expandDateRange(newStartDate, endDate);
+
     try {
-      await invoke("add_calendar_exception", {
-        input: {
-          calendar_id: calendar.id,
-          date: newDate,
-          exception_type: newType,
-          label: newLabel.trim() || typeLabel(newType),
-        } as NewCalendarException,
-      });
-      setNewDate("");
+      for (const date of dates) {
+        await invoke("add_calendar_exception", {
+          input: {
+            calendar_id: calendar.id,
+            date,
+            exception_type: newType,
+            label,
+          } as NewCalendarException,
+        });
+      }
+      setNewStartDate("");
+      setNewEndDate("");
       setNewLabel("");
-      addToast("Exception added", "success");
+      addToast(
+        dates.length === 1
+          ? "Exception added"
+          : `${dates.length} days added for "${label}"`,
+        "success",
+      );
       reload();
     } catch {
       addToast("Failed to add exception", "error");
     }
   };
 
-  const handleDeleteException = async (id: string) => {
+  const handleDeleteGroup = async (ids: string[]) => {
     try {
-      await invoke("delete_calendar_exception", { id });
+      for (const id of ids) {
+        await invoke("delete_calendar_exception", { id });
+      }
       reload();
     } catch {
       addToast("Failed to remove exception", "error");
@@ -92,6 +166,8 @@ export function SettingsSchoolCalendar({ addToast }: Props) {
       </section>
     );
   }
+
+  const groups = groupExceptions(exceptions);
 
   const inputCls =
     "w-full px-3 py-2 bg-chalk-board/50 border border-chalk-white/8 rounded-lg text-sm text-chalk-white focus:outline-none focus:border-chalk-blue/40 transition-colors";
@@ -161,20 +237,24 @@ export function SettingsSchoolCalendar({ addToast }: Props) {
             Holidays & Half Days
           </h4>
 
-          {exceptions.length > 0 && (
+          {groups.length > 0 && (
             <div className="space-y-1.5 mb-3 max-h-40 overflow-y-auto scrollbar-thin scrollbar-thumb-chalk-board-light">
-              {exceptions.map((ex) => (
+              {groups.map((g, i) => (
                 <div
-                  key={ex.id}
+                  key={i}
                   className="flex items-center justify-between px-3 py-1.5 bg-chalk-board-dark/40 rounded-lg text-sm"
                 >
                   <div className="flex items-center gap-2">
-                    <span className={`w-2 h-2 rounded-full ${typeDotColor(ex.exception_type)}`} />
-                    <span className="text-chalk-dust">{formatDate(ex.date)}</span>
-                    <span className="text-chalk-white">{ex.label}</span>
+                    <span className={`w-2 h-2 rounded-full ${typeDotColor(g.exception_type)}`} />
+                    <span className="text-chalk-dust">
+                      {g.startDate === g.endDate
+                        ? formatDate(g.startDate)
+                        : `${formatDate(g.startDate)} – ${formatDate(g.endDate)}`}
+                    </span>
+                    <span className="text-chalk-white">{g.label}</span>
                   </div>
                   <button
-                    onClick={() => handleDeleteException(ex.id)}
+                    onClick={() => handleDeleteGroup(g.ids)}
                     className="text-chalk-muted hover:text-chalk-red transition-colors text-xs"
                   >
                     Remove
@@ -186,12 +266,29 @@ export function SettingsSchoolCalendar({ addToast }: Props) {
 
           {calendar && (
             <div className="flex gap-2 flex-wrap">
-              <input
-                type="date"
-                value={newDate}
-                onChange={(e) => setNewDate(e.target.value)}
-                className={`${inputCls} flex-1 min-w-[140px]`}
-              />
+              <div className="flex gap-1.5 flex-1 min-w-[280px]">
+                <input
+                  type="date"
+                  value={newStartDate}
+                  onChange={(e) => {
+                    setNewStartDate(e.target.value);
+                    if (!newEndDate || newEndDate < e.target.value) {
+                      setNewEndDate(e.target.value);
+                    }
+                  }}
+                  className={`${inputCls} flex-1`}
+                  title="Start date"
+                />
+                <span className="self-center text-chalk-muted text-xs">to</span>
+                <input
+                  type="date"
+                  value={newEndDate}
+                  min={newStartDate}
+                  onChange={(e) => setNewEndDate(e.target.value)}
+                  className={`${inputCls} flex-1`}
+                  title="End date"
+                />
+              </div>
               <select
                 value={newType}
                 onChange={(e) => setNewType(e.target.value as typeof newType)}
@@ -215,7 +312,7 @@ export function SettingsSchoolCalendar({ addToast }: Props) {
                 whileHover={{ scale: 1.02 }}
                 whileTap={{ scale: 0.98 }}
                 onClick={handleAddException}
-                disabled={!newDate}
+                disabled={!newStartDate}
                 className="px-3 py-2 bg-chalk-blue/10 border border-chalk-blue/30 rounded-lg text-chalk-blue text-xs hover:bg-chalk-blue/20 transition-colors disabled:opacity-40"
               >
                 + Add
