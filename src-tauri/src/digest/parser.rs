@@ -29,6 +29,34 @@ pub struct TableCell {
     pub html: String,
     /// Background color extracted from the cell's inline style attribute.
     pub bg_color: Option<String>,
+    /// Number of columns this cell spans (from the `colspan` attribute).
+    /// Defaults to 1 when no colspan is specified.
+    pub colspan: usize,
+    /// Number of rows this cell spans (from the `rowspan` attribute).
+    /// Defaults to 1 when no rowspan is specified.
+    pub rowspan: usize,
+}
+
+impl ParsedTable {
+    /// Compute the true grid width of this table by summing colspan values.
+    ///
+    /// Returns the maximum effective column count across all rows. This
+    /// correctly handles merged cells: a row with 1 cell that has `colspan="6"`
+    /// contributes a width of 6, not 1.
+    pub fn grid_width(&self) -> usize {
+        self.rows
+            .iter()
+            .map(|row| row.cells.iter().map(|c| c.colspan).sum::<usize>())
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+impl TableRow {
+    /// Compute the effective column count for this row by summing colspan values.
+    pub fn effective_width(&self) -> usize {
+        self.cells.iter().map(|c| c.colspan).sum()
+    }
 }
 
 /// Extract all tables from an HTML document exported by Google Drive.
@@ -89,7 +117,15 @@ pub fn extract_tables(html: &str) -> Vec<ParsedTable> {
                     let html = cell_inner_html(&cell);
                     let bg_color = cell.value().attr("style")
                         .and_then(extract_bg_color_from_style);
-                    TableCell { text, html, bg_color }
+                    let colspan = cell.value().attr("colspan")
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(1)
+                        .max(1);
+                    let rowspan = cell.value().attr("rowspan")
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(1)
+                        .max(1);
+                    TableCell { text, html, bg_color, colspan, rowspan }
                 })
                 .collect();
 
@@ -347,5 +383,80 @@ mod tests {
         "#;
         let tables = extract_tables(html);
         assert_eq!(tables[0].rows[0].cells[0].html, "");
+    }
+
+    // ── Colspan / Rowspan Tests ─────────────────────────────────────
+
+    #[test]
+    fn test_colspan_parsed() {
+        let html = r#"
+            <table>
+                <tr><td colspan="3">Wide</td></tr>
+                <tr><td>A</td><td>B</td><td>C</td></tr>
+            </table>
+        "#;
+        let tables = extract_tables(html);
+        assert_eq!(tables[0].rows[0].cells[0].colspan, 3);
+        assert_eq!(tables[0].rows[0].cells[0].rowspan, 1);
+        assert_eq!(tables[0].rows[1].cells[0].colspan, 1);
+    }
+
+    #[test]
+    fn test_rowspan_parsed() {
+        let html = r#"
+            <table>
+                <tr><td rowspan="2">Tall</td><td>B</td></tr>
+                <tr><td>C</td></tr>
+            </table>
+        "#;
+        let tables = extract_tables(html);
+        assert_eq!(tables[0].rows[0].cells[0].rowspan, 2);
+        assert_eq!(tables[0].rows[0].cells[0].colspan, 1);
+    }
+
+    #[test]
+    fn test_colspan_and_rowspan_combined() {
+        let html = r#"
+            <table>
+                <tr><td colspan="2" rowspan="2">Big</td><td>C</td></tr>
+                <tr><td>D</td></tr>
+            </table>
+        "#;
+        let tables = extract_tables(html);
+        assert_eq!(tables[0].rows[0].cells[0].colspan, 2);
+        assert_eq!(tables[0].rows[0].cells[0].rowspan, 2);
+    }
+
+    #[test]
+    fn test_default_colspan_rowspan() {
+        let html = r#"
+            <table><tr><td>Normal</td></tr></table>
+        "#;
+        let tables = extract_tables(html);
+        assert_eq!(tables[0].rows[0].cells[0].colspan, 1);
+        assert_eq!(tables[0].rows[0].cells[0].rowspan, 1);
+    }
+
+    #[test]
+    fn test_grid_width_with_colspan() {
+        let html = r#"
+            <table>
+                <tr><td colspan="5">Title</td></tr>
+                <tr><td>A</td><td>B</td><td>C</td><td>D</td><td>E</td></tr>
+            </table>
+        "#;
+        let tables = extract_tables(html);
+        assert_eq!(tables[0].grid_width(), 5);
+    }
+
+    #[test]
+    fn test_effective_width() {
+        let html = r#"
+            <table>
+                <tr><td colspan="3">Wide</td><td>Normal</td></tr>
+            </table>
+        "#;
+        let tables = extract_tables(html);
+        assert_eq!(tables[0].rows[0].effective_width(), 4);
     }
 }

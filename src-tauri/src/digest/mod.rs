@@ -148,6 +148,31 @@ fn is_time_like(text: &str) -> bool {
     has_digit && has_separator && time_chars * 4 >= total * 3
 }
 
+/// Check if a row appears to be a merged/section divider row.
+///
+/// Uses a multi-strategy approach:
+/// 1. **colspan-aware**: Compares effective width (sum of colspan values) against
+///    the expected grid width. A row with a single `colspan="6"` cell has
+///    effective width 6 and cell count 1 — this is a merged banner row.
+/// 2. **cell-count fallback**: If colspans are all 1 (not specified in HTML),
+///    compares raw cell count against expected width.
+///
+/// A row is considered "merged" if it has significantly fewer logical columns
+/// than expected (less than half), indicating it's a section divider, week
+/// header, or holiday banner rather than data.
+pub(crate) fn is_merged_row(row: &parser::TableRow, expected_width: usize) -> bool {
+    if expected_width <= 2 {
+        return false;
+    }
+    // A single cell spanning the full width is definitely a merged banner row,
+    // even though its effective_width equals expected_width.
+    if row.cells.len() == 1 && expected_width > 2 {
+        return true;
+    }
+    // Check raw cell count: fewer than half the expected columns means merged.
+    row.cells.len() * 2 < expected_width
+}
+
 /// Check if text is a structural or section header rather than lesson content.
 ///
 /// Catches entries like "Additional Ideas:", "Notes:", "LP 2022-2023", etc.
@@ -199,15 +224,25 @@ fn detect_schedule_columns(headers: &[String]) -> Option<(usize, Vec<(usize, Str
 /// For each data row, reads the time slot from `time_col` and creates one
 /// lesson per non-empty day column cell. The day and time become context in
 /// the plan body, and the activity text becomes the title.
+///
+/// `data_start` is the index of the first data row (i.e., header row index + 1).
+/// Rows with significantly fewer cells than the header are skipped as merged
+/// section dividers.
 fn extract_lessons_from_schedule(
     table: &parser::ParsedTable,
     headers: &[String],
     time_col: usize,
     day_columns: &[(usize, String)],
+    data_start: usize,
 ) -> Vec<ExtractedLesson> {
     let mut lessons = Vec::new();
+    let expected_width = headers.len();
 
-    for row in &table.rows[1..] {
+    for row in table.rows.iter().skip(data_start) {
+        // Skip merged/section-divider rows (fewer cells than expected).
+        if is_merged_row(row, expected_width) {
+            continue;
+        }
         let texts: Vec<String> = row.cells.iter().map(|c| c.text.trim().to_string()).collect();
 
         let time_slot = texts.get(time_col).map(|s| s.as_str()).unwrap_or("");
@@ -305,7 +340,10 @@ pub fn extract_lessons_from_doc(html: &str) -> Vec<ExtractedLesson> {
             continue;
         }
 
-        let headers: Vec<String> = table.rows[0]
+        let h_idx = template_extractor::effective_header_row(table);
+        let header_row = &table.rows[h_idx];
+        let expected_width = header_row.cells.len();
+        let headers: Vec<String> = header_row
             .cells
             .iter()
             .map(|c| c.text.trim().to_lowercase())
@@ -314,12 +352,16 @@ pub fn extract_lessons_from_doc(html: &str) -> Vec<ExtractedLesson> {
         // Check if this is a weekly schedule grid.
         if let Some((time_col, day_columns)) = detect_schedule_columns(&headers) {
             let schedule_lessons =
-                extract_lessons_from_schedule(table, &headers, time_col, &day_columns);
+                extract_lessons_from_schedule(table, &headers, time_col, &day_columns, h_idx + 1);
             lessons.extend(schedule_lessons);
             continue;
         }
 
-        for row in &table.rows[1..] {
+        for row in table.rows.iter().skip(h_idx + 1) {
+            // Skip merged/section-divider rows.
+            if is_merged_row(row, expected_width) {
+                continue;
+            }
             if let Some(lesson) = extract_lesson_from_row(&headers, row) {
                 lessons.push(lesson);
             }
@@ -1724,5 +1766,98 @@ mod tests {
         // 5 Assembly + 5 (row2) + 2 (row3) = 12 meaningful activities.
         assert!(lessons.len() <= 20, "Expected ~12 plans, got {}", lessons.len());
         assert!(lessons.len() >= 10, "Expected ~12 plans, got {}", lessons.len());
+    }
+
+    // ── Merged Row/Column Robustness Tests (mod.rs) ────────────────
+
+    #[test]
+    fn test_is_merged_row_helper() {
+        let merged = parser::TableRow {
+            cells: vec![parser::TableCell {
+                text: "Banner".into(),
+                colspan: 6,
+                ..Default::default()
+            }],
+        };
+        assert!(is_merged_row(&merged, 6), "Single cell should be merged when width=6");
+
+        let normal = parser::TableRow {
+            cells: (0..6).map(|i| parser::TableCell {
+                text: format!("C{}", i),
+                ..Default::default()
+            }).collect(),
+        };
+        assert!(!is_merged_row(&normal, 6), "Full-width row should not be merged");
+
+        // Small tables (width <= 2) never report merged.
+        let small = parser::TableRow {
+            cells: vec![parser::TableCell { text: "X".into(), ..Default::default() }],
+        };
+        assert!(!is_merged_row(&small, 2), "Should not detect merge for width<=2");
+    }
+
+    #[test]
+    fn test_extract_lessons_with_merged_title_row() {
+        // Schedule table with a colspan title row at the top.
+        let html = r#"<html><body>
+            <table>
+                <tr><td colspan="4">Mrs. Smith's Class Schedule</td></tr>
+                <tr><th>Day/Time</th><th>Monday</th><th>Tuesday</th><th>Wednesday</th></tr>
+                <tr><td>9:00-9:30</td><td>Math</td><td>Reading</td><td>Science</td></tr>
+                <tr><td>10:00-10:30</td><td>PE</td><td>Art</td><td>Music</td></tr>
+            </table>
+        </body></html>"#;
+
+        let lessons = extract_lessons_from_doc(html);
+        let titles: Vec<&str> = lessons.iter().map(|l| l.title.as_str()).collect();
+
+        // Should extract activities, not the title row.
+        assert!(titles.contains(&"Math"), "Should extract Math");
+        assert!(titles.contains(&"PE"), "Should extract PE");
+        assert!(!titles.iter().any(|t| t.contains("Mrs. Smith")),
+            "Should NOT extract title row: {:?}", titles);
+    }
+
+    #[test]
+    fn test_extract_lessons_with_mid_table_section_divider() {
+        // Schedule table with a section divider in the middle.
+        let html = r#"<html><body>
+            <table>
+                <tr><th>Time</th><th>Monday</th><th>Tuesday</th><th>Wednesday</th></tr>
+                <tr><td>8:00-8:30</td><td>Math</td><td>Reading</td><td>Science</td></tr>
+                <tr><td colspan="4">Lunch & Recess</td></tr>
+                <tr><td>1:00-1:30</td><td>Writing</td><td>Art</td><td>Music</td></tr>
+            </table>
+        </body></html>"#;
+
+        let lessons = extract_lessons_from_doc(html);
+        let titles: Vec<&str> = lessons.iter().map(|l| l.title.as_str()).collect();
+
+        // Should extract from rows before and after the divider.
+        assert!(titles.contains(&"Math"), "Should extract Math");
+        assert!(titles.contains(&"Writing"), "Should extract Writing");
+        assert!(!titles.iter().any(|t| t.contains("Lunch & Recess")),
+            "Should NOT extract divider: {:?}", titles);
+    }
+
+    #[test]
+    fn test_extract_lessons_standard_table_with_section_dividers() {
+        // Standard (non-schedule) table with section divider rows.
+        let html = r#"<html><body>
+            <table>
+                <tr><th>Title</th><th>Subject</th><th>Duration</th></tr>
+                <tr><td>Photosynthesis</td><td>Biology</td><td>45 min</td></tr>
+                <tr><td colspan="3">Unit 2: Chemistry</td></tr>
+                <tr><td>Atomic Structure</td><td>Chemistry</td><td>50 min</td></tr>
+            </table>
+        </body></html>"#;
+
+        let lessons = extract_lessons_from_doc(html);
+        let titles: Vec<&str> = lessons.iter().map(|l| l.title.as_str()).collect();
+
+        assert!(titles.contains(&"Photosynthesis"), "Should extract Photosynthesis");
+        assert!(titles.contains(&"Atomic Structure"), "Should extract Atomic Structure");
+        assert!(!titles.iter().any(|t| t.contains("Unit 2")),
+            "Should NOT extract section divider: {:?}", titles);
     }
 }
