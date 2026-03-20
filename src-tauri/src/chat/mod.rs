@@ -496,38 +496,32 @@ fn format_template_instructions(template_json: &str) -> String {
             // Transposed: first header is "Day", remaining headers are time slots.
             let first_col_label = ts.columns.first().map(|s| s.as_str()).unwrap_or("Day");
             instructions.push_str(&format!("    <th{header_style}>{first_col_label}</th>\n"));
-            let example_slots: Vec<&String> = schema.time_slots.iter().take(5).collect();
-            for slot in &example_slots {
+            // Show ALL time slots — the AI must reproduce every one.
+            for slot in &schema.time_slots {
                 instructions.push_str(&format!("    <th{header_style}>{slot}</th>\n"));
-            }
-            if schema.time_slots.len() > 5 {
-                instructions.push_str("    <!-- ... more time slots ... -->\n");
             }
             instructions.push_str("  </tr>\n");
 
-            // Show example day rows.
-            let day_names = ["Monday", "Tuesday", "Wednesday"];
-            for day in &day_names {
-                instructions.push_str("  <tr>\n");
-                instructions.push_str(&format!("    <td{header_style}>{day}</td>\n"));
-                for slot in &example_slots {
-                    if let Some(routine_name) = routine_by_slot.get(slot.as_str()) {
-                        instructions.push_str(&format!(
-                            "    <td{activity_style}>\
-                             <strong>{routine_name}</strong>\
-                             </td>\n"
-                        ));
-                    } else {
-                        instructions.push_str(&format!(
-                            "    <td{activity_style}>\
-                             <strong>Activity Name</strong><br/>Specific details...\
-                             </td>\n"
-                        ));
-                    }
+            // Show one example day row with all slots filled.
+            instructions.push_str("  <tr>\n");
+            instructions.push_str(&format!("    <td{header_style}>Monday</td>\n"));
+            for slot in &schema.time_slots {
+                if let Some(routine_name) = routine_by_slot.get(slot.as_str()) {
+                    instructions.push_str(&format!(
+                        "    <td{activity_style}>\
+                         <strong>{routine_name}</strong>\
+                         </td>\n"
+                    ));
+                } else {
+                    instructions.push_str(&format!(
+                        "    <td{activity_style}>\
+                         <strong>Activity Name</strong><br/>Specific details...\
+                         </td>\n"
+                    ));
                 }
-                instructions.push_str("  </tr>\n");
             }
-            instructions.push_str("  <!-- ... continue for all days ... -->\n");
+            instructions.push_str("  </tr>\n");
+            instructions.push_str("  <!-- Repeat for Tuesday, Wednesday, Thursday, Friday -->\n");
         } else {
             // Standard: columns are day headers, rows are time slots.
             for col in &ts.columns {
@@ -535,8 +529,8 @@ fn format_template_instructions(template_json: &str) -> String {
             }
             instructions.push_str("  </tr>\n");
 
-            let example_slots: Vec<&String> = schema.time_slots.iter().take(3).collect();
-            for slot in &example_slots {
+            // Show ALL time slot rows — the AI must reproduce every one.
+            for slot in &schema.time_slots {
                 instructions.push_str("  <tr>\n");
                 instructions.push_str(&format!("    <td>{slot}</td>\n"));
                 if let Some(routine_name) = routine_by_slot.get(slot.as_str()) {
@@ -559,27 +553,29 @@ fn format_template_instructions(template_json: &str) -> String {
                 }
                 instructions.push_str("  </tr>\n");
             }
-            if schema.time_slots.len() > 3 {
-                instructions.push_str("  <!-- ... continue for all time slots ... -->\n");
-            }
         }
         instructions.push_str("</table>\n```\n\n");
     }
 
+    let slot_count = schema.time_slots.len();
     if is_transposed {
-        instructions.push_str(
-            "**CRITICAL:** Generate ALL time slot columns, ALL day rows, and fill EVERY cell. \
-             An empty cell is better than a missing column. The output must be a complete weekly schedule, \
-             not a partial plan. Ensure all text is readable — use `color: #000000` (black) on all \
-             light-colored cell backgrounds.\n\n"
-        );
+        instructions.push_str(&format!(
+            "**CRITICAL — DO NOT SHORTEN THE SCHEDULE:** Your output table MUST contain exactly \
+             {slot_count} time slot columns and 5 day rows (Monday–Friday). Do NOT combine, skip, \
+             or abbreviate any time slots. Do NOT invent new times — use ONLY the exact times listed \
+             above. An empty cell is better than a missing column. The output must be a complete \
+             weekly schedule, not a partial plan. Ensure all text is readable — use `color: #000000` \
+             (black) on all light-colored cell backgrounds.\n\n"
+        ));
     } else {
-        instructions.push_str(
-            "**CRITICAL:** Generate ALL time slot rows, ALL day columns, and fill EVERY cell. \
-             An empty cell is better than a missing row. The output must be a complete weekly schedule, \
-             not a partial plan. Ensure all text is readable — use `color: #000000` (black) on all \
-             light-colored cell backgrounds.\n\n"
-        );
+        instructions.push_str(&format!(
+            "**CRITICAL — DO NOT SHORTEN THE SCHEDULE:** Your output table MUST contain exactly \
+             {slot_count} time slot rows and all day columns. Do NOT combine, skip, or abbreviate \
+             any time slots. Do NOT invent new times — use ONLY the exact times listed above. \
+             An empty cell is better than a missing row. The output must be a complete weekly \
+             schedule, not a partial plan. Ensure all text is readable — use `color: #000000` \
+             (black) on all light-colored cell backgrounds.\n\n"
+        ));
     }
 
     if !schema.daily_routine.is_empty() {
@@ -690,7 +686,7 @@ async fn generate_response(
     teaching_template: Option<&str>,
 ) -> Result<String, ChalkError> {
     let messages = build_messages(history, user_message, rag_context, active_plan, teaching_template);
-    provider.complete(&messages, 4096, 0.7).await
+    provider.complete(&messages, 16384, 0.7).await
 }
 
 /// Stream a response using the provider abstraction, emitting tokens via Tauri events.
@@ -709,7 +705,7 @@ async fn generate_response_stream(
     let app_handle = app.clone();
 
     provider
-        .complete_stream(&messages, 4096, 0.7, Box::new(move |token| {
+        .complete_stream(&messages, 16384, 0.7, Box::new(move |token| {
             events::emit_chat_stream_token(
                 &app_handle,
                 events::ChatStreamTokenPayload {
@@ -1595,17 +1591,22 @@ mod tests {
     }
 
     #[test]
-    fn test_format_template_instructions_many_time_slots_skeleton_truncated() {
-        // If there are many time slots, the skeleton only shows first 3.
+    fn test_format_template_instructions_many_time_slots_skeleton_shows_all() {
+        // All time slots must appear in the skeleton — the AI must reproduce every one.
         let template = r#"{"color_scheme":{"mappings":[]},"table_structure":{"layout_type":"schedule_grid","columns":["Time","Monday","Tuesday"],"row_categories":[],"column_count":3},"time_slots":["8:00-8:30","8:30-9:00","9:00-9:30","9:30-10:00","10:00-10:30"],"content_patterns":{"cell_content_types":[],"has_links":false,"has_rich_formatting":false},"recurring_elements":{"subjects":[],"activities":[]}}"#;
 
         let result = format_template_instructions(template);
 
-        // All time slots listed in the Time Blocks section.
+        // All time slots listed in both the Time Blocks section AND the HTML skeleton.
         assert!(result.contains("8:00-8:30"));
+        assert!(result.contains("8:30-9:00"));
+        assert!(result.contains("9:00-9:30"));
+        assert!(result.contains("9:30-10:00"));
         assert!(result.contains("10:00-10:30"));
-        // HTML skeleton shows first 3 + ellipsis comment.
-        assert!(result.contains("continue for all time slots"));
+        // The skeleton should NOT truncate — no "continue for all" comment.
+        assert!(!result.contains("continue for all time slots"));
+        // Should specify the exact slot count.
+        assert!(result.contains("5 time slot rows"), "Should mention exact count: {}", result);
     }
 
     #[test]
@@ -1700,9 +1701,9 @@ mod tests {
         // Skeleton should pre-fill Recess at 9:00-9:30 in transposed layout.
         assert!(result.contains("<strong>Recess</strong>"), "Transposed skeleton should pre-fill Recess");
 
-        // Critical instruction should reference columns, not rows.
-        assert!(result.contains("ALL time slot columns"));
-        assert!(result.contains("ALL day rows"));
+        // Critical instruction should reference exact slot count and day rows.
+        assert!(result.contains("3 time slot columns"), "Should mention exact slot count: {}", result);
+        assert!(result.contains("5 day rows"), "Should mention 5 day rows: {}", result);
 
         // Mandatory reminder should be present.
         assert!(result.contains("RECURRING EVENTS ARE MANDATORY"), "Missing mandatory reminder in transposed");
