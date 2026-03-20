@@ -6,6 +6,7 @@ import { OnboardingWizard } from "./components/onboarding/OnboardingWizard";
 import { AppLayout } from "./components/AppLayout";
 import { Library } from "./components/Library";
 import { PlanDetail } from "./components/PlanDetail";
+import { CurriculumPage } from "./components/curriculum/CurriculumPage";
 import { ToastProvider } from "./components/Toast";
 import { PrivacyConsentDialog } from "./components/PrivacyConsentDialog";
 import { initSentry } from "./sentry";
@@ -137,6 +138,7 @@ function App() {
               }
             >
               <Route path="/" element={<Library />} />
+              <Route path="/curriculum" element={<CurriculumPage />} />
               <Route path="/plan/:planId" element={<PlanDetail />} />
             </Route>
           </Routes>

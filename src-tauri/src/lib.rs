@@ -244,6 +244,81 @@ fn list_ltp_documents(
         .collect())
 }
 
+/// Get grid cells for an LTP document.
+#[tauri::command]
+fn get_ltp_grid_cells(
+    state: tauri::State<AppState>,
+    document_id: String,
+) -> Result<Vec<serde_json::Value>, String> {
+    let cells = state
+        .db
+        .list_ltp_grid_cells(&document_id)
+        .map_err(|e| format!("{e}"))?;
+    Ok(cells
+        .into_iter()
+        .map(|c| {
+            serde_json::json!({
+                "id": c.id,
+                "document_id": c.document_id,
+                "row_index": c.row_index,
+                "col_index": c.col_index,
+                "subject": c.subject,
+                "month": c.month,
+                "content_html": c.content_html,
+                "content_text": c.content_text,
+                "background_color": c.background_color,
+                "unit_name": c.unit_name,
+                "unit_color": c.unit_color,
+            })
+        })
+        .collect())
+}
+
+/// Update a single LTP grid cell's text content (inline editing).
+#[tauri::command]
+fn update_ltp_grid_cell(
+    state: tauri::State<AppState>,
+    cell_id: String,
+    content_text: String,
+) -> Result<serde_json::Value, String> {
+    let cell = state
+        .db
+        .update_ltp_grid_cell(&cell_id, &content_text)
+        .map_err(|e| format!("{e}"))?;
+    Ok(serde_json::json!({
+        "id": cell.id,
+        "content_text": cell.content_text,
+    }))
+}
+
+/// Get school calendar entries for an LTP document.
+#[tauri::command]
+fn get_school_calendar_entries(
+    state: tauri::State<AppState>,
+    document_id: String,
+) -> Result<Vec<serde_json::Value>, String> {
+    let entries = state
+        .db
+        .list_school_calendar_entries(&document_id)
+        .map_err(|e| format!("{e}"))?;
+    Ok(entries
+        .into_iter()
+        .map(|e| {
+            serde_json::json!({
+                "id": e.id,
+                "document_id": e.document_id,
+                "date": e.date,
+                "day_number": e.day_number,
+                "unit_name": e.unit_name,
+                "unit_color": e.unit_color,
+                "is_holiday": e.is_holiday,
+                "holiday_name": e.holiday_name,
+                "notes": e.notes,
+            })
+        })
+        .collect())
+}
+
 /// Delete an imported LTP document and its associated grid cells/calendar entries.
 #[tauri::command]
 fn delete_ltp_document(
@@ -606,6 +681,9 @@ pub fn run() {
             import_ltp_document,
             list_ltp_documents,
             delete_ltp_document,
+            get_ltp_grid_cells,
+            update_ltp_grid_cell,
+            get_school_calendar_entries,
             get_active_teaching_template,
             list_teaching_templates,
             import_html_file,
