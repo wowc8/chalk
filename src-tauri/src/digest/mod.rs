@@ -180,8 +180,10 @@ fn detect_schedule_columns(headers: &[String]) -> Option<(usize, Vec<(usize, Str
             time_col = Some(i);
             continue;
         }
-        if DAY_NAMES.iter().any(|d| h.contains(d)) {
-            day_columns.push((i, capitalize_header(header.trim())));
+        if let Some(day) = DAY_NAMES.iter().find(|d| h.contains(**d)) {
+            // Use just the canonical day name, not the full header text which may
+            // include extra info like "Monday 8:15-3:05 8/11 PD NO SCHOOL".
+            day_columns.push((i, capitalize_header(day)));
         }
     }
 
