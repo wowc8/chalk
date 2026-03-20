@@ -1221,10 +1221,10 @@ mod tests {
         let headers = vec!["title".into(), "grade".into(), "subject".into(), "materials".into()];
         let row = parser::TableRow {
             cells: vec![
-                parser::TableCell { html: String::new(), text: "Fractions".into() },
-                parser::TableCell { html: String::new(), text: "5th".into() },
-                parser::TableCell { html: String::new(), text: "Math".into() },
-                parser::TableCell { html: String::new(), text: "Worksheets, manipulatives".into() },
+                parser::TableCell { text: "Fractions".into(), ..Default::default() },
+                parser::TableCell { text: "5th".into(), ..Default::default() },
+                parser::TableCell { text: "Math".into(), ..Default::default() },
+                parser::TableCell { text: "Worksheets, manipulatives".into(), ..Default::default() },
             ],
         };
 
@@ -1240,9 +1240,9 @@ mod tests {
         let headers = vec!["date".into(), "activity".into(), "notes".into()];
         let row = parser::TableRow {
             cells: vec![
-                parser::TableCell { html: String::new(), text: "March 1".into() },
-                parser::TableCell { html: String::new(), text: "Lab experiment".into() },
-                parser::TableCell { html: String::new(), text: "Bring goggles".into() },
+                parser::TableCell { text: "March 1".into(), ..Default::default() },
+                parser::TableCell { text: "Lab experiment".into(), ..Default::default() },
+                parser::TableCell { text: "Bring goggles".into(), ..Default::default() },
             ],
         };
 
@@ -1650,8 +1650,8 @@ mod tests {
         let headers = vec!["date".into(), "notes".into()];
         let row = parser::TableRow {
             cells: vec![
-                parser::TableCell { html: String::new(), text: "9:00-9:30".into() },
-                parser::TableCell { html: String::new(), text: "".into() },
+                parser::TableCell { text: "9:00-9:30".into(), ..Default::default() },
+                parser::TableCell { text: "".into(), ..Default::default() },
             ],
         };
         assert!(extract_lesson_from_row(&headers, &row).is_none());
@@ -1662,8 +1662,8 @@ mod tests {
         let headers = vec!["section".into(), "details".into()];
         let row = parser::TableRow {
             cells: vec![
-                parser::TableCell { html: String::new(), text: "Notes:".into() },
-                parser::TableCell { html: String::new(), text: "".into() },
+                parser::TableCell { text: "Notes:".into(), ..Default::default() },
+                parser::TableCell { text: "".into(), ..Default::default() },
             ],
         };
         assert!(extract_lesson_from_row(&headers, &row).is_none());
@@ -1674,7 +1674,7 @@ mod tests {
         // A plan with a title but empty body should be filtered out.
         let headers = vec!["title".into()];
         let row = parser::TableRow {
-            cells: vec![parser::TableCell { html: String::new(), text: "Lonely Title".into() }],
+            cells: vec![parser::TableCell { text: "Lonely Title".into(), ..Default::default() }],
         };
         assert!(extract_lesson_from_row(&headers, &row).is_none());
     }
