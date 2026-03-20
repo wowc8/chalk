@@ -589,9 +589,31 @@ fn format_template_instructions(template_json: &str) -> String {
              Daily Routine Events section above MUST appear in your generated plan at its designated \
              time slot. These are non-negotiable — they represent the teacher's fixed daily schedule \
              (meals, recess, dismissal, etc.). Place them FIRST, then fill remaining slots with \
-             lesson content.\n"
+             lesson content.\n\n"
         );
     }
+
+    // ── Editing Rules ──
+    instructions.push_str("### Editing an Existing Schedule\n\n");
+    instructions.push_str(
+        "When the teacher asks to **modify** an existing schedule (e.g., \"this week we have PE on Monday \
+         from 11-11:40\", \"change Tuesday's math to science\", \"add art on Wednesday at 1pm\"), you MUST \
+         follow these rules:\n\n\
+         1. **REPLACE cell content in-place** — find the target cell(s) by matching the day (column) and \
+            time slot (row), then overwrite that cell's inner content. Do NOT insert new `<td>` elements \
+            or shift existing cells. Every `<td>` in the original table must remain in the same position.\n\
+         2. **Keep the table dimensions fixed** — the output table MUST have the exact same number of rows \
+            and columns as the original. Do not add, remove, or reorder any rows or columns.\n\
+         3. **Leave unaffected cells unchanged** — if the teacher says to change Monday's 11 AM slot, every \
+            other cell in the table (other days in that row, other rows entirely) must keep its original \
+            content, colors, and formatting exactly as-is.\n\
+         4. **Map to the closest existing slot** — if the requested time range doesn't exactly match a \
+            slot label (e.g., \"11-11:40\" when the slot is \"11:00 AM - 11:40 AM\"), find the slot whose \
+            time range best overlaps and replace that cell. Never restructure the table or add new time rows.\n\
+         5. **Preserve the full table** — always output the COMPLETE table with ALL rows and columns, not \
+            just the changed parts. The editor replaces the entire table content, so omitting rows means \
+            they disappear.\n\n"
+    );
 
     instructions
 }
