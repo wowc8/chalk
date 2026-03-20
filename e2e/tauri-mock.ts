@@ -109,6 +109,9 @@ export async function setupTauriMocks(
       // Track mutable status so subsequent calls reflect wizard progress.
       const onboardingStatus = { ...status };
 
+      // Auto-incrementing ID for created entities
+      let nextId = 1;
+
       // Map of Tauri command name → handler returning a JSON-serialisable value.
       const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
         initialize_oauth: () => "OAuth initialized (mock)",
@@ -164,6 +167,53 @@ export async function setupTauriMocks(
           onboardingStatus.initial_digest_complete = true;
           return digestMessage;
         },
+
+        // --- Schedule / Calendar commands (wizard steps 2-5) ---
+
+        get_app_setting: () => null,
+        set_app_setting: () => null,
+
+        get_school_calendar: () => null,
+        update_school_calendar: () => ({
+          id: `cal-${nextId++}`,
+          year_start: "2025-08-14",
+          year_end: "2026-05-30",
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }),
+
+        add_calendar_exception: (args: Record<string, unknown>) => ({
+          id: `exc-${nextId++}`,
+          calendar_id: args.input ? (args.input as any).calendar_id : "cal-1",
+          date: args.input ? (args.input as any).date : "2025-12-23",
+          exception_type: args.input ? (args.input as any).exception_type : "no_school",
+          label: args.input ? (args.input as any).label : "",
+        }),
+        delete_calendar_exception: () => null,
+        list_calendar_exceptions: () => [],
+
+        get_recurring_events: () => [],
+        create_recurring_event: (args: Record<string, unknown>) => ({
+          id: `evt-${nextId++}`,
+          name: args.input ? (args.input as any).name : "Event",
+          event_type: args.input ? (args.input as any).event_type : "fixed",
+          linked_to: null,
+          details_vary_daily: false,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }),
+        update_recurring_event: () => null,
+        delete_recurring_event: () => null,
+
+        create_event_occurrence: (args: Record<string, unknown>) => ({
+          id: `occ-${nextId++}`,
+          event_id: args.input ? (args.input as any).event_id : "evt-1",
+          day_of_week: args.input ? (args.input as any).day_of_week : 0,
+          start_time: args.input ? (args.input as any).start_time : "08:00",
+          end_time: args.input ? (args.input as any).end_time : "08:30",
+        }),
+        list_event_occurrences: () => [],
+        delete_event_occurrence: () => null,
       };
 
       // Expose the mock IPC handler that @tauri-apps/api/core reads.
