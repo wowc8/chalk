@@ -5,7 +5,7 @@ import {
   type DraftEvent,
 } from "../../types/schedule";
 
-type InputMethod = "chat" | "document" | "manual" | null;
+type EditMode = "confirm" | "chat" | "document" | "manual" | null;
 
 interface ManualRow {
   name: string;
@@ -18,6 +18,7 @@ interface Props {
   onBack: () => void;
   gradeLevel: string;
   initialEvents?: DraftEvent[];
+  extractedEvents?: DraftEvent[];
 }
 
 export function StepDailySchedule({
@@ -25,13 +26,20 @@ export function StepDailySchedule({
   onBack,
   gradeLevel,
   initialEvents = [],
+  extractedEvents = [],
 }: Props) {
-  const [method, setMethod] = useState<InputMethod>(
-    initialEvents.length > 0 ? "manual" : null,
-  );
+  const hasExtracted = extractedEvents.length > 0;
+
+  const [mode, setMode] = useState<EditMode>(() => {
+    if (hasExtracted) return "confirm";
+    if (initialEvents.length > 0) return "manual";
+    return null;
+  });
+
   const [rows, setRows] = useState<ManualRow[]>(() => {
-    if (initialEvents.length > 0) {
-      return initialEvents.map((e) => ({
+    const source = initialEvents.length > 0 ? initialEvents : extractedEvents;
+    if (source.length > 0) {
+      return source.map((e) => ({
         name: e.name,
         start_time: e.occurrences[0]?.start_time ?? "",
         end_time: e.occurrences[0]?.end_time ?? "",
@@ -52,11 +60,16 @@ export function StepDailySchedule({
     );
   }, [gradeLevel]);
 
-  const selectMethod = (m: InputMethod) => {
-    setMethod(m);
+  const selectMethod = (m: EditMode) => {
+    setMode(m);
     if (m === "manual" && rows.length === 0) {
       seedSuggestions();
     }
+  };
+
+  const startEditing = () => {
+    // Switch from confirmation to manual editing mode with current data
+    setMode("manual");
   };
 
   const addRow = () => {
@@ -73,8 +86,8 @@ export function StepDailySchedule({
     setRows((prev) => prev.filter((_, i) => i !== idx));
   };
 
-  const handleNext = () => {
-    const events: DraftEvent[] = rows
+  const buildEvents = (): DraftEvent[] => {
+    return rows
       .filter((r) => r.name.trim() && r.start_time && r.end_time)
       .map((r, i) => ({
         id: `draft-daily-${i}`,
@@ -86,7 +99,14 @@ export function StepDailySchedule({
           end_time: r.end_time,
         })),
       }));
-    onNext(events);
+  };
+
+  const handleNext = () => {
+    onNext(buildEvents());
+  };
+
+  const handleConfirm = () => {
+    onNext(buildEvents());
   };
 
   const inputCls =
@@ -102,13 +122,81 @@ export function StepDailySchedule({
         <div className="text-4xl mb-3">&#x23F0;</div>
         <h2 className="text-2xl font-bold text-chalk-blue">Daily Schedule</h2>
         <p className="text-chalk-dust text-sm mt-2">
-          Tell Chalk about the events that happen every day &mdash; breakfast,
-          lunch, recess, morning meeting, dismissal, etc.
+          {hasExtracted && mode === "confirm"
+            ? "Here\u2019s what we figured out from your lesson plans. Tell us if this looks right."
+            : "Tell Chalk about the events that happen every day \u2014 breakfast, lunch, recess, morning meeting, dismissal, etc."}
         </p>
       </motion.div>
 
       <AnimatePresence mode="wait">
-        {method === null && (
+        {/* Confirmation mode — pre-filled from LTP extraction */}
+        {mode === "confirm" && (
+          <motion.div
+            key="confirm"
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -20 }}
+            className="mb-6"
+          >
+            {/* Extracted events list */}
+            <div className="space-y-1.5 max-h-64 overflow-y-auto scrollbar-thin scrollbar-thumb-chalk-board-light pr-1">
+              {/* Header */}
+              <div className="grid grid-cols-[1fr_90px_90px] gap-2 mb-2 text-xs text-chalk-muted px-1">
+                <span>Event</span>
+                <span>Start</span>
+                <span>End</span>
+              </div>
+              {rows.map((row, i) => (
+                <div
+                  key={i}
+                  className="grid grid-cols-[1fr_90px_90px] gap-2 items-center px-1 py-1.5 bg-chalk-board-dark/30 rounded"
+                >
+                  <span className="text-sm text-chalk-white truncate">
+                    {row.name || <span className="text-chalk-muted italic">Unnamed</span>}
+                  </span>
+                  <span className="text-sm text-chalk-dust">
+                    {row.start_time || "\u2014"}
+                  </span>
+                  <span className="text-sm text-chalk-dust">
+                    {row.end_time || "\u2014"}
+                  </span>
+                </div>
+              ))}
+            </div>
+
+            {/* Edit options */}
+            <div className="mt-4 space-y-2">
+              <p className="text-xs text-chalk-muted mb-2">Need to make changes?</p>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={startEditing}
+                  className="text-xs px-3 py-1.5 rounded border border-chalk-white/10 bg-chalk-board-dark/40 text-chalk-dust hover:border-chalk-blue/30 hover:text-chalk-white transition-colors"
+                >
+                  Edit Schedule
+                </button>
+                <button
+                  onClick={() => selectMethod("chat")}
+                  disabled
+                  className="text-xs px-3 py-1.5 rounded border border-chalk-white/5 bg-chalk-board-dark/20 text-chalk-muted opacity-50 cursor-not-allowed"
+                >
+                  Chat to Adjust
+                  <span className="ml-1 text-[9px] px-1 py-0.5 rounded bg-chalk-muted/20">Soon</span>
+                </button>
+                <button
+                  onClick={() => selectMethod("document")}
+                  disabled
+                  className="text-xs px-3 py-1.5 rounded border border-chalk-white/5 bg-chalk-board-dark/20 text-chalk-muted opacity-50 cursor-not-allowed"
+                >
+                  Add from Document
+                  <span className="ml-1 text-[9px] px-1 py-0.5 rounded bg-chalk-muted/20">Soon</span>
+                </button>
+              </div>
+            </div>
+          </motion.div>
+        )}
+
+        {/* Method picker — shown when no extracted events */}
+        {mode === null && (
           <motion.div
             key="picker"
             initial={{ opacity: 0, y: 20 }}
@@ -141,7 +229,7 @@ export function StepDailySchedule({
           </motion.div>
         )}
 
-        {method === "manual" && (
+        {mode === "manual" && (
           <motion.div
             key="manual"
             initial={{ opacity: 0, y: 20 }}
@@ -151,10 +239,10 @@ export function StepDailySchedule({
           >
             <div className="flex items-center justify-between mb-3">
               <button
-                onClick={() => setMethod(null)}
+                onClick={() => setMode(hasExtracted ? "confirm" : null)}
                 className="text-xs text-chalk-muted hover:text-chalk-dust transition-colors"
               >
-                &larr; Change method
+                &larr; {hasExtracted ? "Back to extracted" : "Change method"}
               </button>
               <button
                 onClick={seedSuggestions}
@@ -217,7 +305,7 @@ export function StepDailySchedule({
           </motion.div>
         )}
 
-        {(method === "chat" || method === "document") && (
+        {(mode === "chat" || mode === "document") && (
           <motion.div
             key="placeholder"
             initial={{ opacity: 0 }}
@@ -226,11 +314,11 @@ export function StepDailySchedule({
             className="text-center mb-6 py-8"
           >
             <p className="text-chalk-muted text-sm">
-              This input method is coming soon. Please use "I'll Type It Out"
+              This input method is coming soon. Please use &quot;I&apos;ll Type It Out&quot;
               for now.
             </p>
             <button
-              onClick={() => setMethod(null)}
+              onClick={() => setMode(hasExtracted ? "confirm" : null)}
               className="mt-3 text-sm text-chalk-blue hover:text-chalk-blue/80 transition-colors"
             >
               &larr; Back to options
@@ -252,7 +340,16 @@ export function StepDailySchedule({
         >
           Back
         </button>
-        {method === "manual" && (
+        {mode === "confirm" && (
+          <button
+            onClick={handleConfirm}
+            disabled={rows.filter((r) => r.name.trim()).length === 0}
+            className="btn btn-primary px-6 py-2 disabled:opacity-40"
+          >
+            Looks Good!
+          </button>
+        )}
+        {mode === "manual" && (
           <button
             onClick={handleNext}
             disabled={rows.filter((r) => r.name.trim()).length === 0}

@@ -97,6 +97,129 @@ fn get_active_teaching_template(
     }
 }
 
+/// Extract recurring schedule events from imported lesson plan templates.
+///
+/// Reads the active teaching template's `daily_routine` and converts each
+/// `DailyRoutineEvent` into a draft event structure suitable for the frontend
+/// wizard's Daily Schedule step. Returns an empty array if no template exists.
+#[tauri::command]
+fn extract_schedule_from_imports(
+    state: tauri::State<AppState>,
+) -> Result<serde_json::Value, String> {
+    let template = match state.db.get_active_teaching_template() {
+        Ok(t) => t,
+        Err(database::DatabaseError::NotFound) => {
+            return Ok(serde_json::json!([]));
+        }
+        Err(e) => return Err(format!("{e}")),
+    };
+
+    let schema: database::TeachingTemplateSchema =
+        serde_json::from_str(&template.template_json).map_err(|e| format!("{e}"))?;
+
+    let day_name_to_index = |name: &str| -> Option<i32> {
+        match name.to_lowercase().as_str() {
+            "monday" | "mon" => Some(0),
+            "tuesday" | "tue" | "tues" => Some(1),
+            "wednesday" | "wed" => Some(2),
+            "thursday" | "thu" | "thur" | "thurs" => Some(3),
+            "friday" | "fri" => Some(4),
+            _ => None,
+        }
+    };
+
+    // Parse time ranges like "11:30-12:00" or "11:30 AM - 12:00 PM" into (start, end) HH:MM pairs.
+    let parse_time_range = |slot: &str| -> Option<(String, String)> {
+        // Try splitting on "-" or "–" (en-dash)
+        let parts: Vec<&str> = slot.split(|c| c == '-' || c == '–' || c == '—').collect();
+        if parts.len() != 2 {
+            return None;
+        }
+        let start = normalize_time(parts[0].trim());
+        let end = normalize_time(parts[1].trim());
+        if start.is_some() && end.is_some() {
+            Some((start.unwrap(), end.unwrap()))
+        } else {
+            None
+        }
+    };
+
+    fn normalize_time(t: &str) -> Option<String> {
+        let t = t.trim().to_lowercase();
+        // Remove "am"/"pm" suffixes and handle 12-hour format
+        let (time_part, is_pm) = if t.ends_with("pm") || t.ends_with("p.m.") {
+            (t.trim_end_matches("pm").trim_end_matches("p.m.").trim(), true)
+        } else if t.ends_with("am") || t.ends_with("a.m.") {
+            (t.trim_end_matches("am").trim_end_matches("a.m.").trim(), false)
+        } else {
+            (t.as_str(), false)
+        };
+
+        let parts: Vec<&str> = time_part.split(':').collect();
+        match parts.len() {
+            1 => {
+                let hour: u32 = parts[0].parse().ok()?;
+                let hour24 = if is_pm && hour < 12 { hour + 12 } else if !is_pm && hour == 12 { 0 } else { hour };
+                Some(format!("{:02}:00", hour24))
+            }
+            2 => {
+                let hour: u32 = parts[0].parse().ok()?;
+                let min: u32 = parts[1].parse().ok()?;
+                let hour24 = if is_pm && hour < 12 { hour + 12 } else if !is_pm && hour == 12 { 0 } else { hour };
+                Some(format!("{:02}:{:02}", hour24, min))
+            }
+            _ => None,
+        }
+    }
+
+    let mut draft_events: Vec<serde_json::Value> = Vec::new();
+
+    for (idx, routine) in schema.daily_routine.iter().enumerate() {
+        // Parse time slot
+        let (start_time, end_time) = if let Some(ref slot) = routine.time_slot {
+            parse_time_range(slot).unwrap_or_else(|| ("".to_string(), "".to_string()))
+        } else {
+            ("".to_string(), "".to_string())
+        };
+
+        // Convert day names to day indices
+        let day_indices: Vec<i32> = if routine.days.is_empty() {
+            // If no specific days, assume Mon-Fri
+            vec![0, 1, 2, 3, 4]
+        } else {
+            routine.days.iter().filter_map(|d| day_name_to_index(d)).collect()
+        };
+
+        // Map RoutineEventType to event_type string
+        let event_type = match routine.event_type {
+            database::RoutineEventType::Fixed => "fixed",
+            database::RoutineEventType::Variable => "teaching_slot",
+            database::RoutineEventType::DaySpecific => "special",
+        };
+
+        let occurrences: Vec<serde_json::Value> = day_indices
+            .iter()
+            .map(|&day| {
+                serde_json::json!({
+                    "day_of_week": day,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                })
+            })
+            .collect();
+
+        draft_events.push(serde_json::json!({
+            "id": format!("extracted-{}", idx),
+            "name": routine.name,
+            "event_type": event_type,
+            "occurrences": occurrences,
+            "source": "ltp",
+        }));
+    }
+
+    Ok(serde_json::json!(draft_events))
+}
+
 /// List all teaching templates.
 #[tauri::command]
 fn list_teaching_templates(
@@ -1000,6 +1123,7 @@ pub fn run() {
             get_school_calendar_entries,
             get_ltp_context_for_date,
             get_active_teaching_template,
+            extract_schedule_from_imports,
             list_teaching_templates,
             import_html_file,
             get_recurring_events,

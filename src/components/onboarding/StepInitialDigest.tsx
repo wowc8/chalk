@@ -2,14 +2,15 @@ import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { motion, AnimatePresence } from "framer-motion";
+import type { DraftEvent } from "../../types/schedule";
 
 interface Props {
-  onNext: () => void;
+  onNext: (extractedEvents: DraftEvent[]) => void;
   onBack: () => void;
   setError: (err: string | null) => void;
 }
 
-type ScanState = "idle" | "scanning" | "success" | "empty" | "error" | "success_no_key";
+type ScanState = "idle" | "scanning" | "extracting" | "success" | "empty" | "error" | "success_no_key";
 
 interface DigestProgress {
   current: number;
@@ -28,6 +29,7 @@ export function StepInitialDigest({
   const [errorDetail, setErrorDetail] = useState<string | null>(null);
   const [progressPercent, setProgressPercent] = useState(0);
   const [progressMessage, setProgressMessage] = useState("Connecting to Google Drive...");
+  const [extractedEvents, setExtractedEvents] = useState<DraftEvent[]>([]);
   const unlistenRef = useRef<UnlistenFn | null>(null);
 
   useEffect(() => {
@@ -80,6 +82,17 @@ export function StepInitialDigest({
   // Track whether the scan was cancelled so we can ignore late results.
   const cancelledRef = useRef(false);
 
+  // After digest completes, extract schedule from imported LTPs.
+  const extractSchedule = async (): Promise<DraftEvent[]> => {
+    try {
+      const events = await invoke<DraftEvent[]>("extract_schedule_from_imports");
+      return Array.isArray(events) ? events : [];
+    } catch {
+      // Non-fatal — fall back to blank schedule entry
+      return [];
+    }
+  };
+
   const handleDigest = async () => {
     cancelledRef.current = false;
     setScanState("scanning");
@@ -92,6 +105,16 @@ export function StepInitialDigest({
       stopListening();
 
       // If the user cancelled while we were waiting, ignore the result.
+      if (cancelledRef.current) return;
+
+      // Extract schedule from imported templates
+      setProgressPercent(95);
+      setProgressMessage("Extracting your daily schedule...");
+      setScanState("extracting");
+
+      const events = await extractSchedule();
+      setExtractedEvents(events);
+
       if (cancelledRef.current) return;
 
       setProgressPercent(100);
@@ -160,6 +183,14 @@ export function StepInitialDigest({
     }
   };
 
+  const handleContinue = () => {
+    onNext(extractedEvents);
+  };
+
+  const scheduleFoundMessage = extractedEvents.length > 0
+    ? `We found ${extractedEvents.length} recurring event${extractedEvents.length !== 1 ? "s" : ""} in your lesson plans!`
+    : null;
+
   return (
     <div>
       <h2 className="text-2xl font-bold text-bat-cyan mb-2">
@@ -207,8 +238,8 @@ export function StepInitialDigest({
           </motion.div>
         )}
 
-        {/* Scanning state - progress indicator */}
-        {scanState === "scanning" && (
+        {/* Scanning / extracting state - progress indicator */}
+        {(scanState === "scanning" || scanState === "extracting") && (
           <motion.div
             key="scanning"
             initial={{ opacity: 0, y: 10 }}
@@ -292,7 +323,17 @@ export function StepInitialDigest({
               </svg>
             </motion.div>
             <p className="text-bat-green font-semibold mb-2">{result}</p>
-            <p className="text-gray-500 text-sm">
+            {scheduleFoundMessage && (
+              <motion.p
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ delay: 0.3 }}
+                className="text-bat-cyan text-sm mt-2"
+              >
+                {scheduleFoundMessage}
+              </motion.p>
+            )}
+            <p className="text-gray-500 text-sm mt-1">
               Your documents are queued for processing.
             </p>
           </motion.div>
@@ -327,6 +368,16 @@ export function StepInitialDigest({
               </svg>
             </motion.div>
             <p className="text-bat-green font-semibold mb-2">{result}</p>
+            {scheduleFoundMessage && (
+              <motion.p
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ delay: 0.3 }}
+                className="text-bat-cyan text-sm mt-2"
+              >
+                {scheduleFoundMessage}
+              </motion.p>
+            )}
             <div className="mt-3 p-3 bg-bat-gold/10 border border-bat-gold/30 rounded-lg">
               <p className="text-bat-gold text-sm">
                 AI-powered search requires an OpenAI API key. Add one in{" "}
@@ -435,7 +486,7 @@ export function StepInitialDigest({
           whileHover={{ scale: 1.05 }}
           whileTap={{ scale: 0.95 }}
           onClick={() => {
-            if (scanState === "scanning") handleCancel();
+            if (scanState === "scanning" || scanState === "extracting") handleCancel();
             onBack();
           }}
           className="px-6 py-2.5 border border-gray-600 rounded-lg text-gray-400 hover:text-white hover:border-gray-400 transition-colors"
@@ -448,7 +499,7 @@ export function StepInitialDigest({
             animate={{ opacity: 1, x: 0 }}
             whileHover={{ scale: 1.05 }}
             whileTap={{ scale: 0.95 }}
-            onClick={onNext}
+            onClick={handleContinue}
             className="px-6 py-2.5 bg-gradient-to-r from-bat-cyan to-bat-purple rounded-lg font-semibold text-white shadow-lg shadow-bat-cyan/20"
           >
             Continue
@@ -460,7 +511,7 @@ export function StepInitialDigest({
             animate={{ opacity: 1, x: 0 }}
             whileHover={{ scale: 1.05 }}
             whileTap={{ scale: 0.95 }}
-            onClick={onNext}
+            onClick={() => onNext([])}
             className="px-6 py-2.5 border border-gray-600 rounded-lg text-gray-400 hover:text-white hover:border-gray-400 transition-colors"
           >
             Skip for now

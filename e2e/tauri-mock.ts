@@ -61,6 +61,14 @@ export const FRESH_STATUS = {
   selected_folder_name: null,
 };
 
+/** Draft event shape for extracted schedule events. */
+interface MockDraftEvent {
+  id: string;
+  name: string;
+  event_type: string;
+  occurrences: { day_of_week: number; start_time: string; end_time: string }[];
+}
+
 /**
  * Inject Tauri IPC mocks into the page.
  *
@@ -83,6 +91,8 @@ export async function setupTauriMocks(
     digestMessage?: string;
     /** Whether `test_folder_permissions_command` returns true. */
     folderAccessible?: boolean;
+    /** Extracted schedule events returned by `extract_schedule_from_imports`. */
+    extractedEvents?: MockDraftEvent[];
   } = {},
 ) {
   const status = opts.initialStatus ?? { ...FRESH_STATUS };
@@ -91,6 +101,7 @@ export async function setupTauriMocks(
   const digestMessage =
     opts.digestMessage ?? "Found 7 documents with 14 lesson plans in 'Master Plans'.";
   const folderAccessible = opts.folderAccessible ?? true;
+  const extractedEvents = opts.extractedEvents ?? [];
 
   await page.addInitScript(
     ({
@@ -99,12 +110,14 @@ export async function setupTauriMocks(
       folders,
       digestMessage,
       folderAccessible,
+      extractedEvents,
     }: {
       status: typeof FRESH_STATUS;
       items: typeof MOCK_ITEMS;
       folders: typeof MOCK_FOLDERS;
       digestMessage: string;
       folderAccessible: boolean;
+      extractedEvents: MockDraftEvent[];
     }) => {
       // Track mutable status so subsequent calls reflect wizard progress.
       const onboardingStatus = { ...status };
@@ -168,7 +181,10 @@ export async function setupTauriMocks(
           return digestMessage;
         },
 
-        // --- Schedule / Calendar commands (wizard steps 2-5) ---
+        // AI schedule extraction from imported LTPs
+        extract_schedule_from_imports: () => extractedEvents,
+
+        // --- Schedule / Calendar commands ---
 
         get_app_setting: () => null,
         set_app_setting: () => null,
@@ -244,6 +260,6 @@ export async function setupTauriMocks(
         metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main" } },
       };
     },
-    { status, items, folders, digestMessage, folderAccessible },
+    { status, items, folders, digestMessage, folderAccessible, extractedEvents },
   );
 }
