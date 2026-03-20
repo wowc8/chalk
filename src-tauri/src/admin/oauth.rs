@@ -472,6 +472,7 @@ pub async fn cancel_digest(
 
 #[tauri::command]
 pub async fn trigger_initial_digest(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     let onboarding = load_onboarding_status(&state.db, &state.data_dir);
@@ -500,7 +501,7 @@ pub async fn trigger_initial_digest(
     };
 
     // Digest all documents in the selected folder (transactional).
-    let summary = crate::digest::digest_folder(&state.db, &access_token, &folder_id, &cancel)
+    let summary = crate::digest::digest_folder(&state.db, &access_token, &folder_id, &cancel, Some(&app))
         .await
         .map_err(|e| e.to_string())?;
 

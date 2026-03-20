@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { motion, AnimatePresence } from "framer-motion";
 
 interface Props {
@@ -10,14 +11,12 @@ interface Props {
 
 type ScanState = "idle" | "scanning" | "success" | "empty" | "error" | "success_no_key";
 
-const PROGRESS_MESSAGES = [
-  "Connecting to Google Drive...",
-  "Searching for documents...",
-  "Scanning folder and subfolders...",
-  "Analyzing document contents...",
-  "Building AI context from your documents...",
-  "Processing large documents (this may take a moment)...",
-];
+interface DigestProgress {
+  current: number;
+  total: number;
+  current_document: string | null;
+  phase: string | null;
+}
 
 export function StepInitialDigest({
   onNext,
@@ -27,37 +26,49 @@ export function StepInitialDigest({
   const [scanState, setScanState] = useState<ScanState>("idle");
   const [result, setResult] = useState<string | null>(null);
   const [errorDetail, setErrorDetail] = useState<string | null>(null);
-  const [progressIndex, setProgressIndex] = useState(0);
   const [progressPercent, setProgressPercent] = useState(0);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [progressMessage, setProgressMessage] = useState("Connecting to Google Drive...");
+  const unlistenRef = useRef<UnlistenFn | null>(null);
 
   useEffect(() => {
     return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
+      unlistenRef.current?.();
     };
   }, []);
 
-  const startProgressSimulation = () => {
-    setProgressIndex(0);
+  const startListening = async () => {
+    // Clean up any previous listener.
+    unlistenRef.current?.();
+
+    setProgressMessage("Connecting to Google Drive...");
     setProgressPercent(0);
-    let step = 0;
-    intervalRef.current = setInterval(() => {
-      step++;
-      const messageIdx = Math.min(
-        Math.floor(step / 3),
-        PROGRESS_MESSAGES.length - 1
-      );
-      setProgressIndex(messageIdx);
-      // Slow down as we approach 90% (never reaches 100 until actually done)
-      setProgressPercent((prev) => Math.min(prev + (90 - prev) * 0.15, 90));
-    }, 800);
+
+    unlistenRef.current = await listen<DigestProgress>(
+      "digest:progress",
+      (event) => {
+        const { phase, current, total, current_document } = event.payload;
+        if (phase === "downloading") {
+          const pct = total > 0 ? Math.round((current / total) * 50) : 0;
+          setProgressPercent(Math.min(pct, 50));
+          setProgressMessage(
+            `Downloading ${total} file${total !== 1 ? "s" : ""}...`
+          );
+        } else if (phase === "analyzing") {
+          const pct = total > 0 ? 50 + Math.round((current / total) * 40) : 50;
+          setProgressPercent(Math.min(pct, 90));
+          setProgressMessage(
+            current_document
+              ? `Analyzing your lesson plans... (${current}/${total})`
+              : "Analyzing your lesson plans..."
+          );
+        }
+      }
+    );
   };
 
-  const stopProgressSimulation = () => {
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
-    }
+  const stopListening = () => {
+    unlistenRef.current?.();
+    unlistenRef.current = null;
   };
 
   // Track whether the scan was cancelled so we can ignore late results.
@@ -68,11 +79,11 @@ export function StepInitialDigest({
     setScanState("scanning");
     setError(null);
     setErrorDetail(null);
-    startProgressSimulation();
+    await startListening();
 
     try {
       const msg = await invoke<string>("trigger_initial_digest");
-      stopProgressSimulation();
+      stopListening();
 
       // If the user cancelled while we were waiting, ignore the result.
       if (cancelledRef.current) return;
@@ -101,7 +112,7 @@ export function StepInitialDigest({
         setResult(displayMsg);
       }
     } catch (e) {
-      stopProgressSimulation();
+      stopListening();
 
       if (cancelledRef.current) return;
 
@@ -130,7 +141,7 @@ export function StepInitialDigest({
 
   const handleCancel = async () => {
     cancelledRef.current = true;
-    stopProgressSimulation();
+    stopListening();
     setScanState("idle");
     setError(null);
     setErrorDetail(null);
@@ -223,13 +234,13 @@ export function StepInitialDigest({
             {/* Progress message */}
             <AnimatePresence mode="wait">
               <motion.p
-                key={progressIndex}
+                key={progressMessage}
                 initial={{ opacity: 0, y: 5 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -5 }}
                 className="text-center text-sm text-gray-400"
               >
-                {PROGRESS_MESSAGES[progressIndex]}
+                {progressMessage}
               </motion.p>
             </AnimatePresence>
 
