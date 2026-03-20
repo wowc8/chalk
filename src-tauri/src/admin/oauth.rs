@@ -7,6 +7,7 @@ use tokio::net::TcpListener;
 use tracing::{info, warn};
 
 use crate::connectors::google_drive::{self, DriveFolder, DriveItem, GoogleDriveConnector, OAuthConfig};
+use crate::database::Database;
 use crate::AppState;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,23 +36,41 @@ impl Default for OnboardingStatus {
     }
 }
 
-/// Get the onboarding status file path.
+/// Get the onboarding status file path (legacy, used for one-time migration).
 fn status_file_path(data_dir: &std::path::Path) -> PathBuf {
     data_dir
         .join("com.madison.chalk")
         .join("onboarding_status.json")
 }
 
-/// Load onboarding status from disk.
-fn load_onboarding_status(data_dir: &std::path::Path) -> OnboardingStatus {
-    let path = status_file_path(data_dir);
-    if path.exists() {
-        if let Ok(content) = fs::read_to_string(&path) {
-            if let Ok(status) = serde_json::from_str(&content) {
+/// Load onboarding status from the database, with one-time migration from the
+/// legacy JSON file. If neither source has data, falls back to detecting
+/// existing OAuth config/token files on disk.
+fn load_onboarding_status(db: &Database, data_dir: &std::path::Path) -> OnboardingStatus {
+    // Try DB first.
+    if let Ok(Some(json)) = db.get_onboarding_status_json() {
+        if let Ok(status) = serde_json::from_str(&json) {
+            return status;
+        }
+    }
+
+    // Check for legacy JSON file and migrate if present.
+    let file_path = status_file_path(data_dir);
+    if file_path.exists() {
+        if let Ok(content) = fs::read_to_string(&file_path) {
+            if let Ok(status) = serde_json::from_str::<OnboardingStatus>(&content) {
+                // Migrate to DB.
+                if let Ok(json) = serde_json::to_string(&status) {
+                    let _ = db.set_onboarding_status_json(&json);
+                }
+                // Remove the legacy file after successful migration.
+                let _ = fs::remove_file(&file_path);
                 return status;
             }
         }
     }
+
+    // Fallback: detect existing OAuth files.
     let config_exists = data_dir
         .join("com.madison.chalk")
         .join("oauth_config.json")
@@ -67,14 +86,11 @@ fn load_onboarding_status(data_dir: &std::path::Path) -> OnboardingStatus {
     }
 }
 
-/// Save onboarding status to disk.
-fn save_onboarding_status(
-    data_dir: &std::path::Path,
-    status: &OnboardingStatus,
-) -> Result<(), String> {
-    let path = status_file_path(data_dir);
-    let content = serde_json::to_string_pretty(status).map_err(|e| e.to_string())?;
-    fs::write(&path, content).map_err(|e| e.to_string())
+/// Save onboarding status to the database.
+fn save_onboarding_status(db: &Database, status: &OnboardingStatus) -> Result<(), String> {
+    let json = serde_json::to_string(status).map_err(|e| e.to_string())?;
+    db.set_onboarding_status_json(&json)
+        .map_err(|e| e.to_string())
 }
 
 /// Get the OAuth config, token file path, and optional PKCE verifier for async Google Drive operations.
@@ -182,10 +198,10 @@ pub async fn handle_oauth_callback(
         .map_err(|e| e.to_string())?;
 
     // Update onboarding status.
-    let mut status = load_onboarding_status(&state.data_dir);
+    let mut status = load_onboarding_status(&state.db, &state.data_dir);
     status.oauth_configured = true;
     status.tokens_stored = true;
-    save_onboarding_status(&state.data_dir, &status)?;
+    save_onboarding_status(&state.db, &status)?;
 
     info!("OAuth callback handled, tokens stored");
     Ok("Authentication successful".into())
@@ -314,10 +330,10 @@ h1{margin:0 0 .5rem;font-size:1.5rem;color:#4fc3f7}p{margin:0;color:#aaa;font-si
         .map_err(|e| format!("Token exchange failed: {e}"))?;
 
     // 8. Update onboarding status.
-    let mut status = load_onboarding_status(&state.data_dir);
+    let mut status = load_onboarding_status(&state.db, &state.data_dir);
     status.oauth_configured = true;
     status.tokens_stored = true;
-    save_onboarding_status(&state.data_dir, &status)?;
+    save_onboarding_status(&state.db, &status)?;
 
     info!("OAuth flow completed automatically via localhost callback");
     Ok("Authentication successful".into())
@@ -362,12 +378,12 @@ pub async fn test_folder_permissions_command(
         .map_err(|e| e.to_string())?;
 
     // Update onboarding status.
-    let mut status = load_onboarding_status(&state.data_dir);
+    let mut status = load_onboarding_status(&state.db, &state.data_dir);
     status.folder_selected = true;
     status.folder_accessible = accessible;
     status.selected_folder_id = Some(folder_id);
     status.selected_folder_name = Some(folder_name);
-    save_onboarding_status(&state.data_dir, &status)?;
+    save_onboarding_status(&state.db, &status)?;
 
     Ok(accessible)
 }
@@ -376,7 +392,7 @@ pub async fn test_folder_permissions_command(
 pub async fn check_onboarding_status(
     state: State<'_, AppState>,
 ) -> Result<OnboardingStatus, String> {
-    Ok(load_onboarding_status(&state.data_dir))
+    Ok(load_onboarding_status(&state.db, &state.data_dir))
 }
 
 #[tauri::command]
@@ -444,12 +460,12 @@ pub async fn select_single_document(
         .map_err(|e| e.to_string())?;
 
     if accessible {
-        let mut status = load_onboarding_status(&state.data_dir);
+        let mut status = load_onboarding_status(&state.db, &state.data_dir);
         status.folder_selected = true;
         status.folder_accessible = true;
         status.selected_folder_id = Some(doc_id);
         status.selected_folder_name = Some(doc_name);
-        save_onboarding_status(&state.data_dir, &status)?;
+        save_onboarding_status(&state.db, &status)?;
     }
 
     Ok(accessible)
@@ -469,7 +485,7 @@ pub async fn cancel_digest(
 pub async fn trigger_initial_digest(
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let onboarding = load_onboarding_status(&state.data_dir);
+    let onboarding = load_onboarding_status(&state.db, &state.data_dir);
     if !onboarding.tokens_stored {
         return Err("Not authenticated — complete OAuth first".into());
     }
@@ -508,9 +524,9 @@ pub async fn trigger_initial_digest(
     );
 
     // Mark digest as complete.
-    let mut updated_status = load_onboarding_status(&state.data_dir);
+    let mut updated_status = load_onboarding_status(&state.db, &state.data_dir);
     updated_status.initial_digest_complete = true;
-    save_onboarding_status(&state.data_dir, &updated_status)?;
+    save_onboarding_status(&state.db, &updated_status)?;
 
     // Attempt to vectorize imported reference docs for RAG search.
     // If no OpenAI API key is configured, skip gracefully.
@@ -581,7 +597,7 @@ pub struct ScannedDocument {
 pub async fn list_scanned_documents(
     state: State<'_, AppState>,
 ) -> Result<Vec<ScannedDocument>, String> {
-    let onboarding = load_onboarding_status(&state.data_dir);
+    let onboarding = load_onboarding_status(&state.db, &state.data_dir);
     if !onboarding.tokens_stored {
         return Err("Not authenticated".into());
     }
@@ -731,18 +747,18 @@ mod tests {
     use chrono::Utc;
     use tempfile::TempDir;
 
-    fn setup_data_dir(dir: &TempDir) -> std::path::PathBuf {
-        let data = dir.path().to_path_buf();
-        let chalk_dir = data.join("com.madison.chalk");
+    fn setup_test() -> (Database, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let chalk_dir = dir.path().join("com.madison.chalk");
         fs::create_dir_all(&chalk_dir).unwrap();
-        data
+        let db = Database::open_in_memory().unwrap();
+        (db, dir)
     }
 
     #[test]
     fn test_onboarding_status_default() {
-        let dir = TempDir::new().unwrap();
-        let data_dir = setup_data_dir(&dir);
-        let status = load_onboarding_status(&data_dir);
+        let (db, dir) = setup_test();
+        let status = load_onboarding_status(&db, dir.path());
         assert!(!status.oauth_configured);
         assert!(!status.tokens_stored);
         assert!(!status.folder_selected);
@@ -754,8 +770,7 @@ mod tests {
 
     #[test]
     fn test_save_and_load_onboarding_status() {
-        let dir = TempDir::new().unwrap();
-        let data_dir = setup_data_dir(&dir);
+        let (db, dir) = setup_test();
 
         let status = OnboardingStatus {
             oauth_configured: true,
@@ -766,9 +781,9 @@ mod tests {
             selected_folder_id: Some("folder_abc".into()),
             selected_folder_name: Some("My Lessons".into()),
         };
-        save_onboarding_status(&data_dir, &status).unwrap();
+        save_onboarding_status(&db, &status).unwrap();
 
-        let loaded = load_onboarding_status(&data_dir);
+        let loaded = load_onboarding_status(&db, dir.path());
         assert!(loaded.oauth_configured);
         assert!(loaded.tokens_stored);
         assert!(loaded.folder_selected);
@@ -780,9 +795,8 @@ mod tests {
 
     #[test]
     fn test_onboarding_status_detects_existing_files() {
-        let dir = TempDir::new().unwrap();
-        let data_dir = setup_data_dir(&dir);
-        let chalk_dir = data_dir.join("com.madison.chalk");
+        let (db, dir) = setup_test();
+        let chalk_dir = dir.path().join("com.madison.chalk");
 
         let config = OAuthConfig {
             client_id: "id".into(),
@@ -807,34 +821,33 @@ mod tests {
         )
         .unwrap();
 
-        let status = load_onboarding_status(&data_dir);
+        let status = load_onboarding_status(&db, dir.path());
         assert!(status.oauth_configured);
         assert!(status.tokens_stored);
     }
 
     #[test]
     fn test_onboarding_status_complete_flow() {
-        let dir = TempDir::new().unwrap();
-        let data_dir = setup_data_dir(&dir);
+        let (db, dir) = setup_test();
 
-        let mut status = load_onboarding_status(&data_dir);
+        let mut status = load_onboarding_status(&db, dir.path());
 
         status.oauth_configured = true;
-        save_onboarding_status(&data_dir, &status).unwrap();
+        save_onboarding_status(&db, &status).unwrap();
 
         status.tokens_stored = true;
-        save_onboarding_status(&data_dir, &status).unwrap();
+        save_onboarding_status(&db, &status).unwrap();
 
         status.folder_selected = true;
         status.folder_accessible = true;
         status.selected_folder_id = Some("folder_xyz".into());
         status.selected_folder_name = Some("Lesson Plans".into());
-        save_onboarding_status(&data_dir, &status).unwrap();
+        save_onboarding_status(&db, &status).unwrap();
 
         status.initial_digest_complete = true;
-        save_onboarding_status(&data_dir, &status).unwrap();
+        save_onboarding_status(&db, &status).unwrap();
 
-        let final_status = load_onboarding_status(&data_dir);
+        let final_status = load_onboarding_status(&db, dir.path());
         assert!(final_status.oauth_configured);
         assert!(final_status.tokens_stored);
         assert!(final_status.folder_selected);
@@ -898,31 +911,28 @@ mod tests {
 
     #[test]
     fn test_overwrite_onboarding_status() {
-        let dir = TempDir::new().unwrap();
-        let data_dir = setup_data_dir(&dir);
+        let (db, dir) = setup_test();
 
         let status1 = OnboardingStatus {
             oauth_configured: true,
             ..Default::default()
         };
-        save_onboarding_status(&data_dir, &status1).unwrap();
+        save_onboarding_status(&db, &status1).unwrap();
 
         let status2 = OnboardingStatus {
             oauth_configured: true,
             tokens_stored: true,
             ..Default::default()
         };
-        save_onboarding_status(&data_dir, &status2).unwrap();
+        save_onboarding_status(&db, &status2).unwrap();
 
-        let loaded = load_onboarding_status(&data_dir);
+        let loaded = load_onboarding_status(&db, dir.path());
         assert!(loaded.oauth_configured);
         assert!(loaded.tokens_stored);
     }
 
     #[test]
     fn test_onboarding_status_deserializes_with_missing_fields() {
-        // Simulate an old status file that doesn't have newer fields
-        // (e.g., folder_accessible, selected_folder_id, selected_folder_name).
         let old_json = r#"{
             "oauth_configured": true,
             "tokens_stored": true,
@@ -934,7 +944,6 @@ mod tests {
         assert!(status.tokens_stored);
         assert!(status.folder_selected);
         assert!(status.initial_digest_complete);
-        // Missing fields should get defaults
         assert!(!status.folder_accessible);
         assert!(status.selected_folder_id.is_none());
         assert!(status.selected_folder_name.is_none());
@@ -942,7 +951,6 @@ mod tests {
 
     #[test]
     fn test_onboarding_status_survives_minimal_json() {
-        // Even with just one field, deserialization should succeed
         let minimal_json = r#"{"oauth_configured": true}"#;
         let status: OnboardingStatus = serde_json::from_str(minimal_json).unwrap();
         assert!(status.oauth_configured);
@@ -962,26 +970,32 @@ mod tests {
     }
 
     #[test]
-    fn test_onboarding_status_persists_across_schema_changes() {
-        let dir = TempDir::new().unwrap();
-        let data_dir = setup_data_dir(&dir);
+    fn test_onboarding_migrates_from_file_to_db() {
+        let (db, dir) = setup_test();
 
-        // Write an "old" status file missing newer fields
+        // Write a legacy JSON file.
         let old_json = r#"{
             "oauth_configured": true,
             "tokens_stored": true,
             "folder_selected": true,
             "initial_digest_complete": true
         }"#;
-        let path = status_file_path(&data_dir);
+        let path = status_file_path(dir.path());
         fs::write(&path, old_json).unwrap();
 
-        // load_onboarding_status should still return the correct values
-        let status = load_onboarding_status(&data_dir);
+        // Load should migrate from file to DB.
+        let status = load_onboarding_status(&db, dir.path());
         assert!(status.oauth_configured);
         assert!(status.tokens_stored);
         assert!(status.folder_selected);
         assert!(status.initial_digest_complete);
         assert!(!status.folder_accessible); // default
+
+        // File should be deleted after migration.
+        assert!(!path.exists());
+
+        // Subsequent load should read from DB.
+        let status2 = load_onboarding_status(&db, dir.path());
+        assert!(status2.oauth_configured);
     }
 }
