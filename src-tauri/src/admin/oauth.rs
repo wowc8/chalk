@@ -70,20 +70,9 @@ fn load_onboarding_status(db: &Database, data_dir: &std::path::Path) -> Onboardi
         }
     }
 
-    // Fallback: detect existing OAuth files.
-    let config_exists = data_dir
-        .join("com.madison.chalk")
-        .join("oauth_config.json")
-        .exists();
-    let tokens_exist = data_dir
-        .join("com.madison.chalk")
-        .join("oauth_tokens.json")
-        .exists();
-    OnboardingStatus {
-        oauth_configured: config_exists,
-        tokens_stored: tokens_exist,
-        ..Default::default()
-    }
+    // No DB status and no legacy file — fresh install or DB was cleared.
+    // Return clean defaults so the wizard triggers.
+    OnboardingStatus::default()
 }
 
 /// Save onboarding status to the database.
@@ -794,7 +783,7 @@ mod tests {
     }
 
     #[test]
-    fn test_onboarding_status_detects_existing_files() {
+    fn test_onboarding_status_ignores_existing_files_on_fresh_db() {
         let (db, dir) = setup_test();
         let chalk_dir = dir.path().join("com.madison.chalk");
 
@@ -821,9 +810,10 @@ mod tests {
         )
         .unwrap();
 
+        // With DB cleared, stale files on disk should NOT bypass onboarding.
         let status = load_onboarding_status(&db, dir.path());
-        assert!(status.oauth_configured);
-        assert!(status.tokens_stored);
+        assert!(!status.oauth_configured);
+        assert!(!status.tokens_stored);
     }
 
     #[test]
