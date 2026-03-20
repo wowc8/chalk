@@ -331,6 +331,23 @@ fn delete_ltp_document(
         .map_err(|e| format!("{e}"))
 }
 
+/// Get LTP context for a given date to inject into AI prompts.
+///
+/// Maps the date to a month, looks up LTP grid cells for that month,
+/// and retrieves any nearby calendar entries (holidays, half days).
+/// Returns structured data with unit info, subject content, and calendar notes.
+#[tauri::command]
+fn get_ltp_context_for_date(
+    state: tauri::State<AppState>,
+    date: String,
+) -> Result<serde_json::Value, String> {
+    let context = chat::get_ltp_context(&state.db, &date).map_err(|e| format!("{e}"))?;
+    match context {
+        Some(ctx) => Ok(serde_json::to_value(ctx).map_err(|e| format!("{e}"))?),
+        None => Ok(serde_json::json!(null)),
+    }
+}
+
 // ── HTML File Import ────────────────────────────────────────
 
 /// Import a local HTML file and extract a teaching template from it.
@@ -684,6 +701,7 @@ pub fn run() {
             get_ltp_grid_cells,
             update_ltp_grid_cell,
             get_school_calendar_entries,
+            get_ltp_context_for_date,
             get_active_teaching_template,
             list_teaching_templates,
             import_html_file,

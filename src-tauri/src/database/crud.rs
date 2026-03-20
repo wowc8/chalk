@@ -406,6 +406,108 @@ impl Database {
         })
     }
 
+    // ── LTP Context Queries ─────────────────────────────────────
+
+    /// Get all LTP grid cells for a given month name (e.g., "March").
+    /// Returns cells from the most recently imported LTP document.
+    pub fn get_ltp_cells_for_month(&self, month: &str) -> Result<Vec<LtpGridCell>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT gc.id, gc.document_id, gc.row_index, gc.col_index, gc.subject, gc.month,
+                        gc.content_html, gc.content_text, gc.background_color, gc.unit_name, gc.unit_color
+                 FROM ltp_grid_cells gc
+                 JOIN ltp_documents d ON gc.document_id = d.id
+                 WHERE d.doc_type = 'ltp'
+                   AND gc.month = ?1
+                   AND gc.content_text IS NOT NULL
+                   AND gc.content_text != ''
+                 ORDER BY d.imported_at DESC, gc.row_index, gc.col_index",
+            )?;
+            let rows = stmt.query_map(params![month], |row| {
+                Ok(LtpGridCell {
+                    id: row.get(0)?,
+                    document_id: row.get(1)?,
+                    row_index: row.get(2)?,
+                    col_index: row.get(3)?,
+                    subject: row.get(4)?,
+                    month: row.get(5)?,
+                    content_html: row.get(6)?,
+                    content_text: row.get(7)?,
+                    background_color: row.get(8)?,
+                    unit_name: row.get(9)?,
+                    unit_color: row.get(10)?,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    /// Get the unit name for a given month from the most recent LTP document.
+    /// Returns the first non-empty unit_name found for cells in that month.
+    pub fn get_unit_for_month(&self, month: &str) -> Result<Option<String>> {
+        self.with_conn(|conn| {
+            let result: Option<String> = conn
+                .query_row(
+                    "SELECT gc.unit_name
+                     FROM ltp_grid_cells gc
+                     JOIN ltp_documents d ON gc.document_id = d.id
+                     WHERE d.doc_type = 'ltp'
+                       AND gc.month = ?1
+                       AND gc.unit_name IS NOT NULL
+                       AND gc.unit_name != ''
+                     ORDER BY d.imported_at DESC
+                     LIMIT 1",
+                    params![month],
+                    |row| row.get(0),
+                )
+                .ok();
+            Ok(result)
+        })
+    }
+
+    /// Get school calendar entries for a date range (inclusive).
+    /// Dates should be in ISO 8601 format (YYYY-MM-DD).
+    pub fn get_calendar_entries_for_range(
+        &self,
+        start_date: &str,
+        end_date: &str,
+    ) -> Result<Vec<SchoolCalendarEntry>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, document_id, date, day_number, unit_name, unit_color, is_holiday, holiday_name, notes
+                 FROM school_calendar_entries
+                 WHERE date >= ?1 AND date <= ?2
+                 ORDER BY date",
+            )?;
+            let rows = stmt.query_map(params![start_date, end_date], |row| {
+                Ok(SchoolCalendarEntry {
+                    id: row.get(0)?,
+                    document_id: row.get(1)?,
+                    date: row.get(2)?,
+                    day_number: row.get(3)?,
+                    unit_name: row.get(4)?,
+                    unit_color: row.get(5)?,
+                    is_holiday: row.get::<_, i32>(6)? != 0,
+                    holiday_name: row.get(7)?,
+                    notes: row.get(8)?,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    /// Check if any LTP documents have been imported.
+    pub fn has_ltp_documents(&self) -> Result<bool> {
+        self.with_conn(|conn| {
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM ltp_documents WHERE doc_type = 'ltp'",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok(count > 0)
+        })
+    }
+
     // ── Lesson Plans ──────────────────────────────────────────
 
     pub fn create_lesson_plan(&self, input: &NewLessonPlan) -> Result<LessonPlan> {
@@ -2007,6 +2109,89 @@ mod tests {
         db.delete_ltp_document(&doc.id).unwrap();
         let entries = db.list_school_calendar_entries(&doc.id).unwrap();
         assert_eq!(entries.len(), 0);
+    }
+
+    #[test]
+    fn test_ltp_cells_for_month() {
+        let db = test_db();
+
+        let doc = match db
+            .import_ltp_document("plan.html", "hash", None, "ltp", "<html></html>")
+            .unwrap()
+        {
+            LtpImportResult::Imported(d) => d,
+            _ => panic!("Expected Imported"),
+        };
+
+        // Insert cells for different months.
+        db.insert_ltp_grid_cell(&doc.id, 0, 0, Some("Math"), Some("March"), None, Some("Addition and subtraction"), None, Some("Unit 3"), None).unwrap();
+        db.insert_ltp_grid_cell(&doc.id, 1, 0, Some("Reading"), Some("March"), None, Some("Phonics: letter groups"), None, Some("Unit 3"), None).unwrap();
+        db.insert_ltp_grid_cell(&doc.id, 0, 1, Some("Math"), Some("April"), None, Some("Geometry"), None, Some("Unit 4"), None).unwrap();
+        // Empty cell should be excluded.
+        db.insert_ltp_grid_cell(&doc.id, 2, 0, Some("Writing"), Some("March"), None, Some(""), None, None, None).unwrap();
+
+        let march_cells = db.get_ltp_cells_for_month("March").unwrap();
+        assert_eq!(march_cells.len(), 2);
+        assert_eq!(march_cells[0].subject.as_deref(), Some("Math"));
+        assert_eq!(march_cells[1].subject.as_deref(), Some("Reading"));
+
+        let april_cells = db.get_ltp_cells_for_month("April").unwrap();
+        assert_eq!(april_cells.len(), 1);
+
+        let july_cells = db.get_ltp_cells_for_month("July").unwrap();
+        assert_eq!(july_cells.len(), 0);
+    }
+
+    #[test]
+    fn test_unit_for_month() {
+        let db = test_db();
+
+        let doc = match db
+            .import_ltp_document("plan.html", "hash", None, "ltp", "<html></html>")
+            .unwrap()
+        {
+            LtpImportResult::Imported(d) => d,
+            _ => panic!("Expected Imported"),
+        };
+
+        db.insert_ltp_grid_cell(&doc.id, 0, 0, Some("Math"), Some("March"), None, Some("content"), None, Some("Unit 3: Wind and Water"), None).unwrap();
+
+        let unit = db.get_unit_for_month("March").unwrap();
+        assert_eq!(unit, Some("Unit 3: Wind and Water".to_string()));
+
+        let no_unit = db.get_unit_for_month("July").unwrap();
+        assert_eq!(no_unit, None);
+    }
+
+    #[test]
+    fn test_calendar_entries_for_range() {
+        let db = test_db();
+
+        let doc = match db
+            .import_ltp_document("cal.html", "hash", None, "calendar", "<html></html>")
+            .unwrap()
+        {
+            LtpImportResult::Imported(d) => d,
+            _ => panic!("Expected Imported"),
+        };
+
+        db.insert_school_calendar_entry(&doc.id, Some("2025-03-17"), None, None, None, false, None, Some("St Patrick's")).unwrap();
+        db.insert_school_calendar_entry(&doc.id, Some("2025-03-20"), None, None, None, true, Some("SPRING BK"), None).unwrap();
+        db.insert_school_calendar_entry(&doc.id, Some("2025-04-01"), None, None, None, false, None, Some("April Fools")).unwrap();
+
+        let entries = db.get_calendar_entries_for_range("2025-03-17", "2025-03-23").unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].notes.as_deref(), Some("St Patrick's"));
+        assert!(entries[1].is_holiday);
+    }
+
+    #[test]
+    fn test_has_ltp_documents() {
+        let db = test_db();
+        assert!(!db.has_ltp_documents().unwrap());
+
+        db.import_ltp_document("plan.html", "hash", None, "ltp", "<html></html>").unwrap();
+        assert!(db.has_ltp_documents().unwrap());
     }
 
     #[test]

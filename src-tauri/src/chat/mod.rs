@@ -284,6 +284,213 @@ fn get_template_json(db: &Database) -> Option<String> {
     }
 }
 
+// ── LTP Context ─────────────────────────────────────────────
+
+/// Map a month number (1-12) to the month name used in LTP columns.
+fn month_number_to_name(month: u32) -> &'static str {
+    match month {
+        1 => "January",
+        2 => "February",
+        3 => "March",
+        4 => "April",
+        5 => "May",
+        6 => "June",
+        7 => "July",
+        8 => "August",
+        9 => "September",
+        10 => "October",
+        11 => "November",
+        12 => "December",
+        _ => "January",
+    }
+}
+
+/// Look up LTP context for a given date string (YYYY-MM-DD).
+///
+/// Returns None if no LTP documents are imported.
+pub fn get_ltp_context(
+    db: &Database,
+    date_str: &str,
+) -> Result<Option<crate::database::LtpContext>, crate::errors::ChalkError> {
+    use crate::database::{LtpContext, LtpSubjectContext};
+    use crate::errors::{ErrorCode, ErrorDomain};
+
+    // Check if any LTP data exists.
+    let has_ltp = db.has_ltp_documents().map_err(|e| ChalkError {
+        domain: ErrorDomain::Database,
+        code: ErrorCode::DbQueryFailed,
+        message: format!("Failed to check LTP documents: {e}"),
+        details: None,
+    })?;
+
+    if !has_ltp {
+        return Ok(None);
+    }
+
+    // Parse the date to extract month.
+    let parts: Vec<&str> = date_str.split('-').collect();
+    if parts.len() < 2 {
+        return Err(ChalkError {
+            domain: ErrorDomain::Chat,
+            code: ErrorCode::InternalError,
+            message: format!("Invalid date format: {date_str}. Expected YYYY-MM-DD."),
+            details: None,
+        });
+    }
+    let month_num: u32 = parts[1].parse().map_err(|_| ChalkError {
+        domain: ErrorDomain::Chat,
+        code: ErrorCode::InternalError,
+        message: format!("Invalid month in date: {date_str}"),
+        details: None,
+    })?;
+
+    let month_name = month_number_to_name(month_num);
+
+    // Get LTP cells for this month.
+    let cells = db.get_ltp_cells_for_month(month_name).map_err(|e| ChalkError {
+        domain: ErrorDomain::Database,
+        code: ErrorCode::DbQueryFailed,
+        message: format!("Failed to query LTP cells: {e}"),
+        details: None,
+    })?;
+
+    // Get the unit name for this month.
+    let unit_name = db.get_unit_for_month(month_name).map_err(|e| ChalkError {
+        domain: ErrorDomain::Database,
+        code: ErrorCode::DbQueryFailed,
+        message: format!("Failed to query unit: {e}"),
+        details: None,
+    })?;
+
+    // Group cells by subject, deduplicating by subject name.
+    let mut subjects: Vec<LtpSubjectContext> = Vec::new();
+    let mut seen_subjects = std::collections::HashSet::new();
+
+    for cell in &cells {
+        if let Some(ref subject) = cell.subject {
+            if let Some(ref content) = cell.content_text {
+                let subject_lower = subject.to_lowercase();
+                if !seen_subjects.contains(&subject_lower) && !content.trim().is_empty() {
+                    seen_subjects.insert(subject_lower);
+                    subjects.push(LtpSubjectContext {
+                        subject: subject.clone(),
+                        content: content.trim().to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    // Get calendar entries for the week surrounding the date (Mon-Sun).
+    let mut calendar_notes = Vec::new();
+    if let Ok(year) = parts[0].parse::<i32>() {
+        if let Ok(day) = parts[2].parse::<u32>() {
+            // Compute the Monday of the target week and the following Sunday.
+            if let Some(target_date) = simple_date(year, month_num, day) {
+                let weekday = day_of_week(year, month_num, day); // 0=Mon, 6=Sun
+                let monday = add_days(target_date, -(weekday as i32));
+                let sunday = add_days(target_date, 6 - weekday as i32);
+
+                let start = format_date(monday);
+                let end = format_date(sunday);
+
+                if let Ok(entries) = db.get_calendar_entries_for_range(&start, &end) {
+                    for entry in entries {
+                        if entry.is_holiday {
+                            if let Some(ref name) = entry.holiday_name {
+                                let date_label = entry.date.as_deref().unwrap_or("unknown");
+                                calendar_notes.push(format!("{date_label}: {name}"));
+                            }
+                        } else if let Some(ref notes) = entry.notes {
+                            if !notes.is_empty() {
+                                let date_label = entry.date.as_deref().unwrap_or("unknown");
+                                calendar_notes.push(format!("{date_label}: {notes}"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(Some(LtpContext {
+        month: month_name.to_string(),
+        unit_name,
+        subjects,
+        calendar_notes,
+    }))
+}
+
+/// Format LTP context as a prompt section for AI injection.
+pub fn format_ltp_context(context: &crate::database::LtpContext) -> String {
+    let mut out = String::new();
+    out.push_str("\n\n--- LONG-TERM PLAN CONTEXT FOR THIS WEEK ---\n");
+    out.push_str(&format!("Month: {}\n", context.month));
+
+    if let Some(ref unit) = context.unit_name {
+        out.push_str(&format!("Current Unit: {}\n", unit));
+    }
+
+    if !context.subjects.is_empty() {
+        out.push_str("\nSubject Guidance:\n");
+        for subj in &context.subjects {
+            out.push_str(&format!("• {}: {}\n", subj.subject, subj.content));
+        }
+    }
+
+    if !context.calendar_notes.is_empty() {
+        out.push_str("\nCalendar Notes:\n");
+        for note in &context.calendar_notes {
+            out.push_str(&format!("• {}\n", note));
+        }
+    }
+
+    out.push_str("--- END LONG-TERM PLAN CONTEXT ---");
+    out
+}
+
+// ── Simple date arithmetic (no external crate) ────────────────
+
+/// Compact date representation as days since epoch (for arithmetic).
+fn simple_date(year: i32, month: u32, day: u32) -> Option<i64> {
+    if month < 1 || month > 12 || day < 1 || day > 31 {
+        return None;
+    }
+    // Days from year 0 using a simplified calculation.
+    let y = if month <= 2 { year - 1 } else { year } as i64;
+    let m = if month <= 2 { month + 9 } else { month - 3 } as i64;
+    let days = 365 * y + y / 4 - y / 100 + y / 400 + (m * 306 + 5) / 10 + (day as i64 - 1);
+    Some(days)
+}
+
+fn add_days(days: i64, delta: i32) -> i64 {
+    days + delta as i64
+}
+
+fn format_date(days: i64) -> String {
+    // Reverse the simple_date calculation.
+    let y = (10000 * days + 14780) / 3652425;
+    let mut doy = days - (365 * y + y / 4 - y / 100 + y / 400);
+    if doy < 0 {
+        let y2 = y - 1;
+        doy = days - (365 * y2 + y2 / 4 - y2 / 100 + y2 / 400);
+    }
+    let mi = (100 * doy + 52) / 3060;
+    let month = if mi < 10 { mi + 3 } else { mi - 9 };
+    let year = y + (if month <= 2 { 1 } else { 0 });
+    let day = doy - (mi * 306 + 5) / 10 + 1;
+    format!("{:04}-{:02}-{:02}", year, month, day)
+}
+
+/// Compute day of week: 0=Monday, 6=Sunday (Tomohiko Sakamoto's algorithm).
+fn day_of_week(year: i32, month: u32, day: u32) -> u32 {
+    let t = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+    let y = if month < 3 { year - 1 } else { year };
+    let w = (y + y / 4 - y / 100 + y / 400 + t[(month - 1) as usize] + day as i32) % 7;
+    // Convert from Sunday=0 to Monday=0.
+    ((w + 6) % 7) as u32
+}
+
 /// Convert a teaching template JSON string into structured prompt instructions.
 ///
 /// Instead of dumping raw JSON for the AI to interpret, this function parses
@@ -641,6 +848,7 @@ fn build_messages(
     rag_context: &str,
     active_plan: Option<(&str, &str)>, // (title, content)
     teaching_template: Option<&str>,   // serialized template JSON
+    ltp_context: Option<&crate::database::LtpContext>,
 ) -> Vec<CompletionMessage> {
     let mut messages = Vec::new();
 
@@ -650,6 +858,12 @@ fn build_messages(
     // preferred table structure, color scheme, time slots, and recurring elements.
     if let Some(template_json) = teaching_template {
         system_content.push_str(&format_template_instructions(template_json));
+    }
+
+    // Inject LTP context if available — tells the AI what the long-term plan
+    // says for the current month/unit so it can align lesson content.
+    if let Some(ltp_ctx) = ltp_context {
+        system_content.push_str(&format_ltp_context(ltp_ctx));
     }
 
     // Inject active plan context if available.
@@ -711,8 +925,9 @@ async fn generate_response(
     rag_context: &str,
     active_plan: Option<(&str, &str)>,
     teaching_template: Option<&str>,
+    ltp_context: Option<&crate::database::LtpContext>,
 ) -> Result<String, ChalkError> {
-    let messages = build_messages(history, user_message, rag_context, active_plan, teaching_template);
+    let messages = build_messages(history, user_message, rag_context, active_plan, teaching_template, ltp_context);
     provider.complete(&messages, 16384, 0.7).await
 }
 
@@ -726,8 +941,9 @@ async fn generate_response_stream(
     conversation_id: &str,
     active_plan: Option<(&str, &str)>,
     teaching_template: Option<&str>,
+    ltp_context: Option<&crate::database::LtpContext>,
 ) -> Result<String, ChalkError> {
-    let messages = build_messages(history, user_message, rag_context, active_plan, teaching_template);
+    let messages = build_messages(history, user_message, rag_context, active_plan, teaching_template, ltp_context);
     let conv_id = conversation_id.to_string();
     let app_handle = app.clone();
 
@@ -831,6 +1047,10 @@ pub async fn send_chat_message(
     // Fetch teaching template for prompt injection.
     let template_json = get_template_json(db);
 
+    // Fetch LTP context for today's date to align lesson content with long-term plan.
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let ltp_context = get_ltp_context(db, &today).unwrap_or(None);
+
     // Create provider and generate AI response.
     let ai_provider = create_provider_from_settings(&api_key, &base_url, &model, "openai")
         .map_err(|e| e.message)?;
@@ -842,6 +1062,7 @@ pub async fn send_chat_message(
             &rag_context,
             active_plan,
             template_json.as_deref(),
+            ltp_context.as_ref(),
         )
             .await
             .map_err(|e| e.message)?;
@@ -951,6 +1172,10 @@ pub async fn send_chat_message_stream(
     // Fetch teaching template for prompt injection.
     let template_json = get_template_json(db);
 
+    // Fetch LTP context for today's date to align lesson content with long-term plan.
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let ltp_context = get_ltp_context(db, &today).unwrap_or(None);
+
     // Create provider before spawning so we get early config errors.
     let ai_provider = create_provider_from_settings(&api_key, &base_url, &model, "openai")
         .map_err(|e| e.message)?;
@@ -979,6 +1204,7 @@ pub async fn send_chat_message_stream(
             &conv_id,
             active_plan,
             template_json.as_deref(),
+            ltp_context.as_ref(),
         )
         .await
         {
@@ -1352,7 +1578,7 @@ mod tests {
     #[test]
     fn test_build_messages_without_context() {
         let history: Vec<ChatMessage> = vec![];
-        let messages = build_messages(&history, "Hello", "", None, None);
+        let messages = build_messages(&history, "Hello", "", None, None, None);
 
         assert_eq!(messages.len(), 2); // system + user
         assert_eq!(messages[0].role, "system");
@@ -1365,7 +1591,7 @@ mod tests {
     fn test_build_messages_with_rag_context() {
         let history: Vec<ChatMessage> = vec![];
         let rag_ctx = "Relevant plan: Photosynthesis Lab";
-        let messages = build_messages(&history, "Help me", rag_ctx, None, None);
+        let messages = build_messages(&history, "Help me", rag_ctx, None, None, None);
 
         assert_eq!(messages.len(), 2);
         assert!(messages[0].content.contains(SYSTEM_PROMPT));
@@ -1392,7 +1618,7 @@ mod tests {
                 created_at: "2024-01-01".into(),
             },
         ];
-        let messages = build_messages(&history, "New question", "", None, None);
+        let messages = build_messages(&history, "New question", "", None, None, None);
 
         // system + 2 history + user = 4
         assert_eq!(messages.len(), 4);
@@ -1415,7 +1641,7 @@ mod tests {
             })
             .collect();
 
-        let messages = build_messages(&history, "Final", "", None, None);
+        let messages = build_messages(&history, "Final", "", None, None, None);
         // system + 20 history + user = 22
         assert_eq!(messages.len(), 22);
         // First history message should be index 5 (25-20=5).
@@ -1442,7 +1668,7 @@ mod tests {
                 created_at: "2024-01-01".into(),
             },
         ];
-        let messages = build_messages(&history, "Hi", "", None, None);
+        let messages = build_messages(&history, "Hi", "", None, None, None);
 
         // system + 1 user from history (system skipped) + user = 3
         assert_eq!(messages.len(), 3);
@@ -1453,7 +1679,7 @@ mod tests {
     fn test_build_messages_with_active_plan() {
         let history: Vec<ChatMessage> = vec![];
         let plan = Some(("Photosynthesis Lab", "Students will learn about..."));
-        let messages = build_messages(&history, "Help me improve this", "", plan, None);
+        let messages = build_messages(&history, "Help me improve this", "", plan, None, None);
 
         assert_eq!(messages.len(), 2);
         assert!(messages[0].content.contains("CURRENT LESSON PLAN"));
@@ -1465,7 +1691,7 @@ mod tests {
     fn test_build_messages_with_empty_plan() {
         let history: Vec<ChatMessage> = vec![];
         let plan = Some(("New Plan", ""));
-        let messages = build_messages(&history, "Help me", "", plan, None);
+        let messages = build_messages(&history, "Help me", "", plan, None, None);
 
         assert_eq!(messages.len(), 2);
         assert!(messages[0].content.contains("currently empty"));
@@ -1476,7 +1702,7 @@ mod tests {
     fn test_build_messages_with_plan_and_rag() {
         let history: Vec<ChatMessage> = vec![];
         let plan = Some(("My Plan", "Some content here"));
-        let messages = build_messages(&history, "Help", "Related: old plan data", plan, None);
+        let messages = build_messages(&history, "Help", "Related: old plan data", plan, None, None);
 
         assert_eq!(messages.len(), 2);
         assert!(messages[0].content.contains("CURRENT LESSON PLAN"));
@@ -1488,7 +1714,7 @@ mod tests {
     fn test_build_messages_with_teaching_template() {
         let history: Vec<ChatMessage> = vec![];
         let template = r##"{"color_scheme":{"mappings":[{"color":"#FFD700","category":"Math","frequency":5}]},"table_structure":{"layout_type":"schedule_grid","columns":["Time","Monday","Tuesday"],"row_categories":["Morning","Afternoon"],"column_count":3},"time_slots":["8:00-9:00","9:00-10:00"],"content_patterns":{"cell_content_types":["activity"],"has_links":false,"has_rich_formatting":true},"recurring_elements":{"subjects":["Math","Reading"],"activities":["Circle Time","Centers"]}}"##;
-        let messages = build_messages(&history, "Make a plan", "", None, Some(template));
+        let messages = build_messages(&history, "Make a plan", "", None, Some(template), None);
 
         assert_eq!(messages.len(), 2);
         assert!(messages[0].content.contains("Teacher's Lesson Plan Template"));
@@ -1510,7 +1736,7 @@ mod tests {
         let history: Vec<ChatMessage> = vec![];
         let template = r#"{"color_scheme":{"mappings":[]},"table_structure":{"layout_type":"schedule_grid","columns":["Time","Mon"],"row_categories":[],"column_count":2},"time_slots":[],"content_patterns":{"cell_content_types":[],"has_links":false,"has_rich_formatting":false},"recurring_elements":{"subjects":[],"activities":[]}}"#;
         let plan = Some(("My Plan", "Some content"));
-        let messages = build_messages(&history, "Help", "", plan, Some(template));
+        let messages = build_messages(&history, "Help", "", plan, Some(template), None);
 
         assert_eq!(messages.len(), 2);
         // Template section appears before plan section.
@@ -1883,5 +2109,105 @@ mod tests {
         // ── Step 10: Verify the prompt does NOT contain truncation ──
         assert!(!prompt.contains("continue for all"),
             "Prompt should NOT truncate the skeleton");
+    }
+
+    // ── LTP context tests ──────────────────────────────────────
+
+    #[test]
+    fn test_month_number_to_name() {
+        assert_eq!(month_number_to_name(1), "January");
+        assert_eq!(month_number_to_name(3), "March");
+        assert_eq!(month_number_to_name(12), "December");
+    }
+
+    #[test]
+    fn test_day_of_week() {
+        // 2025-03-17 is a Monday.
+        assert_eq!(day_of_week(2025, 3, 17), 0);
+        // 2025-03-20 is a Thursday.
+        assert_eq!(day_of_week(2025, 3, 20), 3);
+        // 2025-03-23 is a Sunday.
+        assert_eq!(day_of_week(2025, 3, 23), 6);
+    }
+
+    #[test]
+    fn test_format_date_roundtrip() {
+        let days = simple_date(2025, 3, 20).unwrap();
+        assert_eq!(format_date(days), "2025-03-20");
+
+        let days2 = simple_date(2025, 12, 31).unwrap();
+        assert_eq!(format_date(days2), "2025-12-31");
+
+        let days3 = simple_date(2025, 1, 1).unwrap();
+        assert_eq!(format_date(days3), "2025-01-01");
+    }
+
+    #[test]
+    fn test_format_ltp_context() {
+        use crate::database::{LtpContext, LtpSubjectContext};
+
+        let ctx = LtpContext {
+            month: "March".to_string(),
+            unit_name: Some("Unit 3: Wind and Water".to_string()),
+            subjects: vec![
+                LtpSubjectContext {
+                    subject: "Math".to_string(),
+                    content: "Addition and subtraction".to_string(),
+                },
+                LtpSubjectContext {
+                    subject: "Reading".to_string(),
+                    content: "Phonics: letter groups".to_string(),
+                },
+            ],
+            calendar_notes: vec!["2025-03-20: SPRING BK".to_string()],
+        };
+
+        let result = format_ltp_context(&ctx);
+        assert!(result.contains("LONG-TERM PLAN CONTEXT FOR THIS WEEK"));
+        assert!(result.contains("Month: March"));
+        assert!(result.contains("Unit 3: Wind and Water"));
+        assert!(result.contains("Math: Addition and subtraction"));
+        assert!(result.contains("Reading: Phonics: letter groups"));
+        assert!(result.contains("SPRING BK"));
+        assert!(result.contains("END LONG-TERM PLAN CONTEXT"));
+    }
+
+    #[test]
+    fn test_format_ltp_context_minimal() {
+        use crate::database::LtpContext;
+
+        let ctx = LtpContext {
+            month: "August".to_string(),
+            unit_name: None,
+            subjects: vec![],
+            calendar_notes: vec![],
+        };
+
+        let result = format_ltp_context(&ctx);
+        assert!(result.contains("Month: August"));
+        assert!(!result.contains("Subject Guidance"));
+        assert!(!result.contains("Calendar Notes"));
+    }
+
+    #[test]
+    fn test_build_messages_with_ltp_context() {
+        use crate::database::{LtpContext, LtpSubjectContext};
+
+        let history = Vec::new();
+        let ltp_ctx = LtpContext {
+            month: "March".to_string(),
+            unit_name: Some("Unit 3".to_string()),
+            subjects: vec![LtpSubjectContext {
+                subject: "Math".to_string(),
+                content: "Shapes".to_string(),
+            }],
+            calendar_notes: vec![],
+        };
+
+        let messages = build_messages(&history, "Plan a lesson", "", None, None, Some(&ltp_ctx));
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0].content.contains("LONG-TERM PLAN CONTEXT"));
+        assert!(messages[0].content.contains("Math: Shapes"));
+        assert!(messages[0].content.contains("Unit 3"));
     }
 }
