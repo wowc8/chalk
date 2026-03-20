@@ -1479,6 +1479,313 @@ impl Database {
         )?;
         Ok(())
     }
+
+    // ── Recurring Events ──────────────────────────────────────
+
+    pub fn create_recurring_event(&self, input: &NewRecurringEvent) -> Result<RecurringEvent> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let event_type = input.event_type.as_deref().unwrap_or("fixed");
+        let details_vary_daily = input.details_vary_daily.unwrap_or(false);
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO recurring_events (id, name, event_type, linked_to, details_vary_daily)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id, input.name, event_type, input.linked_to, details_vary_daily],
+            )?;
+            self.get_recurring_event_inner(conn, &id)
+        })
+    }
+
+    pub fn get_recurring_event(&self, id: &str) -> Result<RecurringEvent> {
+        self.with_conn(|conn| self.get_recurring_event_inner(conn, id))
+    }
+
+    fn get_recurring_event_inner(
+        &self,
+        conn: &rusqlite::Connection,
+        id: &str,
+    ) -> Result<RecurringEvent> {
+        conn.query_row(
+            "SELECT id, name, event_type, linked_to, details_vary_daily, created_at, updated_at
+             FROM recurring_events WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(RecurringEvent {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    event_type: row.get(2)?,
+                    linked_to: row.get(3)?,
+                    details_vary_daily: row.get(4)?,
+                    created_at: row.get(5)?,
+                    updated_at: row.get(6)?,
+                })
+            },
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound,
+            other => DatabaseError::Sqlite(other),
+        })
+    }
+
+    pub fn list_recurring_events(&self) -> Result<Vec<RecurringEvent>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, name, event_type, linked_to, details_vary_daily, created_at, updated_at
+                 FROM recurring_events ORDER BY name",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(RecurringEvent {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    event_type: row.get(2)?,
+                    linked_to: row.get(3)?,
+                    details_vary_daily: row.get(4)?,
+                    created_at: row.get(5)?,
+                    updated_at: row.get(6)?,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    pub fn update_recurring_event(
+        &self,
+        id: &str,
+        input: &NewRecurringEvent,
+    ) -> Result<RecurringEvent> {
+        let event_type = input.event_type.as_deref().unwrap_or("fixed");
+        let details_vary_daily = input.details_vary_daily.unwrap_or(false);
+        self.with_conn(|conn| {
+            let updated = conn.execute(
+                "UPDATE recurring_events SET name = ?1, event_type = ?2, linked_to = ?3,
+                 details_vary_daily = ?4, updated_at = datetime('now') WHERE id = ?5",
+                params![input.name, event_type, input.linked_to, details_vary_daily, id],
+            )?;
+            if updated == 0 {
+                return Err(DatabaseError::NotFound);
+            }
+            self.get_recurring_event_inner(conn, id)
+        })
+    }
+
+    pub fn delete_recurring_event(&self, id: &str) -> Result<()> {
+        self.with_conn(|conn| {
+            let deleted =
+                conn.execute("DELETE FROM recurring_events WHERE id = ?1", params![id])?;
+            if deleted == 0 {
+                return Err(DatabaseError::NotFound);
+            }
+            Ok(())
+        })
+    }
+
+    // ── Event Occurrences ─────────────────────────────────────
+
+    pub fn create_event_occurrence(&self, input: &NewEventOccurrence) -> Result<EventOccurrence> {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO event_occurrences (id, event_id, day_of_week, start_time, end_time)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id, input.event_id, input.day_of_week, input.start_time, input.end_time],
+            )?;
+            conn.query_row(
+                "SELECT id, event_id, day_of_week, start_time, end_time
+                 FROM event_occurrences WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok(EventOccurrence {
+                        id: row.get(0)?,
+                        event_id: row.get(1)?,
+                        day_of_week: row.get(2)?,
+                        start_time: row.get(3)?,
+                        end_time: row.get(4)?,
+                    })
+                },
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound,
+                other => DatabaseError::Sqlite(other),
+            })
+        })
+    }
+
+    pub fn list_event_occurrences(&self, event_id: &str) -> Result<Vec<EventOccurrence>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, event_id, day_of_week, start_time, end_time
+                 FROM event_occurrences WHERE event_id = ?1 ORDER BY day_of_week, start_time",
+            )?;
+            let rows = stmt.query_map(params![event_id], |row| {
+                Ok(EventOccurrence {
+                    id: row.get(0)?,
+                    event_id: row.get(1)?,
+                    day_of_week: row.get(2)?,
+                    start_time: row.get(3)?,
+                    end_time: row.get(4)?,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    pub fn delete_event_occurrence(&self, id: &str) -> Result<()> {
+        self.with_conn(|conn| {
+            let deleted =
+                conn.execute("DELETE FROM event_occurrences WHERE id = ?1", params![id])?;
+            if deleted == 0 {
+                return Err(DatabaseError::NotFound);
+            }
+            Ok(())
+        })
+    }
+
+    // ── School Calendar ───────────────────────────────────────
+
+    pub fn get_school_calendar(&self) -> Result<SchoolCalendar> {
+        self.with_conn(|conn| {
+            conn.query_row(
+                "SELECT id, year_start, year_end, created_at, updated_at
+                 FROM school_calendar ORDER BY created_at DESC LIMIT 1",
+                [],
+                |row| {
+                    Ok(SchoolCalendar {
+                        id: row.get(0)?,
+                        year_start: row.get(1)?,
+                        year_end: row.get(2)?,
+                        created_at: row.get(3)?,
+                        updated_at: row.get(4)?,
+                    })
+                },
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound,
+                other => DatabaseError::Sqlite(other),
+            })
+        })
+    }
+
+    pub fn upsert_school_calendar(&self, input: &NewSchoolCalendar) -> Result<SchoolCalendar> {
+        self.with_conn(|conn| {
+            // Check if a calendar already exists.
+            let existing_id: Option<String> = conn
+                .query_row(
+                    "SELECT id FROM school_calendar ORDER BY created_at DESC LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .ok();
+
+            let id = existing_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+            conn.execute(
+                "INSERT INTO school_calendar (id, year_start, year_end)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(id) DO UPDATE SET
+                   year_start = excluded.year_start,
+                   year_end = excluded.year_end,
+                   updated_at = datetime('now')",
+                params![id, input.year_start, input.year_end],
+            )?;
+
+            conn.query_row(
+                "SELECT id, year_start, year_end, created_at, updated_at
+                 FROM school_calendar WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok(SchoolCalendar {
+                        id: row.get(0)?,
+                        year_start: row.get(1)?,
+                        year_end: row.get(2)?,
+                        created_at: row.get(3)?,
+                        updated_at: row.get(4)?,
+                    })
+                },
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound,
+                other => DatabaseError::Sqlite(other),
+            })
+        })
+    }
+
+    // ── Calendar Exceptions ───────────────────────────────────
+
+    pub fn add_calendar_exception(
+        &self,
+        input: &NewCalendarException,
+    ) -> Result<CalendarException> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let label = input.label.as_deref().unwrap_or("");
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO calendar_exceptions (id, calendar_id, date, exception_type, label)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id, input.calendar_id, input.date, input.exception_type, label],
+            )?;
+            conn.query_row(
+                "SELECT id, calendar_id, date, exception_type, label
+                 FROM calendar_exceptions WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok(CalendarException {
+                        id: row.get(0)?,
+                        calendar_id: row.get(1)?,
+                        date: row.get(2)?,
+                        exception_type: row.get(3)?,
+                        label: row.get(4)?,
+                    })
+                },
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound,
+                other => DatabaseError::Sqlite(other),
+            })
+        })
+    }
+
+    pub fn list_calendar_exceptions(
+        &self,
+        calendar_id: &str,
+    ) -> Result<Vec<CalendarException>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, calendar_id, date, exception_type, label
+                 FROM calendar_exceptions WHERE calendar_id = ?1 ORDER BY date",
+            )?;
+            let rows = stmt.query_map(params![calendar_id], |row| {
+                Ok(CalendarException {
+                    id: row.get(0)?,
+                    calendar_id: row.get(1)?,
+                    date: row.get(2)?,
+                    exception_type: row.get(3)?,
+                    label: row.get(4)?,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    pub fn delete_calendar_exception(&self, id: &str) -> Result<()> {
+        self.with_conn(|conn| {
+            let deleted =
+                conn.execute("DELETE FROM calendar_exceptions WHERE id = ?1", params![id])?;
+            if deleted == 0 {
+                return Err(DatabaseError::NotFound);
+            }
+            Ok(())
+        })
+    }
+
+    // ── Onboarding Status (DB-backed) ─────────────────────────
+
+    pub fn get_onboarding_status_json(&self) -> Result<Option<String>> {
+        self.get_setting("onboarding_status")
+    }
+
+    pub fn set_onboarding_status_json(&self, json: &str) -> Result<()> {
+        self.set_setting("onboarding_status", json)
+    }
 }
 
 #[cfg(test)]

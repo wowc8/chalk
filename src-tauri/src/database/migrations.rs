@@ -197,6 +197,14 @@ fn embedded_migrations() -> Vec<Migration> {
                 include_str!("../../migrations/010_ltp_documents.down.sql").to_string(),
             ),
         },
+        Migration {
+            version: 11,
+            description: "schedule_schema".to_string(),
+            up_sql: include_str!("../../migrations/011_schedule_schema.up.sql").to_string(),
+            down_sql: Some(
+                include_str!("../../migrations/011_schedule_schema.down.sql").to_string(),
+            ),
+        },
     ]
 }
 
@@ -359,13 +367,13 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
     }
 
     #[test]
     fn test_embedded_migrations_match_file_count() {
         let migrations = embedded_migrations();
-        assert_eq!(migrations.len(), 10);
+        assert_eq!(migrations.len(), 11);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(migrations[0].description, "initial_schema");
         assert_eq!(migrations[1].version, 2);
@@ -386,6 +394,8 @@ mod tests {
         assert_eq!(migrations[8].description, "teaching_templates");
         assert_eq!(migrations[9].version, 10);
         assert_eq!(migrations[9].description, "ltp_documents");
+        assert_eq!(migrations[10].version, 11);
+        assert_eq!(migrations[10].description, "schedule_schema");
     }
 
     #[test]
@@ -403,6 +413,11 @@ mod tests {
         let conn = test_conn();
 
         run_all(&conn).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 10);
+
+        // Rollback version 11 (schedule_schema).
+        let rolled_back = rollback_last(&conn, None).unwrap();
+        assert_eq!(rolled_back, Some(11));
         assert_eq!(current_version(&conn).unwrap(), 10);
 
         // Rollback version 10 (ltp_documents).
@@ -468,7 +483,7 @@ mod tests {
         assert_eq!(current_version(&conn).unwrap(), 10);
 
         // Rollback all.
-        for _ in 0..10 {
+        for _ in 0..11 {
             rollback_last(&conn, None).unwrap();
         }
         assert_eq!(current_version(&conn).unwrap(), 0);
@@ -579,7 +594,7 @@ mod tests {
         let migrations =
             discover_migrations(Path::new("/nonexistent/migrations/dir")).unwrap();
         // Falls back to embedded migrations.
-        assert_eq!(migrations.len(), 10);
+        assert_eq!(migrations.len(), 11);
     }
 
     #[test]

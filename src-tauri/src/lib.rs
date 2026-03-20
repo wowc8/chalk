@@ -627,6 +627,95 @@ async fn import_html_file(
     }))
 }
 
+// ── Recurring Events Tauri Commands ──────────────────────────
+
+#[tauri::command]
+fn get_recurring_events(
+    state: tauri::State<AppState>,
+) -> Result<Vec<database::RecurringEvent>, String> {
+    state.db.list_recurring_events().map_err(|e| format!("{e}"))
+}
+
+#[tauri::command]
+fn create_recurring_event(
+    state: tauri::State<AppState>,
+    input: database::NewRecurringEvent,
+) -> Result<database::RecurringEvent, String> {
+    state
+        .db
+        .create_recurring_event(&input)
+        .map_err(|e| format!("{e}"))
+}
+
+#[tauri::command]
+fn update_recurring_event(
+    state: tauri::State<AppState>,
+    id: String,
+    input: database::NewRecurringEvent,
+) -> Result<database::RecurringEvent, String> {
+    state
+        .db
+        .update_recurring_event(&id, &input)
+        .map_err(|e| format!("{e}"))
+}
+
+#[tauri::command]
+fn delete_recurring_event(
+    state: tauri::State<AppState>,
+    id: String,
+) -> Result<(), String> {
+    state
+        .db
+        .delete_recurring_event(&id)
+        .map_err(|e| format!("{e}"))
+}
+
+// ── School Calendar Tauri Commands ──────────────────────────
+
+#[tauri::command]
+fn get_school_calendar(
+    state: tauri::State<AppState>,
+) -> Result<serde_json::Value, String> {
+    match state.db.get_school_calendar() {
+        Ok(cal) => serde_json::to_value(cal).map_err(|e| format!("{e}")),
+        Err(database::DatabaseError::NotFound) => Ok(serde_json::json!(null)),
+        Err(e) => Err(format!("{e}")),
+    }
+}
+
+#[tauri::command]
+fn update_school_calendar(
+    state: tauri::State<AppState>,
+    input: database::NewSchoolCalendar,
+) -> Result<database::SchoolCalendar, String> {
+    state
+        .db
+        .upsert_school_calendar(&input)
+        .map_err(|e| format!("{e}"))
+}
+
+#[tauri::command]
+fn add_calendar_exception(
+    state: tauri::State<AppState>,
+    input: database::NewCalendarException,
+) -> Result<database::CalendarException, String> {
+    state
+        .db
+        .add_calendar_exception(&input)
+        .map_err(|e| format!("{e}"))
+}
+
+#[tauri::command]
+fn delete_calendar_exception(
+    state: tauri::State<AppState>,
+    id: String,
+) -> Result<(), String> {
+    state
+        .db
+        .delete_calendar_exception(&id)
+        .map_err(|e| format!("{e}"))
+}
+
 // ── App Settings Tauri Commands ─────────────────────────────
 
 #[tauri::command]
@@ -867,6 +956,14 @@ pub fn run() {
             get_active_teaching_template,
             list_teaching_templates,
             import_html_file,
+            get_recurring_events,
+            create_recurring_event,
+            update_recurring_event,
+            delete_recurring_event,
+            get_school_calendar,
+            update_school_calendar,
+            add_calendar_exception,
+            delete_calendar_exception,
             cache_get,
             cache_clear,
             cache_stats,

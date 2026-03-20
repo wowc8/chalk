@@ -307,6 +307,95 @@ pub struct LtpContext {
     pub event_relationships: Vec<EventRelationship>,
 }
 
+// ── Schedule Intelligence ────────────────────────────────────
+
+/// A recurring event in the teacher's schedule (e.g., "PE", "Lunch", "Centers").
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecurringEvent {
+    pub id: String,
+    pub name: String,
+    /// "fixed", "special", or "teaching_slot".
+    pub event_type: String,
+    /// Optional FK to another recurring_event this one is linked to
+    /// (e.g., "New Center Intro" → "Centers").
+    pub linked_to: Option<String>,
+    /// Whether AI should generate different content each day for this event.
+    pub details_vary_daily: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Input for creating/updating a recurring event.
+#[derive(Debug, Deserialize)]
+pub struct NewRecurringEvent {
+    pub name: String,
+    pub event_type: Option<String>,
+    pub linked_to: Option<String>,
+    pub details_vary_daily: Option<bool>,
+}
+
+/// A specific time occurrence of a recurring event on a given day of the week.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventOccurrence {
+    pub id: String,
+    pub event_id: String,
+    /// 0 = Monday, 4 = Friday.
+    pub day_of_week: i32,
+    /// "10:00"
+    pub start_time: String,
+    /// "10:50"
+    pub end_time: String,
+}
+
+/// Input for creating an event occurrence.
+#[derive(Debug, Deserialize)]
+pub struct NewEventOccurrence {
+    pub event_id: String,
+    pub day_of_week: i32,
+    pub start_time: String,
+    pub end_time: String,
+}
+
+/// A school calendar defining the academic year boundaries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchoolCalendar {
+    pub id: String,
+    /// ISO date string, e.g. "2025-08-14".
+    pub year_start: String,
+    pub year_end: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Input for creating/updating a school calendar.
+#[derive(Debug, Deserialize)]
+pub struct NewSchoolCalendar {
+    pub year_start: String,
+    pub year_end: Option<String>,
+}
+
+/// An exception day on the school calendar (holiday, half day, etc.).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CalendarException {
+    pub id: String,
+    pub calendar_id: String,
+    /// ISO date string, e.g. "2025-12-23".
+    pub date: String,
+    /// "no_school", "half_day", or "early_release".
+    pub exception_type: String,
+    /// Human-readable label, e.g. "Spring Break", "Teacher PD Day".
+    pub label: String,
+}
+
+/// Input for creating a calendar exception.
+#[derive(Debug, Deserialize)]
+pub struct NewCalendarException {
+    pub calendar_id: String,
+    pub date: String,
+    pub exception_type: String,
+    pub label: Option<String>,
+}
+
 // ── Tags ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
