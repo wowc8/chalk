@@ -24,8 +24,139 @@ use crate::database::{
 };
 use crate::errors::ChalkError;
 
-use super::parser::{self, ParsedTable};
-use super::{capitalize_header, detect_schedule_columns, is_time_like, DAY_NAMES};
+use super::parser::{self, ParsedTable, TableCell};
+use super::{capitalize_header, detect_schedule_columns, is_merged_row, is_time_like, DAY_NAMES};
+
+/// A resolved 2D grid built from a parsed table using the standard HTML table
+/// grid-building algorithm. Each position in the grid maps to the cell that
+/// occupies it (accounting for colspan and rowspan).
+///
+/// This is the same algorithm browsers use to lay out tables:
+/// 1. For each row, walk cells left-to-right
+/// 2. Place each cell in the next unoccupied grid position
+/// 3. Mark all spanned positions (colspan × rowspan rectangle) as occupied
+///
+/// The result is a complete, unambiguous 2D grid where every position is either
+/// occupied by a cell reference or empty (for short rows with no colspan).
+pub struct ResolvedGrid<'a> {
+    /// 2D grid of cell references. `grid[row][col]` is `Some(&cell)` if that
+    /// position is occupied, `None` if it's an empty trailing position.
+    pub grid: Vec<Vec<Option<&'a TableCell>>>,
+    /// The true number of columns in the table (grid width).
+    pub width: usize,
+    /// The number of rows in the grid.
+    pub height: usize,
+}
+
+impl<'a> ResolvedGrid<'a> {
+    /// Check if a grid row is a merged/section-divider row.
+    ///
+    /// A row where a single source cell spans the entire grid width is a
+    /// section divider (e.g., "Week 5", "Spring Break", "NO SCHOOL").
+    pub fn is_full_width_merge(&self, row_idx: usize) -> bool {
+        if self.width <= 2 {
+            return false;
+        }
+        if let Some(grid_row) = self.grid.get(row_idx) {
+            // Check if all cells in this row point to the same source cell.
+            let first = grid_row.first().and_then(|c| c.map(|cell| cell as *const _));
+            if let Some(first_ptr) = first {
+                return grid_row.iter().all(|c| {
+                    c.map(|cell| cell as *const _ == first_ptr).unwrap_or(false)
+                });
+            }
+        }
+        false
+    }
+
+    /// Get the text of a cell at a grid position.
+    pub fn cell_text(&self, row: usize, col: usize) -> &str {
+        self.grid
+            .get(row)
+            .and_then(|r| r.get(col))
+            .and_then(|c| c.as_ref())
+            .map(|c| c.text.trim())
+            .unwrap_or("")
+    }
+
+    /// Get the cell reference at a grid position.
+    pub fn cell_at(&self, row: usize, col: usize) -> Option<&'a TableCell> {
+        self.grid.get(row).and_then(|r| r.get(col)).and_then(|c| *c)
+    }
+}
+
+/// Build a resolved 2D grid from a parsed table using the standard HTML table
+/// grid-building algorithm (the same algorithm browsers use).
+///
+/// Handles colspan, rowspan, and short rows correctly:
+/// - A cell with `colspan="3"` occupies 3 grid columns
+/// - A cell with `rowspan="2"` occupies 2 grid rows
+/// - A short row (fewer cells than grid width, no colspan) has empty trailing positions
+pub fn resolve_grid(table: &ParsedTable) -> ResolvedGrid<'_> {
+    if table.rows.is_empty() {
+        return ResolvedGrid {
+            grid: Vec::new(),
+            width: 0,
+            height: 0,
+        };
+    }
+
+    let height = table.rows.len();
+
+    // First pass: determine grid width by finding the max effective row width.
+    // Also account for rowspans that may push cells into later rows.
+    let mut width = table.grid_width();
+
+    // Build the grid. We use a "occupied" tracker to handle rowspans.
+    // occupied[row][col] = true means that position is already taken by a
+    // rowspan from a previous row.
+    let mut grid: Vec<Vec<Option<&TableCell>>> = vec![vec![None; width]; height];
+    let mut occupied: Vec<Vec<bool>> = vec![vec![false; width]; height];
+
+    for (row_idx, row) in table.rows.iter().enumerate() {
+        let mut col_cursor = 0;
+
+        for cell in &row.cells {
+            // Skip past occupied positions (from previous rowspans).
+            while col_cursor < width && occupied[row_idx][col_cursor] {
+                col_cursor += 1;
+            }
+
+            if col_cursor >= width {
+                // Row has more cells than the grid width — extend the grid.
+                width = col_cursor + cell.colspan;
+                for grid_row in grid.iter_mut() {
+                    grid_row.resize(width, None);
+                }
+                for occ_row in occupied.iter_mut() {
+                    occ_row.resize(width, false);
+                }
+            }
+
+            // Place this cell in the colspan × rowspan rectangle.
+            let cs = cell.colspan;
+            let rs = cell.rowspan;
+            for dr in 0..rs {
+                for dc in 0..cs {
+                    let r = row_idx + dr;
+                    let c = col_cursor + dc;
+                    if r < height && c < width {
+                        grid[r][c] = Some(cell);
+                        occupied[r][c] = true;
+                    }
+                }
+            }
+
+            col_cursor += cs;
+        }
+    }
+
+    ResolvedGrid {
+        grid,
+        width,
+        height,
+    }
+}
 
 /// Normalize an activity name for frequency-based matching.
 ///
@@ -82,24 +213,36 @@ fn normalize_activity_name(text: &str) -> String {
 
 /// Determine the effective header row index for a table.
 ///
-/// Google Docs exports often have a single merged title row (e.g., "Mrs. Cole's
+/// Google Docs exports often have merged title rows (e.g., "Mrs. Cole's
 /// TK Schedule 2025-2026") spanning all columns as row 0, with the actual
-/// column headers (Day/Time, Monday, Tuesday, ...) in row 1. This function
-/// detects that pattern and returns the correct header row index.
+/// column headers (Day/Time, Monday, Tuesday, ...) in row 1 or later. Some
+/// teachers have multiple merged title/banner rows before the real headers.
 ///
-/// Returns the index of the first row that has ≥3 cells (i.e., not a merged title),
-/// or 0 if all rows are single-cell (unlikely).
-fn effective_header_row(table: &ParsedTable) -> usize {
+/// Uses the max-width heuristic: calculates the maximum cell count across all
+/// rows (the expected grid width), then finds the first row with at least half
+/// that many cells. Rows with far fewer cells than the max are merged title rows.
+///
+/// Returns the index of the first non-merged row, or 0 if all rows are similar.
+pub(crate) fn effective_header_row(table: &ParsedTable) -> usize {
     if table.rows.len() < 2 {
         return 0;
     }
 
-    // If row 0 has only 1 cell but row 1 has more, row 0 is a merged title.
-    let row0_cells = table.rows[0].cells.len();
-    if row0_cells <= 1 {
-        // Find the first row with ≥3 cells.
-        for (i, row) in table.rows.iter().enumerate().skip(1) {
-            if row.cells.len() >= 3 {
+    // Build the resolved grid for accurate merged-row detection.
+    let grid = resolve_grid(table);
+
+    if grid.width <= 2 {
+        return 0;
+    }
+
+    // Find the first row that is NOT a full-width merged banner.
+    // A full-width merge means a single cell spans all columns — that's
+    // a title row like "Mrs. Cole's TK Schedule 2025-2026".
+    for i in 0..grid.height {
+        if !grid.is_full_width_merge(i) {
+            // Also verify the row has enough distinct cells to be a header.
+            let cell_count = table.rows.get(i).map_or(0, |r| r.cells.len());
+            if cell_count > 1 {
                 return i;
             }
         }
@@ -649,17 +792,26 @@ fn score_planning_table(table: &ParsedTable) -> i32 {
         score += 50;
     }
 
+    let expected_width = headers.len();
+
     // Reward: has time-like values in the first column of data rows.
     let time_rows = table
         .rows
         .iter()
         .skip(header_idx + 1)
+        .filter(|r| !is_merged_row(r, expected_width))
         .filter(|r| r.cells.first().map_or(false, |c| is_time_like(c.text.trim())))
         .count();
     score += (time_rows as i32) * 5;
 
     // Reward: reasonable number of rows (2-30 rows typical for weekly plans).
-    let data_rows = table.rows.len().saturating_sub(header_idx + 1);
+    // Exclude merged/section-divider rows from the count.
+    let data_rows = table
+        .rows
+        .iter()
+        .skip(header_idx + 1)
+        .filter(|r| !is_merged_row(r, expected_width))
+        .count();
     if (2..=30).contains(&data_rows) {
         score += 10;
     }
@@ -814,10 +966,15 @@ fn extract_table_structure(tables: &[ParsedTable]) -> TableStructure {
         (None, row_sem)
     };
 
-    // Extract row categories from the first column of data rows.
+    // Extract row categories from the first column of data rows,
+    // skipping merged/section-divider rows.
     let mut row_categories = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    let expected_width = headers.len();
     for row in main_table.rows.iter().skip(h_idx + 1) {
+        if is_merged_row(row, expected_width) {
+            continue;
+        }
         if let Some(first_cell) = row.cells.first() {
             let text = first_cell.text.trim().to_string();
             if !text.is_empty() && !is_time_like(&text) && seen.insert(text.clone()) {
@@ -888,10 +1045,15 @@ fn extract_table_structure_with_ai(
         .map(|c| c.text.trim().to_string())
         .collect();
 
-    // Extract row categories from the first column of data rows.
+    // Extract row categories from the first column of data rows,
+    // skipping merged/section-divider rows.
     let mut row_categories = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    let expected_width = headers.len();
     for row in main_table.rows.iter().skip(h_idx + 1) {
+        if is_merged_row(row, expected_width) {
+            continue;
+        }
         if let Some(first_cell) = row.cells.first() {
             let text = first_cell.text.trim().to_string();
             if !text.is_empty() && !is_time_like(&text) && seen.insert(text.clone()) {
@@ -932,9 +1094,15 @@ fn extract_time_slots(tables: &[ParsedTable]) -> Vec<String> {
             .map(|c| c.text.trim().to_lowercase())
             .collect();
 
+        let expected_width = headers.len();
+
         // Standard orientation: time slots in the first column of data rows.
         if let Some((time_col, _)) = detect_schedule_columns(&headers) {
             for row in table.rows.iter().skip(h_idx + 1) {
+                // Skip merged/section-divider rows.
+                if is_merged_row(row, expected_width) {
+                    continue;
+                }
                 if let Some(cell) = row.cells.get(time_col) {
                     let text = cell.text.trim().to_string();
                     if is_time_like(&text) && seen.insert(text.clone()) {
@@ -1038,6 +1206,7 @@ fn extract_recurring_elements(tables: &[ParsedTable]) -> RecurringElements {
             .map(|c| c.text.trim().to_lowercase())
             .collect();
 
+        let expected_width = headers.len();
         let is_schedule = detect_schedule_columns(&headers).is_some();
         let is_transposed = !is_schedule && detect_transposed_schedule(table).is_some();
 
@@ -1045,6 +1214,9 @@ fn extract_recurring_elements(tables: &[ParsedTable]) -> RecurringElements {
             // Transposed: days in rows, time columns. Activity cells are at
             // row[day_row][time_col], skipping the first column (day label).
             for row in table.rows.iter().skip(h_idx + 1) {
+                if is_merged_row(row, expected_width) {
+                    continue;
+                }
                 for (_i, cell) in row.cells.iter().enumerate().skip(1) {
                     let text = cell.text.trim().to_string();
                     if text.is_empty() || is_time_like(&text) {
@@ -1065,6 +1237,10 @@ fn extract_recurring_elements(tables: &[ParsedTable]) -> RecurringElements {
         }
 
         for row in table.rows.iter().skip(h_idx + 1) {
+            // Skip merged/section-divider rows.
+            if is_merged_row(row, expected_width) {
+                continue;
+            }
             for (i, cell) in row.cells.iter().enumerate() {
                 let text = cell.text.trim().to_string();
                 if text.is_empty() || is_time_like(&text) {
@@ -1138,6 +1314,8 @@ fn extract_daily_routine(tables: &[ParsedTable]) -> Vec<DailyRoutineEvent> {
             .map(|c| c.text.trim().to_lowercase())
             .collect();
 
+        let expected_width = headers.len();
+
         // ── Standard orientation: days in columns, time slots in rows ──
         if let Some((time_col, day_col_pairs)) = detect_schedule_columns(&headers) {
             let num_days = day_col_pairs.len();
@@ -1150,6 +1328,10 @@ fn extract_daily_routine(tables: &[ParsedTable]) -> Vec<DailyRoutineEvent> {
             let threshold = (num_days as f64 * 0.4).ceil() as usize;
 
             for row in table.rows.iter().skip(h_idx + 1) {
+                // Skip merged/section-divider rows.
+                if is_merged_row(row, expected_width) {
+                    continue;
+                }
                 let time_slot = row
                     .cells
                     .get(time_col)
@@ -2807,4 +2989,459 @@ mod tests {
         eprintln!("Color scheme mappings: {}", template.color_scheme.mappings.len());
     }
 
+    // ── Resolve Grid Tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_resolve_grid_simple_table() {
+        let html = r#"<html><body>
+            <table>
+                <tr><th>A</th><th>B</th><th>C</th></tr>
+                <tr><td>1</td><td>2</td><td>3</td></tr>
+            </table>
+        </body></html>"#;
+        let tables = parser::extract_tables(html);
+        let grid = resolve_grid(&tables[0]);
+
+        assert_eq!(grid.width, 3);
+        assert_eq!(grid.height, 2);
+        assert_eq!(grid.cell_text(0, 0), "A");
+        assert_eq!(grid.cell_text(0, 1), "B");
+        assert_eq!(grid.cell_text(0, 2), "C");
+        assert_eq!(grid.cell_text(1, 0), "1");
+        assert_eq!(grid.cell_text(1, 1), "2");
+        assert_eq!(grid.cell_text(1, 2), "3");
+    }
+
+    #[test]
+    fn test_resolve_grid_colspan() {
+        let html = r#"<html><body>
+            <table>
+                <tr><td colspan="3">Title Row</td></tr>
+                <tr><th>A</th><th>B</th><th>C</th></tr>
+                <tr><td>1</td><td>2</td><td>3</td></tr>
+            </table>
+        </body></html>"#;
+        let tables = parser::extract_tables(html);
+        let grid = resolve_grid(&tables[0]);
+
+        assert_eq!(grid.width, 3);
+        assert_eq!(grid.height, 3);
+
+        // Row 0: single cell spanning all 3 columns.
+        assert_eq!(grid.cell_text(0, 0), "Title Row");
+        assert_eq!(grid.cell_text(0, 1), "Title Row");
+        assert_eq!(grid.cell_text(0, 2), "Title Row");
+
+        // The merged row should be detected as full-width merge.
+        assert!(grid.is_full_width_merge(0));
+        assert!(!grid.is_full_width_merge(1));
+        assert!(!grid.is_full_width_merge(2));
+    }
+
+    #[test]
+    fn test_resolve_grid_rowspan() {
+        let html = r#"<html><body>
+            <table>
+                <tr><td rowspan="2">Time</td><td>Mon</td><td>Tue</td></tr>
+                <tr><td>Math</td><td>Reading</td></tr>
+            </table>
+        </body></html>"#;
+        let tables = parser::extract_tables(html);
+        let grid = resolve_grid(&tables[0]);
+
+        assert_eq!(grid.width, 3);
+        assert_eq!(grid.height, 2);
+
+        // Row 0: Time | Mon | Tue
+        assert_eq!(grid.cell_text(0, 0), "Time");
+        assert_eq!(grid.cell_text(0, 1), "Mon");
+        assert_eq!(grid.cell_text(0, 2), "Tue");
+
+        // Row 1: Time (rowspan) | Math | Reading
+        assert_eq!(grid.cell_text(1, 0), "Time");
+        assert_eq!(grid.cell_text(1, 1), "Math");
+        assert_eq!(grid.cell_text(1, 2), "Reading");
+    }
+
+    #[test]
+    fn test_resolve_grid_mid_table_merged_row() {
+        let html = r#"<html><body>
+            <table>
+                <tr><th>Time</th><th>Monday</th><th>Tuesday</th><th>Wednesday</th><th>Thursday</th><th>Friday</th></tr>
+                <tr><td>8:00-8:30</td><td>Math</td><td>Math</td><td>Math</td><td>Math</td><td>Math</td></tr>
+                <tr><td colspan="6">SPRING BREAK - NO SCHOOL</td></tr>
+                <tr><td>9:00-9:30</td><td>Reading</td><td>Reading</td><td>Reading</td><td>Reading</td><td>Reading</td></tr>
+            </table>
+        </body></html>"#;
+        let tables = parser::extract_tables(html);
+        let grid = resolve_grid(&tables[0]);
+
+        assert_eq!(grid.width, 6);
+        assert_eq!(grid.height, 4);
+
+        // Row 2 is a full-width merge (section divider).
+        assert!(!grid.is_full_width_merge(0));
+        assert!(!grid.is_full_width_merge(1));
+        assert!(grid.is_full_width_merge(2));
+        assert!(!grid.is_full_width_merge(3));
+    }
+
+    #[test]
+    fn test_resolve_grid_empty_table() {
+        let table = ParsedTable { rows: vec![] };
+        let grid = resolve_grid(&table);
+        assert_eq!(grid.width, 0);
+        assert_eq!(grid.height, 0);
+    }
+
+    // ── Merged Row/Column Robustness Tests ─────────────────────────
+
+    #[test]
+    fn test_mid_table_merged_row_skipped_in_extraction() {
+        // A schedule table with a "SPRING BREAK" banner row in the middle.
+        // The extraction should skip the merged row and extract activities
+        // from the data rows before and after.
+        let html = r#"<html><body>
+            <table>
+                <tr><th>Time</th><th>Monday</th><th>Tuesday</th><th>Wednesday</th><th>Thursday</th><th>Friday</th></tr>
+                <tr><td>8:00-8:30</td><td>Math</td><td>Reading</td><td>Math</td><td>Reading</td><td>Math</td></tr>
+                <tr><td colspan="6">SPRING BREAK - NO SCHOOL</td></tr>
+                <tr><td>9:00-9:30</td><td>Science</td><td>Art</td><td>Science</td><td>Art</td><td>PE</td></tr>
+            </table>
+        </body></html>"#;
+
+        let template = extract_template(html);
+
+        // The merged banner row should NOT produce garbage in any extraction output.
+        assert_eq!(template.table_structure.layout_type, "schedule_grid");
+        assert!(template.time_slots.contains(&"8:00-8:30".to_string()));
+        assert!(template.time_slots.contains(&"9:00-9:30".to_string()));
+
+        // "SPRING BREAK - NO SCHOOL" should NOT appear as an activity or time slot.
+        assert!(!template.recurring_elements.activities.iter().any(|a| a.contains("SPRING BREAK")),
+            "Merged banner row should not produce activities");
+        assert!(!template.time_slots.iter().any(|t| t.contains("SPRING")),
+            "Merged banner row should not produce time slots");
+
+        // The row categories should not include the banner text.
+        assert!(!template.table_structure.row_categories.iter().any(|c| c.contains("SPRING")),
+            "Merged banner row should not produce row categories");
+    }
+
+    #[test]
+    fn test_mid_table_merged_row_skipped_in_lesson_extraction() {
+        // Lesson extraction from mod.rs should also skip merged rows.
+        let html = r#"<html><body>
+            <table>
+                <tr><th>Time</th><th>Monday</th><th>Tuesday</th><th>Wednesday</th></tr>
+                <tr><td>8:00-8:30</td><td>Math</td><td>Reading</td><td>Science</td></tr>
+                <tr><td colspan="4">Week 5 - Assessment Week</td></tr>
+                <tr><td>9:00-9:30</td><td>PE</td><td>Art</td><td>Music</td></tr>
+            </table>
+        </body></html>"#;
+
+        let lessons = super::super::extract_lessons_from_doc(html);
+
+        // Should extract activities from rows 1 and 3, skip the merged row 2.
+        let titles: Vec<&str> = lessons.iter().map(|l| l.title.as_str()).collect();
+        assert!(titles.contains(&"Math"), "Should extract Math");
+        assert!(titles.contains(&"PE"), "Should extract PE");
+        assert!(!titles.iter().any(|t| t.contains("Week 5")),
+            "Should NOT extract the merged banner: {:?}", titles);
+    }
+
+    #[test]
+    fn test_multiple_header_rows_handled() {
+        // Table with a merged title row, then the actual header row.
+        let html = r#"<html><body>
+            <table>
+                <tr><td colspan="6">Mrs. Cole's TK Schedule 2025-2026</td></tr>
+                <tr><th>Day/Time</th><th>Monday</th><th>Tuesday</th><th>Wednesday</th><th>Thursday</th><th>Friday</th></tr>
+                <tr><td>8:15-9:00</td><td>Math</td><td>Reading</td><td>Math</td><td>Reading</td><td>Math</td></tr>
+                <tr><td>9:00-9:30</td><td>PE</td><td>Art</td><td>PE</td><td>Music</td><td>PE</td></tr>
+            </table>
+        </body></html>"#;
+
+        let template = extract_template(html);
+
+        // Should detect as schedule grid despite the merged title row.
+        assert_eq!(template.table_structure.layout_type, "schedule_grid");
+        assert!(template.table_structure.columns.contains(&"Monday".to_string()),
+            "Should find day columns: {:?}", template.table_structure.columns);
+        assert!(template.time_slots.contains(&"8:15-9:00".to_string()),
+            "Should extract time slots");
+    }
+
+    #[test]
+    fn test_two_merged_title_rows() {
+        // Two merged title rows before the actual schedule headers.
+        let html = r#"<html><body>
+            <table>
+                <tr><td colspan="6">Springfield Elementary</td></tr>
+                <tr><td colspan="6">Week of March 23, 2026</td></tr>
+                <tr><th>Time</th><th>Monday</th><th>Tuesday</th><th>Wednesday</th><th>Thursday</th><th>Friday</th></tr>
+                <tr><td>9:00-9:30</td><td>Math</td><td>Math</td><td>Math</td><td>Math</td><td>Math</td></tr>
+            </table>
+        </body></html>"#;
+
+        let template = extract_template(html);
+
+        assert_eq!(template.table_structure.layout_type, "schedule_grid");
+        assert_eq!(template.table_structure.column_count, 6);
+        assert!(template.time_slots.contains(&"9:00-9:30".to_string()));
+    }
+
+    #[test]
+    fn test_merged_column_in_data_row() {
+        // A schedule where one cell spans multiple day columns (e.g., "Field Trip"
+        // spanning Monday-Wednesday). This row has fewer cells than the header.
+        let html = r#"<html><body>
+            <table>
+                <tr><th>Time</th><th>Monday</th><th>Tuesday</th><th>Wednesday</th><th>Thursday</th><th>Friday</th></tr>
+                <tr><td>8:00-8:30</td><td>Math</td><td>Math</td><td>Math</td><td>Math</td><td>Math</td></tr>
+                <tr><td>9:00-9:30</td><td colspan="3">Field Trip</td><td>Reading</td><td>Science</td></tr>
+                <tr><td>10:00-10:30</td><td>PE</td><td>Art</td><td>PE</td><td>Music</td><td>PE</td></tr>
+            </table>
+        </body></html>"#;
+
+        let template = extract_template(html);
+
+        // Should not crash and should extract the schedule structure.
+        assert_eq!(template.table_structure.layout_type, "schedule_grid");
+        assert!(template.time_slots.len() >= 2, "Should extract time slots");
+
+        // The resolve_grid should place "Field Trip" across 3 columns.
+        let tables = parser::extract_tables(html);
+        let grid = resolve_grid(&tables[0]);
+        assert_eq!(grid.cell_text(2, 1), "Field Trip");
+        assert_eq!(grid.cell_text(2, 2), "Field Trip");
+        assert_eq!(grid.cell_text(2, 3), "Field Trip");
+        assert_eq!(grid.cell_text(2, 4), "Reading");
+        assert_eq!(grid.cell_text(2, 5), "Science");
+    }
+
+    #[test]
+    fn test_multiple_mid_table_section_dividers() {
+        // Multiple section dividers throughout the table.
+        let html = r#"<html><body>
+            <table>
+                <tr><th>Time</th><th>Monday</th><th>Tuesday</th><th>Wednesday</th></tr>
+                <tr><td colspan="4">Morning Block</td></tr>
+                <tr><td>8:00-8:30</td><td>Math</td><td>Math</td><td>Math</td></tr>
+                <tr><td colspan="4">Afternoon Block</td></tr>
+                <tr><td>1:00-1:30</td><td>Science</td><td>Art</td><td>Music</td></tr>
+                <tr><td colspan="4">After School</td></tr>
+                <tr><td>3:00-3:30</td><td>Tutoring</td><td>Clubs</td><td>Tutoring</td></tr>
+            </table>
+        </body></html>"#;
+
+        let template = extract_template(html);
+
+        // All three time slots should be extracted despite the dividers.
+        assert!(template.time_slots.contains(&"8:00-8:30".to_string()),
+            "Should extract 8:00 slot");
+        assert!(template.time_slots.contains(&"1:00-1:30".to_string()),
+            "Should extract 1:00 slot");
+        assert!(template.time_slots.contains(&"3:00-3:30".to_string()),
+            "Should extract 3:00 slot");
+
+        // Section divider text should NOT be in row categories.
+        assert!(!template.table_structure.row_categories.iter()
+            .any(|c| c.contains("Block") || c.contains("After School")),
+            "Dividers should not appear in row categories: {:?}",
+            template.table_structure.row_categories);
+    }
+
+    #[test]
+    fn test_is_merged_row_basic() {
+        use super::super::is_merged_row;
+        use super::super::parser::{TableRow, TableCell};
+
+        // A row with 1 cell when expecting 6 columns is merged.
+        let merged_row = TableRow {
+            cells: vec![TableCell {
+                text: "Banner".into(),
+                colspan: 6,
+                ..Default::default()
+            }],
+        };
+        assert!(is_merged_row(&merged_row, 6));
+
+        // A row with 6 cells when expecting 6 columns is NOT merged.
+        let normal_row = TableRow {
+            cells: vec![
+                TableCell { text: "A".into(), ..Default::default() },
+                TableCell { text: "B".into(), ..Default::default() },
+                TableCell { text: "C".into(), ..Default::default() },
+                TableCell { text: "D".into(), ..Default::default() },
+                TableCell { text: "E".into(), ..Default::default() },
+                TableCell { text: "F".into(), ..Default::default() },
+            ],
+        };
+        assert!(!is_merged_row(&normal_row, 6));
+
+        // A row with 2 cells when expecting 6 columns is merged (2*2 < 6).
+        let partial_row = TableRow {
+            cells: vec![
+                TableCell { text: "A".into(), ..Default::default() },
+                TableCell { text: "B".into(), ..Default::default() },
+            ],
+        };
+        assert!(is_merged_row(&partial_row, 6));
+    }
+
+    #[test]
+    fn test_effective_header_row_with_colspan_title() {
+        let html = r#"<html><body>
+            <table>
+                <tr><td colspan="5">My Schedule</td></tr>
+                <tr><th>Time</th><th>Mon</th><th>Tue</th><th>Wed</th><th>Thu</th></tr>
+                <tr><td>9:00</td><td>Math</td><td>Reading</td><td>Math</td><td>Reading</td></tr>
+            </table>
+        </body></html>"#;
+        let tables = parser::extract_tables(html);
+
+        let h_idx = effective_header_row(&tables[0]);
+        assert_eq!(h_idx, 1, "Should skip the colspan title row");
+    }
+
+    #[test]
+    fn test_effective_header_row_multiple_merged_titles() {
+        let html = r#"<html><body>
+            <table>
+                <tr><td colspan="4">School Name</td></tr>
+                <tr><td colspan="4">Week of March 23</td></tr>
+                <tr><th>Time</th><th>Mon</th><th>Tue</th><th>Wed</th></tr>
+                <tr><td>9:00</td><td>Math</td><td>Reading</td><td>Science</td></tr>
+            </table>
+        </body></html>"#;
+        let tables = parser::extract_tables(html);
+
+        let h_idx = effective_header_row(&tables[0]);
+        assert_eq!(h_idx, 2, "Should skip both colspan title rows");
+    }
+
+    #[test]
+    fn test_graceful_degradation_unknown_format() {
+        // A table with an unusual format — should not crash.
+        let html = r#"<html><body>
+            <table>
+                <tr><td>Only one column here</td></tr>
+                <tr><td>Another single cell</td></tr>
+                <tr><td>Third row</td></tr>
+            </table>
+        </body></html>"#;
+
+        let template = extract_template(html);
+        // Should produce a valid (possibly empty) template without crashing.
+        assert!(template.table_structure.layout_type == "standard_table"
+            || template.table_structure.columns.is_empty());
+    }
+
+    #[test]
+    fn test_holiday_banner_mid_table_with_daily_routine() {
+        // Schedule with a holiday banner in the middle — daily routine extraction
+        // should work correctly on the non-banner rows.
+        let html = r#"<html><body>
+            <table>
+                <tr><th>Time</th><th>Monday</th><th>Tuesday</th><th>Wednesday</th><th>Thursday</th><th>Friday</th></tr>
+                <tr><td>8:00-8:30</td><td>Breakfast</td><td>Breakfast</td><td>Breakfast</td><td>Breakfast</td><td>Breakfast</td></tr>
+                <tr><td>8:30-9:00</td><td>Math</td><td>Math</td><td>Math</td><td>Math</td><td>Math</td></tr>
+                <tr><td colspan="6">TEACHER IN-SERVICE DAY - NO STUDENTS</td></tr>
+                <tr><td>11:00-11:30</td><td>Lunch</td><td>Lunch</td><td>Lunch</td><td>Lunch</td><td>Lunch</td></tr>
+                <tr><td>2:30-2:45</td><td>Dismissal</td><td>Dismissal</td><td>Dismissal</td><td>Dismissal</td><td>Dismissal</td></tr>
+            </table>
+        </body></html>"#;
+
+        let template = extract_template(html);
+
+        let routine_names: Vec<&str> = template.daily_routine.iter()
+            .map(|e| e.name.as_str()).collect();
+
+        assert!(routine_names.contains(&"Breakfast"), "Missing Breakfast: {:?}", routine_names);
+        assert!(routine_names.contains(&"Math"), "Missing Math: {:?}", routine_names);
+        assert!(routine_names.contains(&"Lunch"), "Missing Lunch: {:?}", routine_names);
+        assert!(routine_names.contains(&"Dismissal"), "Missing Dismissal: {:?}", routine_names);
+
+        // Banner text should NOT appear in routine.
+        assert!(!routine_names.iter().any(|n| n.contains("TEACHER") || n.contains("IN-SERVICE")),
+            "Banner text should not be in routine: {:?}", routine_names);
+    }
+
+    #[test]
+    fn test_colspan_in_parser_preserved() {
+        let html = r#"<html><body>
+            <table>
+                <tr><td colspan="3">Wide cell</td></tr>
+                <tr><td>A</td><td>B</td><td>C</td></tr>
+            </table>
+        </body></html>"#;
+
+        let tables = parser::extract_tables(html);
+        assert_eq!(tables[0].rows[0].cells[0].colspan, 3);
+        assert_eq!(tables[0].rows[0].cells[0].rowspan, 1);
+        assert_eq!(tables[0].rows[1].cells[0].colspan, 1);
+        assert_eq!(tables[0].rows[1].cells[0].rowspan, 1);
+    }
+
+    #[test]
+    fn test_rowspan_in_parser_preserved() {
+        let html = r#"<html><body>
+            <table>
+                <tr><td rowspan="2">Tall cell</td><td>Right 1</td></tr>
+                <tr><td>Right 2</td></tr>
+            </table>
+        </body></html>"#;
+
+        let tables = parser::extract_tables(html);
+        assert_eq!(tables[0].rows[0].cells[0].rowspan, 2);
+        assert_eq!(tables[0].rows[0].cells[0].colspan, 1);
+    }
+
+    #[test]
+    fn test_grid_width_uses_colspan() {
+        let html = r#"<html><body>
+            <table>
+                <tr><td colspan="5">Title</td></tr>
+                <tr><td>A</td><td>B</td><td>C</td><td>D</td><td>E</td></tr>
+            </table>
+        </body></html>"#;
+
+        let tables = parser::extract_tables(html);
+        assert_eq!(tables[0].grid_width(), 5);
+        // Row 0 has 1 cell but effective width is 5.
+        assert_eq!(tables[0].rows[0].effective_width(), 5);
+        // Row 1 has 5 cells with no colspan.
+        assert_eq!(tables[0].rows[1].effective_width(), 5);
+    }
+
+    #[test]
+    fn test_resolve_grid_colspan_and_rowspan_combined() {
+        let html = r#"<html><body>
+            <table>
+                <tr><td colspan="4" rowspan="1">Title</td></tr>
+                <tr><td rowspan="2">Time</td><td>Mon</td><td>Tue</td><td>Wed</td></tr>
+                <tr><td>Math</td><td>Reading</td><td>Science</td></tr>
+            </table>
+        </body></html>"#;
+
+        let tables = parser::extract_tables(html);
+        let grid = resolve_grid(&tables[0]);
+
+        assert_eq!(grid.width, 4);
+        assert_eq!(grid.height, 3);
+
+        // Row 0: Title spans all 4 columns.
+        assert!(grid.is_full_width_merge(0));
+
+        // Row 1: Time | Mon | Tue | Wed
+        assert_eq!(grid.cell_text(1, 0), "Time");
+        assert_eq!(grid.cell_text(1, 1), "Mon");
+
+        // Row 2: Time (rowspan from row 1) | Math | Reading | Science
+        assert_eq!(grid.cell_text(2, 0), "Time");
+        assert_eq!(grid.cell_text(2, 1), "Math");
+        assert_eq!(grid.cell_text(2, 2), "Reading");
+        assert_eq!(grid.cell_text(2, 3), "Science");
+    }
 }
