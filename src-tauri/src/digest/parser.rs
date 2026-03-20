@@ -33,7 +33,11 @@ pub struct TableCell {
 
 /// Extract all tables from an HTML document exported by Google Drive.
 ///
-/// Finds every `<table>` element and extracts rows and cell text.
+/// Finds every `<table>` element — including nested tables — and extracts
+/// rows and cell text. Google Docs exports often wrap the entire document
+/// in a layout table, with the actual schedule table nested inside a cell.
+/// We extract both the outer and inner tables so the scoring/AI logic can
+/// select the correct one.
 pub fn extract_tables(html: &str) -> Vec<ParsedTable> {
     let document = Html::parse_document(html);
     let table_sel = Selector::parse("table").expect("valid selector");
@@ -43,26 +47,12 @@ pub fn extract_tables(html: &str) -> Vec<ParsedTable> {
     let mut tables = Vec::new();
 
     for table_el in document.select(&table_sel) {
-        // Skip tables nested inside another table — they will be reached
-        // when we process the outer table's cell text recursively.
-        if table_el
-            .ancestors()
-            .any(|ancestor| {
-                ancestor
-                    .value()
-                    .as_element()
-                    .map_or(false, |e| e.name() == "table")
-            })
-        {
-            continue;
-        }
-
         let table_node_id = table_el.id();
         let mut rows = Vec::new();
 
         for tr in table_el.select(&tr_sel) {
-            // Skip <tr> elements that belong to a nested table.
-            let belongs_to_outer = tr
+            // Skip <tr> elements that belong to a nested/different table.
+            let belongs_to = tr
                 .ancestors()
                 .filter_map(|a| {
                     a.value().as_element().and_then(|e| {
@@ -74,12 +64,26 @@ pub fn extract_tables(html: &str) -> Vec<ParsedTable> {
                     })
                 })
                 .next();
-            if belongs_to_outer != Some(table_node_id) {
+            if belongs_to != Some(table_node_id) {
                 continue;
             }
 
             let cells: Vec<TableCell> = tr
                 .select(&cell_sel)
+                .filter(|cell| {
+                    // Skip cells that belong to a nested table inside this row.
+                    cell.ancestors()
+                        .filter_map(|a| {
+                            a.value().as_element().and_then(|e| {
+                                if e.name() == "tr" {
+                                    Some(a.id())
+                                } else {
+                                    None
+                                }
+                            })
+                        })
+                        .next() == Some(tr.id())
+                })
                 .map(|cell| {
                     let text = cell_text(&cell);
                     let html = cell_inner_html(&cell);
@@ -250,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn test_nested_table_not_double_counted() {
+    fn test_nested_table_extracted_separately() {
         let html = r#"
             <table>
                 <tr><td>
@@ -260,8 +264,13 @@ mod tests {
             </table>
         "#;
         let tables = extract_tables(html);
-        // Only the outer table should be counted as a top-level table.
-        assert_eq!(tables.len(), 1);
+        // Both the outer and inner table should be extracted separately.
+        assert_eq!(tables.len(), 2);
+        // The outer table has 1 row with 1 cell.
+        assert_eq!(tables[0].rows.len(), 1);
+        // The inner table has 1 row with 1 cell containing "Inner".
+        assert_eq!(tables[1].rows.len(), 1);
+        assert_eq!(tables[1].rows[0].cells[0].text, "Inner");
     }
 
     #[test]
