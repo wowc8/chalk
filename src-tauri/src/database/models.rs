@@ -20,6 +20,9 @@ pub struct LessonPlan {
     pub source_table_index: Option<i32>,
     pub learning_objectives: Option<String>,
     pub status: String,
+    pub week_start_date: Option<String>,
+    pub week_end_date: Option<String>,
+    pub school_year: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -423,8 +426,31 @@ pub struct LibraryPlanCard {
     pub source_type: String,
     pub version: i32,
     pub tags: Vec<Tag>,
+    pub week_start_date: Option<String>,
+    pub week_end_date: Option<String>,
+    pub school_year: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// A month group within a school year for the chronological library view.
+#[derive(Debug, Clone, Serialize)]
+pub struct MonthGroup {
+    /// Month number (1-12).
+    pub month: u32,
+    /// Display name (e.g., "September").
+    pub month_name: String,
+    /// Plans in this month, ordered by week_start_date.
+    pub plans: Vec<LibraryPlanCard>,
+}
+
+/// A school year group for the chronological library view.
+#[derive(Debug, Clone, Serialize)]
+pub struct SchoolYearGroup {
+    /// School year label (e.g., "2024-25").
+    pub school_year: String,
+    /// Month groups within this school year, ordered chronologically.
+    pub months: Vec<MonthGroup>,
 }
 
 /// Query parameters for listing library plans.

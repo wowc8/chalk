@@ -11,8 +11,9 @@ export function AppLayout({ onReconnect }: { onReconnect: () => void }) {
 
   const isPlanDetail = location.pathname.startsWith("/plan/");
   const isCurriculum = location.pathname === "/curriculum";
+  const isHistory = location.pathname === "/history";
 
-  const breadcrumb = isPlanDetail || isCurriculum
+  const breadcrumb = isPlanDetail || isCurriculum || isHistory
     ? { label: "Library", onClick: () => navigate("/") }
     : undefined;
 

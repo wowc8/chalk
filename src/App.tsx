@@ -5,6 +5,7 @@ import { useErrorPipe } from "./hooks/useErrorPipe";
 import { OnboardingWizard } from "./components/onboarding/OnboardingWizard";
 import { AppLayout } from "./components/AppLayout";
 import { Library } from "./components/Library";
+import { HistoricalLibrary } from "./components/HistoricalLibrary";
 import { PlanDetail } from "./components/PlanDetail";
 import { CurriculumPage } from "./components/curriculum/CurriculumPage";
 import { ToastProvider } from "./components/Toast";
@@ -138,6 +139,7 @@ function App() {
               }
             >
               <Route path="/" element={<Library />} />
+              <Route path="/history" element={<HistoricalLibrary />} />
               <Route path="/curriculum" element={<CurriculumPage />} />
               <Route path="/plan/:planId" element={<PlanDetail />} />
             </Route>
