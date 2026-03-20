@@ -1,0 +1,124 @@
+/* ── LTP Grid Table ────────────────────────────────────────────── */
+
+.ltp-grid-container {
+  padding: 12px;
+}
+
+.ltp-grid-table {
+  border-collapse: separate;
+  border-spacing: 0;
+  width: max-content;
+  min-width: 100%;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.ltp-grid-table tr:first-child .ltp-cell {
+  border-top: 1px solid rgba(232, 228, 223, 0.08);
+}
+
+/* ── Base Cell ─────────────────────────────────────────────────── */
+
+.ltp-cell {
+  padding: 6px 8px;
+  border-right: 1px solid rgba(232, 228, 223, 0.06);
+  border-bottom: 1px solid rgba(232, 228, 223, 0.06);
+  vertical-align: top;
+  min-width: 80px;
+  max-width: 220px;
+  position: relative;
+}
+
+.ltp-cell:first-child {
+  border-left: 1px solid rgba(232, 228, 223, 0.08);
+}
+
+.ltp-cell-empty {
+  background: transparent;
+}
+
+/* ── Header Cells ──────────────────────────────────────────────── */
+
+.ltp-cell-header {
+  background: var(--color-chalk-board-dark, #1e2526);
+  color: var(--color-chalk-dust, #d4cfc8);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  position: sticky;
+  z-index: 2;
+  white-space: nowrap;
+}
+
+.ltp-cell-month {
+  top: 0;
+  text-align: center;
+  padding: 8px 12px;
+}
+
+.ltp-cell-subject {
+  left: 0;
+  min-width: 140px;
+  max-width: 180px;
+  z-index: 3;
+  border-right: 2px solid rgba(232, 228, 223, 0.1);
+}
+
+.ltp-cell-subject-text {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* First row + first col intersection */
+tr:first-child .ltp-cell-subject {
+  z-index: 4;
+}
+
+/* ── Interactive Content Cells ─────────────────────────────────── */
+
+.ltp-cell-interactive {
+  cursor: pointer;
+  transition: background-color 0.12s, box-shadow 0.12s;
+}
+
+.ltp-cell-interactive:hover {
+  box-shadow: inset 0 0 0 1px rgba(116, 185, 255, 0.25);
+}
+
+.ltp-cell-text {
+  display: -webkit-box;
+  -webkit-line-clamp: 6;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  color: var(--color-chalk-white, #e8e4df);
+  word-break: break-word;
+}
+
+/* ── Editing State ─────────────────────────────────────────────── */
+
+.ltp-cell-editing {
+  padding: 2px;
+  box-shadow: inset 0 0 0 2px var(--color-chalk-blue, #74b9ff);
+}
+
+.ltp-cell-input {
+  width: 100%;
+  min-height: 60px;
+  padding: 4px 6px;
+  background: var(--color-chalk-board-dark, #1e2526);
+  border: none;
+  border-radius: 4px;
+  color: var(--color-chalk-white, #e8e4df);
+  font-size: 12px;
+  line-height: 1.4;
+  font-family: inherit;
+  resize: vertical;
+  outline: none;
+}
+
+.ltp-cell-input::placeholder {
+  color: var(--color-chalk-muted, #636e72);
+}

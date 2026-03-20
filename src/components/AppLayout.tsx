@@ -10,19 +10,20 @@ export function AppLayout({ onReconnect }: { onReconnect: () => void }) {
   const location = useLocation();
 
   const isPlanDetail = location.pathname.startsWith("/plan/");
+  const isCurriculum = location.pathname === "/curriculum";
+
+  const breadcrumb = isPlanDetail || isCurriculum
+    ? { label: "Library", onClick: () => navigate("/") }
+    : undefined;
 
   return (
     <div className="h-screen chalk-bg text-chalk-white flex flex-col overflow-hidden">
       <UpdateBanner />
       <AppHeader
         onOpenSettings={() => setSettingsOpen(true)}
-        breadcrumb={
-          isPlanDetail
-            ? { label: "Library", onClick: () => navigate("/") }
-            : undefined
-        }
+        breadcrumb={breadcrumb}
       />
-      <main className={`flex-1 ${isPlanDetail ? "flex flex-col min-h-0 overflow-hidden" : "overflow-y-auto"}`}>
+      <main className={`flex-1 ${(isPlanDetail || isCurriculum) ? "flex flex-col min-h-0 overflow-hidden" : "overflow-y-auto"}`}>
         <Outlet />
       </main>
 

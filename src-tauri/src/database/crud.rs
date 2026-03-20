@@ -293,6 +293,47 @@ impl Database {
         })
     }
 
+    /// Update the text content of a single LTP grid cell.
+    pub fn update_ltp_grid_cell(
+        &self,
+        cell_id: &str,
+        content_text: &str,
+    ) -> Result<LtpGridCell> {
+        self.with_conn(|conn| {
+            let updated = conn.execute(
+                "UPDATE ltp_grid_cells SET content_text = ?1 WHERE id = ?2",
+                params![content_text, cell_id],
+            )?;
+            if updated == 0 {
+                return Err(DatabaseError::NotFound);
+            }
+            conn.query_row(
+                "SELECT id, document_id, row_index, col_index, subject, month, content_html, content_text, background_color, unit_name, unit_color
+                 FROM ltp_grid_cells WHERE id = ?1",
+                params![cell_id],
+                |row| {
+                    Ok(LtpGridCell {
+                        id: row.get(0)?,
+                        document_id: row.get(1)?,
+                        row_index: row.get(2)?,
+                        col_index: row.get(3)?,
+                        subject: row.get(4)?,
+                        month: row.get(5)?,
+                        content_html: row.get(6)?,
+                        content_text: row.get(7)?,
+                        background_color: row.get(8)?,
+                        unit_name: row.get(9)?,
+                        unit_color: row.get(10)?,
+                    })
+                },
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound,
+                other => DatabaseError::Sqlite(other),
+            })
+        })
+    }
+
     // ── School Calendar Entries ──────────────────────────────────
 
     pub fn insert_school_calendar_entry(
