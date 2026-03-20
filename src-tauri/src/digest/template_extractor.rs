@@ -27,6 +27,87 @@ use crate::errors::ChalkError;
 use super::parser::{self, ParsedTable};
 use super::{capitalize_header, detect_schedule_columns, is_time_like, DAY_NAMES};
 
+/// Normalize an activity name for frequency-based matching.
+///
+/// In real teacher schedules, the same activity often has different detail text
+/// across days. For example:
+///   - "Soft Start Breakfast 8:15-9:00"
+///   - "Soft Start Breakfast 8:15-9:00 Good Morning Preschool Friends..."
+///
+/// This function extracts the core activity name by:
+/// 1. Taking only the first line of text
+/// 2. Truncating before embedded time patterns (e.g., "8:15-9:00")
+/// 3. Limiting to a reasonable length
+fn normalize_activity_name(text: &str) -> String {
+    let first_line = text.lines().next().unwrap_or("").trim();
+    if first_line.is_empty() {
+        return String::new();
+    }
+
+    // Find the position of the first embedded time-like pattern (digit:digit).
+    // Many cells have "Activity Name 8:15-9:00 Extra Details..." — we want
+    // just "Activity Name".
+    let mut truncate_at = first_line.len();
+    let bytes = first_line.as_bytes();
+    for i in 0..bytes.len().saturating_sub(3) {
+        if bytes[i].is_ascii_digit()
+            && bytes.get(i + 1) == Some(&b':')
+            && bytes.get(i + 2).map_or(false, |b| b.is_ascii_digit())
+        {
+            // Found a time pattern — truncate just before it (trim trailing space).
+            truncate_at = i;
+            break;
+        }
+    }
+
+    let result = first_line[..truncate_at].trim();
+
+    // If the result is empty (cell starts with a time), fall back to the full text.
+    let result = if result.is_empty() { first_line } else { result };
+
+    // If still too long, take just the first 4 words as the activity name.
+    // Teacher schedule cells often have "Morning Circle Schedule Greeting Song/..."
+    // where the first 2-3 words identify the activity.
+    if result.len() > 60 {
+        let words: Vec<&str> = result.split_whitespace().take(4).collect();
+        let short = words.join(" ");
+        if short.is_empty() {
+            return String::new();
+        }
+        return short;
+    }
+
+    result.to_string()
+}
+
+/// Determine the effective header row index for a table.
+///
+/// Google Docs exports often have a single merged title row (e.g., "Mrs. Cole's
+/// TK Schedule 2025-2026") spanning all columns as row 0, with the actual
+/// column headers (Day/Time, Monday, Tuesday, ...) in row 1. This function
+/// detects that pattern and returns the correct header row index.
+///
+/// Returns the index of the first row that has ≥3 cells (i.e., not a merged title),
+/// or 0 if all rows are single-cell (unlikely).
+fn effective_header_row(table: &ParsedTable) -> usize {
+    if table.rows.len() < 2 {
+        return 0;
+    }
+
+    // If row 0 has only 1 cell but row 1 has more, row 0 is a merged title.
+    let row0_cells = table.rows[0].cells.len();
+    if row0_cells <= 1 {
+        // Find the first row with ≥3 cells.
+        for (i, row) in table.rows.iter().enumerate().skip(1) {
+            if row.cells.len() >= 3 {
+                return i;
+            }
+        }
+    }
+
+    0
+}
+
 // ── AI Table Identification ──────────────────────────────────
 
 /// Structured response from the AI identifying the planning template table.
@@ -176,9 +257,11 @@ fn detect_transposed_schedule(table: &ParsedTable) -> Option<(Vec<(usize, String
         return None;
     }
 
+    let h_idx = effective_header_row(table);
+
     // Check if first column of data rows contains day names.
     let mut day_rows: Vec<(usize, String)> = Vec::new();
-    for (row_idx, row) in table.rows.iter().enumerate().skip(1) {
+    for (row_idx, row) in table.rows.iter().enumerate().skip(h_idx + 1) {
         if let Some(first_cell) = row.cells.first() {
             let text = first_cell.text.trim().to_lowercase();
             if DAY_NAMES.iter().any(|d| text.contains(d)) {
@@ -192,7 +275,7 @@ fn detect_transposed_schedule(table: &ParsedTable) -> Option<(Vec<(usize, String
     }
 
     // Check if header row (columns 1+) contains time-like values.
-    let headers = &table.rows[0].cells;
+    let headers = &table.rows[h_idx].cells;
     let time_cols: Vec<usize> = headers
         .iter()
         .enumerate()
@@ -315,8 +398,31 @@ pub async fn extract_template_with_ai(
     };
     let time_slots = extract_time_slots(selected);
     let content_patterns = extract_content_patterns(html, selected);
-    let recurring_elements = extract_recurring_elements(selected);
-    let daily_routine = extract_daily_routine(selected);
+
+    // For recurring elements and daily routine, use ALL schedule-grid tables
+    // (not just the selected one). When a document contains multiple weekly
+    // plans, each table represents a different week with the same recurring
+    // structure. Aggregating across all schedule tables produces more robust
+    // detection of truly recurring events.
+    let schedule_tables: Vec<&ParsedTable> = tables.iter()
+        .filter(|t| {
+            if t.rows.len() < 3 { return false; }
+            let h = effective_header_row(t);
+            let hdrs: Vec<String> = t.rows[h].cells.iter()
+                .map(|c| c.text.trim().to_lowercase()).collect();
+            detect_schedule_columns(&hdrs).is_some()
+        })
+        .collect();
+    let routine_tables: &[ParsedTable] = if schedule_tables.is_empty() {
+        selected
+    } else {
+        // Safety: we only read from these, and the tables slice outlives this scope.
+        // We need a contiguous slice, so we can't directly use Vec<&ParsedTable>.
+        // Instead, pass ALL tables and let the extraction functions filter internally.
+        &tables
+    };
+    let recurring_elements = extract_recurring_elements(routine_tables);
+    let daily_routine = extract_daily_routine(routine_tables);
 
     let schema = TeachingTemplateSchema {
         color_scheme,
@@ -348,8 +454,23 @@ pub fn extract_template(html: &str) -> TeachingTemplateSchema {
     let table_structure = extract_table_structure(selected);
     let time_slots = extract_time_slots(selected);
     let content_patterns = extract_content_patterns(html, selected);
-    let recurring_elements = extract_recurring_elements(selected);
-    let daily_routine = extract_daily_routine(selected);
+
+    // For recurring elements and daily routine, aggregate across ALL schedule-grid
+    // tables for better detection when the document contains multiple weekly plans.
+    let has_schedule_tables = tables.iter().any(|t| {
+        if t.rows.len() < 3 { return false; }
+        let h = effective_header_row(t);
+        let hdrs: Vec<String> = t.rows[h].cells.iter()
+            .map(|c| c.text.trim().to_lowercase()).collect();
+        detect_schedule_columns(&hdrs).is_some()
+    });
+    let routine_tables: &[ParsedTable] = if has_schedule_tables && tables.len() > 1 {
+        &tables
+    } else {
+        selected
+    };
+    let recurring_elements = extract_recurring_elements(routine_tables);
+    let daily_routine = extract_daily_routine(routine_tables);
 
     TeachingTemplateSchema {
         color_scheme,
@@ -508,7 +629,8 @@ fn score_planning_table(table: &ParsedTable) -> i32 {
         return 0;
     }
 
-    let headers: Vec<String> = table.rows[0]
+    let header_idx = effective_header_row(table);
+    let headers: Vec<String> = table.rows[header_idx]
         .cells
         .iter()
         .map(|c| c.text.trim().to_string())
@@ -531,13 +653,13 @@ fn score_planning_table(table: &ParsedTable) -> i32 {
     let time_rows = table
         .rows
         .iter()
-        .skip(1)
+        .skip(header_idx + 1)
         .filter(|r| r.cells.first().map_or(false, |c| is_time_like(c.text.trim())))
         .count();
     score += (time_rows as i32) * 5;
 
     // Reward: reasonable number of rows (2-30 rows typical for weekly plans).
-    let data_rows = table.rows.len().saturating_sub(1);
+    let data_rows = table.rows.len().saturating_sub(header_idx + 1);
     if (2..=30).contains(&data_rows) {
         score += 10;
     }
@@ -607,9 +729,10 @@ fn extract_table_structure(tables: &[ParsedTable]) -> TableStructure {
     // Log all scores so we can debug table selection issues.
     for (i, table) in tables.iter().enumerate() {
         let score = score_planning_table(table);
+        let h_idx = effective_header_row(table);
         let headers: Vec<String> = table
             .rows
-            .first()
+            .get(h_idx)
             .map(|r| r.cells.iter().map(|c| c.text.trim().to_string()).collect())
             .unwrap_or_default();
         info!(
@@ -617,6 +740,7 @@ fn extract_table_structure(tables: &[ParsedTable]) -> TableStructure {
             score = score,
             rows = table.rows.len(),
             cols = headers.len(),
+            header_row = h_idx,
             headers = headers.join(" | ").as_str(),
             "Heuristic table score"
         );
@@ -631,7 +755,8 @@ fn extract_table_structure(tables: &[ParsedTable]) -> TableStructure {
         return TableStructure::default();
     }
 
-    let headers: Vec<String> = main_table.rows[0]
+    let h_idx = effective_header_row(main_table);
+    let headers: Vec<String> = main_table.rows[h_idx]
         .cells
         .iter()
         .map(|c| c.text.trim().to_string())
@@ -654,7 +779,7 @@ fn extract_table_structure(tables: &[ParsedTable]) -> TableStructure {
         let has_time_rows = main_table
             .rows
             .iter()
-            .skip(1)
+            .skip(h_idx + 1)
             .any(|r| r.cells.first().map_or(false, |c| is_time_like(c.text.trim())));
         (
             Some("days_of_week".to_string()),
@@ -675,7 +800,7 @@ fn extract_table_structure(tables: &[ParsedTable]) -> TableStructure {
         let first_col_values: Vec<&str> = main_table
             .rows
             .iter()
-            .skip(1)
+            .skip(h_idx + 1)
             .filter_map(|r| r.cells.first().map(|c| c.text.trim()))
             .filter(|t| !t.is_empty())
             .collect();
@@ -692,7 +817,7 @@ fn extract_table_structure(tables: &[ParsedTable]) -> TableStructure {
     // Extract row categories from the first column of data rows.
     let mut row_categories = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for row in main_table.rows.iter().skip(1) {
+    for row in main_table.rows.iter().skip(h_idx + 1) {
         if let Some(first_cell) = row.cells.first() {
             let text = first_cell.text.trim().to_string();
             if !text.is_empty() && !is_time_like(&text) && seen.insert(text.clone()) {
@@ -703,9 +828,35 @@ fn extract_table_structure(tables: &[ParsedTable]) -> TableStructure {
 
     let column_count = headers.len();
 
+    // Clean up column names: for schedule grids, use canonical day names
+    // instead of raw header text (which may include "Monday 8:15-3:05 3/23 ...").
+    let clean_columns = if is_schedule {
+        if let Some((_tc, day_cols)) = detect_schedule_columns(&header_lower) {
+            let mut cols = Vec::with_capacity(column_count);
+            for (i, h) in headers.iter().enumerate() {
+                if let Some((_, day_name)) = day_cols.iter().find(|(ci, _)| *ci == i) {
+                    cols.push(day_name.clone());
+                } else {
+                    // First column (time/day) — keep a clean label.
+                    let lower = h.to_lowercase();
+                    if lower.contains("time") || lower.contains("day") {
+                        cols.push("Day/Time".to_string());
+                    } else {
+                        cols.push(h.clone());
+                    }
+                }
+            }
+            cols
+        } else {
+            headers
+        }
+    } else {
+        headers
+    };
+
     TableStructure {
         layout_type,
-        columns: headers,
+        columns: clean_columns,
         row_categories,
         column_count,
         column_semantic,
@@ -730,7 +881,8 @@ fn extract_table_structure_with_ai(
         return TableStructure::default();
     }
 
-    let headers: Vec<String> = main_table.rows[0]
+    let h_idx = effective_header_row(main_table);
+    let headers: Vec<String> = main_table.rows[h_idx]
         .cells
         .iter()
         .map(|c| c.text.trim().to_string())
@@ -739,7 +891,7 @@ fn extract_table_structure_with_ai(
     // Extract row categories from the first column of data rows.
     let mut row_categories = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for row in main_table.rows.iter().skip(1) {
+    for row in main_table.rows.iter().skip(h_idx + 1) {
         if let Some(first_cell) = row.cells.first() {
             let text = first_cell.text.trim().to_string();
             if !text.is_empty() && !is_time_like(&text) && seen.insert(text.clone()) {
@@ -773,7 +925,8 @@ fn extract_time_slots(tables: &[ParsedTable]) -> Vec<String> {
             continue;
         }
 
-        let headers: Vec<String> = table.rows[0]
+        let h_idx = effective_header_row(table);
+        let headers: Vec<String> = table.rows[h_idx]
             .cells
             .iter()
             .map(|c| c.text.trim().to_lowercase())
@@ -781,7 +934,7 @@ fn extract_time_slots(tables: &[ParsedTable]) -> Vec<String> {
 
         // Standard orientation: time slots in the first column of data rows.
         if let Some((time_col, _)) = detect_schedule_columns(&headers) {
-            for row in table.rows.iter().skip(1) {
+            for row in table.rows.iter().skip(h_idx + 1) {
                 if let Some(cell) = row.cells.get(time_col) {
                     let text = cell.text.trim().to_string();
                     if is_time_like(&text) && seen.insert(text.clone()) {
@@ -878,7 +1031,8 @@ fn extract_recurring_elements(tables: &[ParsedTable]) -> RecurringElements {
             continue;
         }
 
-        let headers: Vec<String> = table.rows[0]
+        let h_idx = effective_header_row(table);
+        let headers: Vec<String> = table.rows[h_idx]
             .cells
             .iter()
             .map(|c| c.text.trim().to_lowercase())
@@ -890,7 +1044,7 @@ fn extract_recurring_elements(tables: &[ParsedTable]) -> RecurringElements {
         if is_transposed {
             // Transposed: days in rows, time columns. Activity cells are at
             // row[day_row][time_col], skipping the first column (day label).
-            for row in table.rows.iter().skip(1) {
+            for row in table.rows.iter().skip(h_idx + 1) {
                 for (_i, cell) in row.cells.iter().enumerate().skip(1) {
                     let text = cell.text.trim().to_string();
                     if text.is_empty() || is_time_like(&text) {
@@ -910,7 +1064,7 @@ fn extract_recurring_elements(tables: &[ParsedTable]) -> RecurringElements {
             continue;
         }
 
-        for row in table.rows.iter().skip(1) {
+        for row in table.rows.iter().skip(h_idx + 1) {
             for (i, cell) in row.cells.iter().enumerate() {
                 let text = cell.text.trim().to_string();
                 if text.is_empty() || is_time_like(&text) {
@@ -977,7 +1131,8 @@ fn extract_daily_routine(tables: &[ParsedTable]) -> Vec<DailyRoutineEvent> {
             continue;
         }
 
-        let headers: Vec<String> = table.rows[0]
+        let h_idx = effective_header_row(table);
+        let headers: Vec<String> = table.rows[h_idx]
             .cells
             .iter()
             .map(|c| c.text.trim().to_lowercase())
@@ -994,7 +1149,7 @@ fn extract_daily_routine(tables: &[ParsedTable]) -> Vec<DailyRoutineEvent> {
             // that only appears Mon-Wed). Previously 60% missed events like these.
             let threshold = (num_days as f64 * 0.4).ceil() as usize;
 
-            for row in table.rows.iter().skip(1) {
+            for row in table.rows.iter().skip(h_idx + 1) {
                 let time_slot = row
                     .cells
                     .get(time_col)
@@ -1005,14 +1160,8 @@ fn extract_daily_routine(tables: &[ParsedTable]) -> Vec<DailyRoutineEvent> {
                 let mut activity_days: HashMap<String, (String, Vec<String>, Option<String>)> = HashMap::new();
                 for &(col_idx, ref day_label) in &day_col_pairs {
                     if let Some(cell) = row.cells.get(col_idx) {
-                        let activity = cell
-                            .text
-                            .lines()
-                            .next()
-                            .unwrap_or("")
-                            .trim()
-                            .to_string();
-                        if !activity.is_empty() && activity.len() < 60 {
+                        let activity = normalize_activity_name(&cell.text);
+                        if !activity.is_empty() {
                             let key = activity.to_lowercase();
                             let entry = activity_days
                                 .entry(key)
@@ -1057,7 +1206,7 @@ fn extract_daily_routine(tables: &[ParsedTable]) -> Vec<DailyRoutineEvent> {
             // For each time-slot column, check if the same activity appears
             // in ≥60% of day rows at that column.
             for &time_col_idx in &time_cols {
-                let time_slot = table.rows[0]
+                let time_slot = table.rows[h_idx]
                     .cells
                     .get(time_col_idx)
                     .map(|c| c.text.trim().to_string())
@@ -1068,14 +1217,8 @@ fn extract_daily_routine(tables: &[ParsedTable]) -> Vec<DailyRoutineEvent> {
                     if let Some(cell) =
                         table.rows.get(row_idx).and_then(|r| r.cells.get(time_col_idx))
                     {
-                        let activity = cell
-                            .text
-                            .lines()
-                            .next()
-                            .unwrap_or("")
-                            .trim()
-                            .to_string();
-                        if !activity.is_empty() && activity.len() < 60 {
+                        let activity = normalize_activity_name(&cell.text);
+                        if !activity.is_empty() {
                             let key = activity.to_lowercase();
                             let entry = activity_days
                                 .entry(key)
@@ -2544,4 +2687,124 @@ mod tests {
         assert!(all_colors.contains(&"#9900ff"),
             "Missing purple header color: {:?}", all_colors);
     }
+
+    #[test]
+    fn test_merged_title_row_schedule_detection() {
+        // Simulates Google Docs export where row 0 is a single merged title cell
+        // and row 1 contains the actual day column headers.
+        let html = r#"<html><body>
+            <table>
+                <tr><td colspan="6">Mrs. Cole's TK Schedule 2025-2026</td></tr>
+                <tr>
+                    <td>Day/Time LP 2022-2023</td>
+                    <td>Monday 8:15-3:05</td>
+                    <td>Tuesday 8:15-3:05</td>
+                    <td>Wednesday 8:15-3:05</td>
+                    <td>Thursday 8:15-3:05</td>
+                    <td>Friday 8:15-3:05</td>
+                </tr>
+                <tr><td>8:15-9:00</td><td>Breakfast</td><td>Breakfast</td><td>Breakfast</td><td>Breakfast</td><td>Breakfast</td></tr>
+                <tr><td>9:00-9:10</td><td>Morning Circle</td><td>Morning Circle</td><td>Morning Circle</td><td>Morning Circle</td><td>Morning Circle</td></tr>
+                <tr><td>9:10-9:30</td><td>Eureka Math</td><td>Mandarin</td><td>Music</td><td>Eureka Math</td><td>Centers</td></tr>
+                <tr><td>9:30-10:00</td><td>SEL</td><td>SEL</td><td>SEL</td><td>SEL</td><td>SEL</td></tr>
+                <tr><td>10:00-10:40</td><td>Snack/Recess</td><td>Snack/Recess</td><td>Snack/Recess</td><td>Snack/Recess</td><td>Snack/Recess</td></tr>
+                <tr><td>10:40-11:30</td><td>Centers</td><td>Centers</td><td>Centers</td><td>Centers</td><td>Centers</td></tr>
+                <tr><td>11:30-12:10</td><td>Lunch Prep</td><td>Lunch Prep</td><td>Lunch Prep</td><td>Lunch Prep</td><td>Lunch Prep</td></tr>
+                <tr><td>12:10-12:20</td><td>Breath</td><td>Breath</td><td>Breath</td><td>Breath</td><td>Breath</td></tr>
+                <tr><td>12:20-1:00</td><td>Rest Time</td><td>Rest Time</td><td>Rest Time</td><td>Rest Time</td><td>Rest Time</td></tr>
+                <tr><td>1:00-1:10</td><td>Handwriting</td><td>Handwriting</td><td>Handwriting</td><td>Handwriting</td><td>Handwriting</td></tr>
+                <tr><td>1:10-1:30</td><td>Read Aloud</td><td>Science</td><td>Read Aloud</td><td>Science</td><td>Read Aloud</td></tr>
+                <tr><td>1:30-1:50</td><td>Recess</td><td>Recess</td><td>Recess</td><td>Recess</td><td>Recess</td></tr>
+                <tr><td>1:50-2:20</td><td>Art</td><td>PE</td><td>Art</td><td>PE</td><td>Art</td></tr>
+                <tr><td>2:20-2:45</td><td>Pack Up</td><td>Pack Up</td><td>Pack Up</td><td>Pack Up</td><td>Pack Up</td></tr>
+                <tr><td>2:45-3:05</td><td>Dismissal</td><td>Dismissal</td><td>Dismissal</td><td>Dismissal</td><td>Dismissal</td></tr>
+                <tr><td>3:40-4:30</td><td>TK Mtg</td><td></td><td></td><td></td><td></td></tr>
+            </table>
+        </body></html>"#;
+
+        let template = extract_template(html);
+
+        // Should detect as schedule_grid despite merged title row.
+        assert_eq!(template.table_structure.layout_type, "schedule_grid",
+            "Should detect schedule grid. Got: {:?}", template.table_structure);
+
+        // Should use row 1 headers (6 columns, not 1).
+        assert_eq!(template.table_structure.column_count, 6,
+            "Should have 6 columns from row 1");
+
+        // Time slots should be extracted from rows 2+.
+        assert!(template.time_slots.len() >= 15,
+            "Expected 15+ time slots, got {}: {:?}",
+            template.time_slots.len(), template.time_slots);
+        assert!(template.time_slots.contains(&"8:15-9:00".to_string()));
+        assert!(template.time_slots.contains(&"9:00-9:10".to_string()));
+        assert!(template.time_slots.contains(&"2:45-3:05".to_string()));
+        assert!(template.time_slots.contains(&"3:40-4:30".to_string()));
+
+        // Daily routine events should be detected.
+        let routine_names: Vec<&str> = template.daily_routine.iter()
+            .map(|e| e.name.as_str()).collect();
+        assert!(routine_names.contains(&"Breakfast"),
+            "Missing Breakfast: {:?}", routine_names);
+        assert!(routine_names.contains(&"Morning Circle"),
+            "Missing Morning Circle: {:?}", routine_names);
+        assert!(routine_names.contains(&"Snack/Recess"),
+            "Missing Snack/Recess: {:?}", routine_names);
+        assert!(routine_names.contains(&"Rest Time"),
+            "Missing Rest Time: {:?}", routine_names);
+        assert!(routine_names.contains(&"Dismissal"),
+            "Missing Dismissal: {:?}", routine_names);
+        assert!(routine_names.contains(&"Recess"),
+            "Missing Recess: {:?}", routine_names);
+    }
+
+    #[test]
+    fn test_real_google_doc_schedule_extraction() {
+        // Integration test using the actual Google Doc HTML export.
+        let fixture_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/cole_schedule.html"
+        );
+        let html = match std::fs::read_to_string(fixture_path) {
+            Ok(h) => h,
+            Err(_) => {
+                eprintln!("Skipping test_real_google_doc_schedule_extraction: fixture not found at {}", fixture_path);
+                return;
+            }
+        };
+
+        let template = extract_template(&html);
+
+        // Must detect as schedule_grid.
+        assert_eq!(template.table_structure.layout_type, "schedule_grid",
+            "Should detect schedule grid from real HTML. Structure: {:?}", template.table_structure);
+
+        // Must have 6 columns (Day/Time + 5 days).
+        assert_eq!(template.table_structure.column_count, 6,
+            "Should have 6 columns. Got: {:?}", template.table_structure.columns);
+
+        // Must extract 15+ time slots (8:15-9:00 through 3:40-4:30).
+        assert!(template.time_slots.len() >= 15,
+            "Expected 15+ time slots, got {}: {:?}",
+            template.time_slots.len(), template.time_slots);
+
+        // Spot-check specific time slots.
+        assert!(template.time_slots.contains(&"8:15-9:00".to_string()),
+            "Missing 8:15-9:00: {:?}", template.time_slots);
+        assert!(template.time_slots.contains(&"9:00-9:10".to_string()),
+            "Missing 9:00-9:10: {:?}", template.time_slots);
+
+        // Must extract daily routine events.
+        assert!(!template.daily_routine.is_empty(),
+            "Daily routine should not be empty");
+        let routine_names: Vec<&str> = template.daily_routine.iter()
+            .map(|e| e.name.as_str()).collect();
+        eprintln!("Extracted {} daily routine events: {:?}", routine_names.len(), routine_names);
+        eprintln!("Extracted {} time slots: {:?}", template.time_slots.len(), template.time_slots);
+
+        // Color scheme is extracted from inline styles — Google Docs may use different
+        // styling patterns so we just log rather than require non-empty.
+        eprintln!("Color scheme mappings: {}", template.color_scheme.mappings.len());
+    }
+
 }
