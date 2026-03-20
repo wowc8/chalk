@@ -227,10 +227,30 @@
   font-size: 0.875rem;
 }
 
-/* When a cell has an inline background-color, let it override the default */
+/* When a cell has an inline background-color, let it override the default
+   and switch text to black for readability on colored backgrounds */
 .chalk-editor-content td[style*="background-color"],
 .chalk-editor-content th[style*="background-color"] {
   background: none;
+  color: #000000;
+}
+
+/* Allow inline color to override the black default when explicitly set */
+.chalk-editor-content td[style*="background-color"][style*="color:"],
+.chalk-editor-content th[style*="background-color"][style*="color:"] {
+  color: unset;
+}
+
+/* Ensure child elements inside colored cells also use dark text */
+.chalk-editor-content td[style*="background-color"] strong,
+.chalk-editor-content td[style*="background-color"] em,
+.chalk-editor-content td[style*="background-color"] a,
+.chalk-editor-content td[style*="background-color"] p,
+.chalk-editor-content th[style*="background-color"] strong,
+.chalk-editor-content th[style*="background-color"] em,
+.chalk-editor-content th[style*="background-color"] a,
+.chalk-editor-content th[style*="background-color"] p {
+  color: inherit;
 }
 
 .chalk-editor-content .selectedCell {

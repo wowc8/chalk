@@ -19,8 +19,22 @@ export const CustomTableCell = TableCell.extend({
           if (!attributes.backgroundColor) {
             return {};
           }
+          const color = attributes.textColor ? `; color: ${attributes.textColor}` : '';
           return {
-            style: `background-color: ${attributes.backgroundColor}`,
+            style: `background-color: ${attributes.backgroundColor}${color}`,
+          };
+        },
+      },
+      textColor: {
+        default: null,
+        parseHTML: (element: HTMLElement) => element.style.color || null,
+        renderHTML: (attributes: Record<string, unknown>) => {
+          // Rendered via backgroundColor's renderHTML to keep a single style attr
+          if (!attributes.textColor || attributes.backgroundColor) {
+            return {};
+          }
+          return {
+            style: `color: ${attributes.textColor}`,
           };
         },
       },
