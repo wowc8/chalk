@@ -88,6 +88,283 @@ impl Database {
         })
     }
 
+    // ── LTP Documents ──────────────────────────────────────────
+
+    /// Import an LTP document with duplicate detection via SHA-256 hash.
+    ///
+    /// If a document with the same filename exists and has the same hash,
+    /// the import is skipped. If the hash differs, the old parsed data is
+    /// deleted and the document is updated with the new content.
+    pub fn import_ltp_document(
+        &self,
+        filename: &str,
+        file_hash: &str,
+        school_year: Option<&str>,
+        doc_type: &str,
+        raw_html: &str,
+    ) -> Result<LtpImportResult> {
+        self.with_conn(|conn| {
+            // Check for existing document with same filename.
+            let existing: Option<(String, String)> = conn
+                .query_row(
+                    "SELECT id, file_hash FROM ltp_documents WHERE filename = ?1",
+                    params![filename],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .ok();
+
+            match existing {
+                Some((existing_id, existing_hash)) if existing_hash == file_hash => {
+                    // Same content — skip.
+                    Ok(LtpImportResult::Skipped {
+                        id: existing_id,
+                        filename: filename.to_string(),
+                    })
+                }
+                Some((existing_id, _)) => {
+                    // Different content — update document, cascade deletes old
+                    // grid_cells/calendar_entries via ON DELETE CASCADE.
+                    conn.execute(
+                        "DELETE FROM ltp_grid_cells WHERE document_id = ?1",
+                        params![existing_id],
+                    )?;
+                    conn.execute(
+                        "DELETE FROM school_calendar_entries WHERE document_id = ?1",
+                        params![existing_id],
+                    )?;
+                    conn.execute(
+                        "UPDATE ltp_documents SET file_hash = ?1, school_year = ?2, doc_type = ?3, raw_html = ?4, updated_at = datetime('now') WHERE id = ?5",
+                        params![file_hash, school_year, doc_type, raw_html, existing_id],
+                    )?;
+                    self.get_ltp_document_inner(conn, &existing_id)
+                        .map(LtpImportResult::Imported)
+                }
+                None => {
+                    // New document.
+                    let id = uuid::Uuid::new_v4().to_string();
+                    conn.execute(
+                        "INSERT INTO ltp_documents (id, filename, file_hash, school_year, doc_type, raw_html) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        params![id, filename, file_hash, school_year, doc_type, raw_html],
+                    )?;
+                    self.get_ltp_document_inner(conn, &id)
+                        .map(LtpImportResult::Imported)
+                }
+            }
+        })
+    }
+
+    pub fn get_ltp_document(&self, id: &str) -> Result<LtpDocument> {
+        self.with_conn(|conn| self.get_ltp_document_inner(conn, id))
+    }
+
+    fn get_ltp_document_inner(
+        &self,
+        conn: &rusqlite::Connection,
+        id: &str,
+    ) -> Result<LtpDocument> {
+        conn.query_row(
+            "SELECT id, filename, file_hash, school_year, doc_type, raw_html, imported_at, updated_at
+             FROM ltp_documents WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(LtpDocument {
+                    id: row.get(0)?,
+                    filename: row.get(1)?,
+                    file_hash: row.get(2)?,
+                    school_year: row.get(3)?,
+                    doc_type: row.get(4)?,
+                    raw_html: row.get(5)?,
+                    imported_at: row.get(6)?,
+                    updated_at: row.get(7)?,
+                })
+            },
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound,
+            other => DatabaseError::Sqlite(other),
+        })
+    }
+
+    pub fn list_ltp_documents(&self) -> Result<Vec<LtpDocument>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, filename, file_hash, school_year, doc_type, raw_html, imported_at, updated_at
+                 FROM ltp_documents ORDER BY imported_at DESC",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(LtpDocument {
+                    id: row.get(0)?,
+                    filename: row.get(1)?,
+                    file_hash: row.get(2)?,
+                    school_year: row.get(3)?,
+                    doc_type: row.get(4)?,
+                    raw_html: row.get(5)?,
+                    imported_at: row.get(6)?,
+                    updated_at: row.get(7)?,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    pub fn delete_ltp_document(&self, id: &str) -> Result<()> {
+        self.with_conn(|conn| {
+            let deleted =
+                conn.execute("DELETE FROM ltp_documents WHERE id = ?1", params![id])?;
+            if deleted == 0 {
+                return Err(DatabaseError::NotFound);
+            }
+            Ok(())
+        })
+    }
+
+    // ── LTP Grid Cells ──────────────────────────────────────────
+
+    pub fn insert_ltp_grid_cell(
+        &self,
+        document_id: &str,
+        row_index: i32,
+        col_index: i32,
+        subject: Option<&str>,
+        month: Option<&str>,
+        content_html: Option<&str>,
+        content_text: Option<&str>,
+        background_color: Option<&str>,
+        unit_name: Option<&str>,
+        unit_color: Option<&str>,
+    ) -> Result<LtpGridCell> {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO ltp_grid_cells (id, document_id, row_index, col_index, subject, month, content_html, content_text, background_color, unit_name, unit_color)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![id, document_id, row_index, col_index, subject, month, content_html, content_text, background_color, unit_name, unit_color],
+            )?;
+            conn.query_row(
+                "SELECT id, document_id, row_index, col_index, subject, month, content_html, content_text, background_color, unit_name, unit_color
+                 FROM ltp_grid_cells WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok(LtpGridCell {
+                        id: row.get(0)?,
+                        document_id: row.get(1)?,
+                        row_index: row.get(2)?,
+                        col_index: row.get(3)?,
+                        subject: row.get(4)?,
+                        month: row.get(5)?,
+                        content_html: row.get(6)?,
+                        content_text: row.get(7)?,
+                        background_color: row.get(8)?,
+                        unit_name: row.get(9)?,
+                        unit_color: row.get(10)?,
+                    })
+                },
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound,
+                other => DatabaseError::Sqlite(other),
+            })
+        })
+    }
+
+    pub fn list_ltp_grid_cells(&self, document_id: &str) -> Result<Vec<LtpGridCell>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, document_id, row_index, col_index, subject, month, content_html, content_text, background_color, unit_name, unit_color
+                 FROM ltp_grid_cells WHERE document_id = ?1
+                 ORDER BY row_index, col_index",
+            )?;
+            let rows = stmt.query_map(params![document_id], |row| {
+                Ok(LtpGridCell {
+                    id: row.get(0)?,
+                    document_id: row.get(1)?,
+                    row_index: row.get(2)?,
+                    col_index: row.get(3)?,
+                    subject: row.get(4)?,
+                    month: row.get(5)?,
+                    content_html: row.get(6)?,
+                    content_text: row.get(7)?,
+                    background_color: row.get(8)?,
+                    unit_name: row.get(9)?,
+                    unit_color: row.get(10)?,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    // ── School Calendar Entries ──────────────────────────────────
+
+    pub fn insert_school_calendar_entry(
+        &self,
+        document_id: &str,
+        date: Option<&str>,
+        day_number: Option<i32>,
+        unit_name: Option<&str>,
+        unit_color: Option<&str>,
+        is_holiday: bool,
+        holiday_name: Option<&str>,
+        notes: Option<&str>,
+    ) -> Result<SchoolCalendarEntry> {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO school_calendar_entries (id, document_id, date, day_number, unit_name, unit_color, is_holiday, holiday_name, notes)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![id, document_id, date, day_number, unit_name, unit_color, is_holiday as i32, holiday_name, notes],
+            )?;
+            conn.query_row(
+                "SELECT id, document_id, date, day_number, unit_name, unit_color, is_holiday, holiday_name, notes
+                 FROM school_calendar_entries WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok(SchoolCalendarEntry {
+                        id: row.get(0)?,
+                        document_id: row.get(1)?,
+                        date: row.get(2)?,
+                        day_number: row.get(3)?,
+                        unit_name: row.get(4)?,
+                        unit_color: row.get(5)?,
+                        is_holiday: row.get::<_, i32>(6)? != 0,
+                        holiday_name: row.get(7)?,
+                        notes: row.get(8)?,
+                    })
+                },
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound,
+                other => DatabaseError::Sqlite(other),
+            })
+        })
+    }
+
+    pub fn list_school_calendar_entries(
+        &self,
+        document_id: &str,
+    ) -> Result<Vec<SchoolCalendarEntry>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, document_id, date, day_number, unit_name, unit_color, is_holiday, holiday_name, notes
+                 FROM school_calendar_entries WHERE document_id = ?1
+                 ORDER BY date, day_number",
+            )?;
+            let rows = stmt.query_map(params![document_id], |row| {
+                Ok(SchoolCalendarEntry {
+                    id: row.get(0)?,
+                    document_id: row.get(1)?,
+                    date: row.get(2)?,
+                    day_number: row.get(3)?,
+                    unit_name: row.get(4)?,
+                    unit_color: row.get(5)?,
+                    is_holiday: row.get::<_, i32>(6)? != 0,
+                    holiday_name: row.get(7)?,
+                    notes: row.get(8)?,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
     // ── Lesson Plans ──────────────────────────────────────────
 
     pub fn create_lesson_plan(&self, input: &NewLessonPlan) -> Result<LessonPlan> {
@@ -1499,6 +1776,197 @@ mod tests {
     }
 
     // ── Teaching Template Tests ──────────────────────────────
+
+    // ── LTP Document Tests ────────────────────────────────────
+
+    #[test]
+    fn test_ltp_document_import_new() {
+        let db = test_db();
+
+        let result = db
+            .import_ltp_document("plan.html", "abc123hash", Some("2025-2026"), "ltp", "<html>content</html>")
+            .unwrap();
+
+        match result {
+            LtpImportResult::Imported(doc) => {
+                assert_eq!(doc.filename, "plan.html");
+                assert_eq!(doc.file_hash, "abc123hash");
+                assert_eq!(doc.school_year.as_deref(), Some("2025-2026"));
+                assert_eq!(doc.doc_type, "ltp");
+                assert_eq!(doc.raw_html, "<html>content</html>");
+            }
+            LtpImportResult::Skipped { .. } => panic!("Expected Imported, got Skipped"),
+        }
+    }
+
+    #[test]
+    fn test_ltp_document_import_skip_duplicate() {
+        let db = test_db();
+
+        // First import.
+        db.import_ltp_document("plan.html", "samehash", None, "ltp", "<html>content</html>")
+            .unwrap();
+
+        // Second import with same hash — should skip.
+        let result = db
+            .import_ltp_document("plan.html", "samehash", None, "ltp", "<html>content</html>")
+            .unwrap();
+
+        match result {
+            LtpImportResult::Skipped { filename, .. } => {
+                assert_eq!(filename, "plan.html");
+            }
+            LtpImportResult::Imported(_) => panic!("Expected Skipped, got Imported"),
+        }
+    }
+
+    #[test]
+    fn test_ltp_document_import_overwrite_different_hash() {
+        let db = test_db();
+
+        // First import.
+        let first = db
+            .import_ltp_document("plan.html", "hash1", None, "ltp", "<html>v1</html>")
+            .unwrap();
+        let first_id = match &first {
+            LtpImportResult::Imported(doc) => doc.id.clone(),
+            _ => panic!("Expected Imported"),
+        };
+
+        // Add a grid cell to the first document.
+        db.insert_ltp_grid_cell(&first_id, 0, 0, Some("Math"), Some("Sep"), None, None, None, None, None)
+            .unwrap();
+        assert_eq!(db.list_ltp_grid_cells(&first_id).unwrap().len(), 1);
+
+        // Second import with different hash — should overwrite.
+        let result = db
+            .import_ltp_document("plan.html", "hash2", None, "ltp", "<html>v2</html>")
+            .unwrap();
+
+        match result {
+            LtpImportResult::Imported(doc) => {
+                assert_eq!(doc.id, first_id); // Same document ID.
+                assert_eq!(doc.file_hash, "hash2");
+                assert_eq!(doc.raw_html, "<html>v2</html>");
+            }
+            _ => panic!("Expected Imported"),
+        }
+
+        // Grid cells should have been cleared.
+        assert_eq!(db.list_ltp_grid_cells(&first_id).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_ltp_document_list_and_delete() {
+        let db = test_db();
+
+        db.import_ltp_document("a.html", "h1", None, "ltp", "<html>a</html>")
+            .unwrap();
+        db.import_ltp_document("b.html", "h2", None, "calendar", "<html>b</html>")
+            .unwrap();
+
+        let docs = db.list_ltp_documents().unwrap();
+        assert_eq!(docs.len(), 2);
+
+        let id = docs[0].id.clone();
+        db.delete_ltp_document(&id).unwrap();
+        assert_eq!(db.list_ltp_documents().unwrap().len(), 1);
+
+        // Delete non-existent.
+        assert!(matches!(
+            db.delete_ltp_document("nonexistent"),
+            Err(DatabaseError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn test_ltp_grid_cell_crud() {
+        let db = test_db();
+
+        let doc = match db
+            .import_ltp_document("plan.html", "hash", None, "ltp", "<html></html>")
+            .unwrap()
+        {
+            LtpImportResult::Imported(d) => d,
+            _ => panic!("Expected Imported"),
+        };
+
+        let cell = db
+            .insert_ltp_grid_cell(
+                &doc.id, 0, 1, Some("Science"), Some("October"),
+                Some("<b>Cells</b>"), Some("Cells"), Some("#ff0000"),
+                Some("Unit 2"), Some("#00ff00"),
+            )
+            .unwrap();
+
+        assert_eq!(cell.document_id, doc.id);
+        assert_eq!(cell.row_index, 0);
+        assert_eq!(cell.col_index, 1);
+        assert_eq!(cell.subject.as_deref(), Some("Science"));
+        assert_eq!(cell.month.as_deref(), Some("October"));
+        assert_eq!(cell.unit_name.as_deref(), Some("Unit 2"));
+
+        let cells = db.list_ltp_grid_cells(&doc.id).unwrap();
+        assert_eq!(cells.len(), 1);
+
+        // Deleting the document should cascade-delete grid cells.
+        db.delete_ltp_document(&doc.id).unwrap();
+        let cells = db.list_ltp_grid_cells(&doc.id).unwrap();
+        assert_eq!(cells.len(), 0);
+    }
+
+    #[test]
+    fn test_school_calendar_entry_crud() {
+        let db = test_db();
+
+        let doc = match db
+            .import_ltp_document("cal.html", "hash", None, "calendar", "<html></html>")
+            .unwrap()
+        {
+            LtpImportResult::Imported(d) => d,
+            _ => panic!("Expected Imported"),
+        };
+
+        let entry = db
+            .insert_school_calendar_entry(
+                &doc.id,
+                Some("2025-09-01"),
+                Some(1),
+                Some("Unit 1"),
+                Some("#aabbcc"),
+                false,
+                None,
+                Some("First day"),
+            )
+            .unwrap();
+
+        assert_eq!(entry.document_id, doc.id);
+        assert_eq!(entry.date.as_deref(), Some("2025-09-01"));
+        assert_eq!(entry.day_number, Some(1));
+        assert!(!entry.is_holiday);
+        assert_eq!(entry.notes.as_deref(), Some("First day"));
+
+        // Holiday entry.
+        db.insert_school_calendar_entry(
+            &doc.id,
+            Some("2025-12-25"),
+            None,
+            None,
+            None,
+            true,
+            Some("Christmas"),
+            None,
+        )
+        .unwrap();
+
+        let entries = db.list_school_calendar_entries(&doc.id).unwrap();
+        assert_eq!(entries.len(), 2);
+
+        // Deleting the document should cascade-delete entries.
+        db.delete_ltp_document(&doc.id).unwrap();
+        let entries = db.list_school_calendar_entries(&doc.id).unwrap();
+        assert_eq!(entries.len(), 0);
+    }
 
     #[test]
     fn test_teaching_template_crud() {

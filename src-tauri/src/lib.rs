@@ -120,6 +120,110 @@ fn list_teaching_templates(
         .collect()
 }
 
+// ── LTP Document Tauri Commands ─────────────────────────────
+
+/// Import a Long-Term Plan HTML document with duplicate detection.
+///
+/// Reads the file, computes SHA-256 hash, and either imports or skips.
+#[tauri::command]
+fn import_ltp_document(
+    state: tauri::State<AppState>,
+    path: String,
+    school_year: Option<String>,
+    doc_type: Option<String>,
+) -> Result<serde_json::Value, String> {
+    use sha2::{Digest, Sha256};
+
+    let raw_html = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read file: {e}"))?;
+
+    if raw_html.is_empty() {
+        return Err("File is empty".into());
+    }
+
+    let filename = std::path::Path::new(&path)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("imported.html")
+        .to_string();
+
+    let file_hash = format!("{:x}", Sha256::digest(raw_html.as_bytes()));
+    let doc_type = doc_type.unwrap_or_else(|| "ltp".to_string());
+
+    let result = state
+        .db
+        .import_ltp_document(
+            &filename,
+            &file_hash,
+            school_year.as_deref(),
+            &doc_type,
+            &raw_html,
+        )
+        .map_err(|e| format!("{e}"))?;
+
+    match result {
+        database::LtpImportResult::Imported(doc) => {
+            tracing::info!(
+                filename = doc.filename.as_str(),
+                doc_type = doc.doc_type.as_str(),
+                "LTP document imported"
+            );
+            Ok(serde_json::json!({
+                "status": "imported",
+                "id": doc.id,
+                "filename": doc.filename,
+                "doc_type": doc.doc_type,
+                "school_year": doc.school_year,
+            }))
+        }
+        database::LtpImportResult::Skipped { id, filename } => {
+            tracing::info!(
+                filename = filename.as_str(),
+                "LTP document skipped (unchanged)"
+            );
+            Ok(serde_json::json!({
+                "status": "skipped",
+                "id": id,
+                "filename": filename,
+            }))
+        }
+    }
+}
+
+/// List all imported LTP documents.
+#[tauri::command]
+fn list_ltp_documents(
+    state: tauri::State<AppState>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let docs = state.db.list_ltp_documents().map_err(|e| format!("{e}"))?;
+    Ok(docs
+        .into_iter()
+        .map(|d| {
+            serde_json::json!({
+                "id": d.id,
+                "filename": d.filename,
+                "file_hash": d.file_hash,
+                "school_year": d.school_year,
+                "doc_type": d.doc_type,
+                "imported_at": d.imported_at,
+                "updated_at": d.updated_at,
+            })
+        })
+        .collect())
+}
+
+/// Delete an imported LTP document and its associated grid cells/calendar entries.
+#[tauri::command]
+fn delete_ltp_document(
+    state: tauri::State<AppState>,
+    id: String,
+) -> Result<(), String> {
+    state
+        .db
+        .delete_ltp_document(&id)
+        .map_err(|e| format!("{e}"))
+}
+
 // ── HTML File Import ────────────────────────────────────────
 
 /// Import a local HTML file and extract a teaching template from it.
@@ -467,6 +571,9 @@ pub fn run() {
             is_feature_enabled,
             set_feature_flag,
             toggle_feature_flag,
+            import_ltp_document,
+            list_ltp_documents,
+            delete_ltp_document,
             get_active_teaching_template,
             list_teaching_templates,
             import_html_file,
