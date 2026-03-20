@@ -127,6 +127,37 @@ export function CurriculumPage() {
     }
   }
 
+  async function handleImportUrl(url: string) {
+    setImporting(true);
+    try {
+      const result = await invoke<ImportResult>("import_ltp_from_url", {
+        url,
+      });
+
+      if (result.status === "imported") {
+        addToast(
+          `Imported "${result.filename}" — ${result.cells_parsed ?? 0} cells parsed`,
+          "success",
+        );
+      } else {
+        addToast(
+          `"${result.filename}" is unchanged (skipped)`,
+          "info",
+        );
+      }
+
+      await loadDocuments();
+      const docs = await invoke<LtpDocument[]>("list_ltp_documents");
+      const imported = docs.find((d) => d.id === result.id);
+      if (imported) setSelectedDoc(imported);
+      setShowImportZone(false);
+    } catch (e) {
+      addToast(`Import failed: ${e}`, "error");
+    } finally {
+      setImporting(false);
+    }
+  }
+
   // Show import zone when no documents exist
   const showEmpty = !loading && documents.length === 0 && !showImportZone;
 
@@ -231,7 +262,7 @@ export function CurriculumPage() {
               exit={{ opacity: 0, y: -8 }}
               className="flex items-center justify-center h-full"
             >
-              <ImportDropZone onImport={handleImportFile} importing={importing} />
+              <ImportDropZone onImport={handleImportFile} onImportUrl={handleImportUrl} importing={importing} />
             </motion.div>
           )}
 
@@ -252,7 +283,7 @@ export function CurriculumPage() {
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                   </svg>
                 </button>
-                <ImportDropZone onImport={handleImportFile} importing={importing} />
+                <ImportDropZone onImport={handleImportFile} onImportUrl={handleImportUrl} importing={importing} />
               </div>
             </motion.div>
           )}
