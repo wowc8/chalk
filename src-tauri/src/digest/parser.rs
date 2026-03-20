@@ -19,7 +19,7 @@ pub struct TableRow {
 }
 
 /// A single cell in a table row, with both plain text and inner HTML.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TableCell {
     /// Plain-text content (whitespace-collapsed), used for header matching
     /// and structural detection.
@@ -27,6 +27,8 @@ pub struct TableCell {
     /// Inner HTML of the cell, preserving formatting such as bold, italic,
     /// colors, lists, and hyperlinks.
     pub html: String,
+    /// Background color extracted from the cell's inline style attribute.
+    pub bg_color: Option<String>,
 }
 
 /// Extract all tables from an HTML document exported by Google Drive.
@@ -81,7 +83,9 @@ pub fn extract_tables(html: &str) -> Vec<ParsedTable> {
                 .map(|cell| {
                     let text = cell_text(&cell);
                     let html = cell_inner_html(&cell);
-                    TableCell { text, html }
+                    let bg_color = cell.value().attr("style")
+                        .and_then(extract_bg_color_from_style);
+                    TableCell { text, html, bg_color }
                 })
                 .collect();
 
@@ -96,6 +100,29 @@ pub fn extract_tables(html: &str) -> Vec<ParsedTable> {
     }
 
     tables
+}
+
+/// Extract a background-color value from a CSS style string.
+fn extract_bg_color_from_style(style: &str) -> Option<String> {
+    let lower = style.to_lowercase();
+    for prefix in &["background-color:", "background:"] {
+        if let Some(pos) = lower.find(prefix) {
+            let after = &lower[pos + prefix.len()..];
+            let color = after
+                .trim()
+                .split(';')
+                .next()?
+                .split_whitespace()
+                .next()?
+                .trim()
+                .to_string();
+            if color == "transparent" || color == "inherit" || color == "none" || color == "initial" {
+                return None;
+            }
+            return Some(color);
+        }
+    }
+    None
 }
 
 /// Block-level element names that should introduce whitespace boundaries.

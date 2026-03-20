@@ -468,12 +468,14 @@ fn format_template_instructions(template_json: &str) -> String {
 
     // ── HTML Skeleton Example ──
     if ts.layout_type == "schedule_grid" && !schema.time_slots.is_empty() && !ts.columns.is_empty() {
-        // Build a lookup: time_slot string → routine event name, so the skeleton
-        // can pre-fill recurring events instead of showing generic placeholders.
-        let routine_by_slot: std::collections::HashMap<&str, &str> = schema
+        // Build a lookup: time_slot string → (routine event name, bg_color), so the
+        // skeleton can pre-fill recurring events with their correct cell colors.
+        let routine_by_slot: std::collections::HashMap<&str, (&str, Option<&str>)> = schema
             .daily_routine
             .iter()
-            .filter_map(|ev| ev.time_slot.as_deref().map(|ts| (ts, ev.name.as_str())))
+            .filter_map(|ev| ev.time_slot.as_deref().map(|ts| {
+                (ts, (ev.name.as_str(), ev.bg_color.as_deref()))
+            }))
             .collect();
 
         instructions.push_str("### HTML Output Format\n");
@@ -487,11 +489,6 @@ fn format_template_instructions(template_json: &str) -> String {
             .find(|m| m.category == "header")
             .map(|m| format!(" style=\"background-color: {}\"", m.color))
             .unwrap_or_default();
-        let activity_style = cs.mappings.iter()
-            .find(|m| m.category == "activity")
-            .map(|m| format!(" style=\"background-color: {}\"", m.color))
-            .unwrap_or_default();
-
         if is_transposed {
             // Transposed: first header is "Day", remaining headers are time slots.
             let first_col_label = ts.columns.first().map(|s| s.as_str()).unwrap_or("Day");
@@ -506,18 +503,21 @@ fn format_template_instructions(template_json: &str) -> String {
             instructions.push_str("  <tr>\n");
             instructions.push_str(&format!("    <td{header_style}>Monday</td>\n"));
             for slot in &schema.time_slots {
-                if let Some(routine_name) = routine_by_slot.get(slot.as_str()) {
+                if let Some((routine_name, bg)) = routine_by_slot.get(slot.as_str()) {
+                    let cell_style = bg
+                        .map(|c| format!(" style=\"background-color: {}\"", c))
+                        .unwrap_or_default();
                     instructions.push_str(&format!(
-                        "    <td{activity_style}>\
+                        "    <td{cell_style}>\
                          <strong>{routine_name}</strong>\
                          </td>\n"
                     ));
                 } else {
-                    instructions.push_str(&format!(
-                        "    <td{activity_style}>\
+                    instructions.push_str(
+                        "    <td>\
                          <strong>Activity Name</strong><br/>Specific details...\
                          </td>\n"
-                    ));
+                    );
                 }
             }
             instructions.push_str("  </tr>\n");
@@ -533,22 +533,26 @@ fn format_template_instructions(template_json: &str) -> String {
             for slot in &schema.time_slots {
                 instructions.push_str("  <tr>\n");
                 instructions.push_str(&format!("    <td>{slot}</td>\n"));
-                if let Some(routine_name) = routine_by_slot.get(slot.as_str()) {
+                if let Some((routine_name, bg)) = routine_by_slot.get(slot.as_str()) {
                     // This time slot has a recurring event — fill all day columns with it.
+                    // Use the event's actual bg_color if known; otherwise no background.
+                    let cell_style = bg
+                        .map(|c| format!(" style=\"background-color: {}\"", c))
+                        .unwrap_or_default();
                     for _ in 1..ts.columns.len() {
                         instructions.push_str(&format!(
-                            "    <td{activity_style}>\
+                            "    <td{cell_style}>\
                              <strong>{routine_name}</strong>\
                              </td>\n"
                         ));
                     }
                 } else {
                     for _ in 1..ts.columns.len() {
-                        instructions.push_str(&format!(
-                            "    <td{activity_style}>\
+                        instructions.push_str(
+                            "    <td>\
                              <strong>Activity Name</strong><br/>Specific details...\
                              </td>\n"
-                        ));
+                        );
                     }
                 }
                 instructions.push_str("  </tr>\n");
@@ -1723,5 +1727,138 @@ mod tests {
         db.delete_conversation(&conv.id).unwrap();
         let messages = db.get_chat_messages(&conv.id).unwrap();
         assert_eq!(messages.len(), 0);
+    }
+
+    /// End-to-end pipeline test: extract_template → JSON → format_template_instructions.
+    /// Verifies the AI prompt for a realistic 17-slot TK schedule contains ALL time slots,
+    /// ALL routine events, ALL colors, and the complete HTML skeleton.
+    #[test]
+    fn test_e2e_tk_schedule_extraction_to_ai_prompt() {
+        use crate::digest::template_extractor::extract_template;
+
+        // ── Realistic 17-slot TK daily schedule (Mrs. Coles style) ──
+        let html = r#"<html><body>
+            <table>
+                <tr>
+                    <th style="background-color:#9900ff">Day/Time</th>
+                    <th style="background-color:#9900ff">Monday</th>
+                    <th style="background-color:#9900ff">Tuesday</th>
+                    <th style="background-color:#9900ff">Wednesday</th>
+                    <th style="background-color:#9900ff">Thursday</th>
+                    <th style="background-color:#9900ff">Friday</th>
+                </tr>
+                <tr><td>8:15 AM-8:30 AM</td><td style="background-color:#ffff00">Soft Start Breakfast</td><td style="background-color:#ffff00">Soft Start Breakfast</td><td style="background-color:#ffff00">Soft Start Breakfast</td><td style="background-color:#ffff00">Soft Start Breakfast</td><td style="background-color:#ffff00">Soft Start Breakfast</td></tr>
+                <tr><td>8:30 AM-9:00 AM</td><td>Morning Circle</td><td>Morning Circle</td><td>Morning Circle</td><td>Morning Circle</td><td>Morning Circle</td></tr>
+                <tr><td>9:00 AM-9:10 AM</td><td style="background-color:#d9ead3">Snack/Recess</td><td style="background-color:#d9ead3">Snack/Recess</td><td style="background-color:#d9ead3">Snack/Recess</td><td style="background-color:#d9ead3">Snack/Recess</td><td style="background-color:#d9ead3">Snack/Recess</td></tr>
+                <tr><td>9:10 AM-9:30 AM</td><td>Calendar Math</td><td>Calendar Math</td><td>Calendar Math</td><td>Calendar Math</td><td>Calendar Math</td></tr>
+                <tr><td>9:30 AM-10:00 AM</td><td>ELA Mini Lesson</td><td>ELA Mini Lesson</td><td>ELA Mini Lesson</td><td>ELA Mini Lesson</td><td>ELA Mini Lesson</td></tr>
+                <tr><td>10:00 AM-10:30 AM</td><td>Centers/Small Group</td><td>Centers/Small Group</td><td>Centers/Small Group</td><td>Centers/Small Group</td><td>Centers/Small Group</td></tr>
+                <tr><td>10:30 AM-11:00 AM</td><td>Math Lesson</td><td>Math Lesson</td><td>Math Lesson</td><td>Math Lesson</td><td>Math Lesson</td></tr>
+                <tr><td>11:00 AM-11:15 AM</td><td style="background-color:#d9ead3">Recess</td><td style="background-color:#d9ead3">Recess</td><td style="background-color:#d9ead3">Recess</td><td style="background-color:#d9ead3">Recess</td><td style="background-color:#d9ead3">Recess</td></tr>
+                <tr><td>11:15 AM-11:30 AM</td><td>Lunch Prep</td><td>Lunch Prep</td><td>Lunch Prep</td><td>Lunch Prep</td><td>Lunch Prep</td></tr>
+                <tr><td>11:30 AM-12:00 PM</td><td style="background-color:#fce5cd">TK Lunch</td><td style="background-color:#fce5cd">TK Lunch</td><td style="background-color:#fce5cd">TK Lunch</td><td style="background-color:#fce5cd">TK Lunch</td><td style="background-color:#fce5cd">TK Lunch</td></tr>
+                <tr><td>12:00 PM-12:45 PM</td><td>Rest Time</td><td>Rest Time</td><td>Rest Time</td><td>Rest Time</td><td>Rest Time</td></tr>
+                <tr><td>12:45 PM-1:15 PM</td><td>Science/Social Studies</td><td>Science/Social Studies</td><td>Science/Social Studies</td><td>Science/Social Studies</td><td>Science/Social Studies</td></tr>
+                <tr><td>1:15 PM-1:45 PM</td><td>Mandarin</td><td>PE</td><td>Mandarin</td><td>Art</td><td>Music</td></tr>
+                <tr><td>1:45 PM-2:00 PM</td><td style="background-color:#d9ead3">Recess</td><td style="background-color:#d9ead3">Recess</td><td style="background-color:#d9ead3">Recess</td><td style="background-color:#d9ead3">Recess</td><td style="background-color:#d9ead3">Recess</td></tr>
+                <tr><td>2:00 PM-2:30 PM</td><td>Read Aloud/Art</td><td>Read Aloud/Art</td><td>Read Aloud/Art</td><td>Read Aloud/Art</td><td>Read Aloud/Art</td></tr>
+                <tr><td>2:30 PM-2:40 PM</td><td>Pack Up</td><td>Pack Up</td><td>Pack Up</td><td>Pack Up</td><td>Pack Up</td></tr>
+                <tr><td>2:40 PM-3:00 PM</td><td style="background-color:#c9daf8">Dismissal</td><td style="background-color:#c9daf8">Dismissal</td><td style="background-color:#c9daf8">Dismissal</td><td style="background-color:#c9daf8">Dismissal</td><td style="background-color:#c9daf8">Dismissal</td></tr>
+            </table>
+        </body></html>"#;
+
+        // ── Step 1: Extract template from HTML ──
+        let template = extract_template(html);
+
+        // Verify extraction basics.
+        assert_eq!(template.table_structure.layout_type, "schedule_grid");
+        assert_eq!(template.table_structure.column_count, 6);
+        assert_eq!(template.time_slots.len(), 17,
+            "Expected 17 time slots, got {}: {:?}", template.time_slots.len(), template.time_slots);
+
+        // ── Step 2: Serialize to JSON (same as what gets stored in DB) ──
+        let template_json = serde_json::to_string(&template).unwrap();
+
+        // ── Step 3: Generate AI prompt instructions ──
+        let prompt = format_template_instructions(&template_json);
+
+        // ── Step 4: Verify ALL 17 time slots appear in the prompt ──
+        let expected_slots = [
+            "8:15 AM-8:30 AM",
+            "8:30 AM-9:00 AM",
+            "9:00 AM-9:10 AM",
+            "9:10 AM-9:30 AM",
+            "9:30 AM-10:00 AM",
+            "10:00 AM-10:30 AM",
+            "10:30 AM-11:00 AM",
+            "11:00 AM-11:15 AM",
+            "11:15 AM-11:30 AM",
+            "11:30 AM-12:00 PM",
+            "12:00 PM-12:45 PM",
+            "12:45 PM-1:15 PM",
+            "1:15 PM-1:45 PM",
+            "1:45 PM-2:00 PM",
+            "2:00 PM-2:30 PM",
+            "2:30 PM-2:40 PM",
+            "2:40 PM-3:00 PM",
+        ];
+        for slot in &expected_slots {
+            assert!(prompt.contains(slot),
+                "AI prompt missing time slot '{}'. Full prompt:\n{}", slot, prompt);
+        }
+
+        // ── Step 5: Verify routine events appear in the prompt ──
+        let expected_routine = [
+            "Soft Start Breakfast",
+            "Snack/Recess",
+            "Recess",
+            "TK Lunch",
+            "Rest Time",
+            "Dismissal",
+            "Morning Circle",
+            "Calendar Math",
+        ];
+        for event in &expected_routine {
+            assert!(prompt.contains(event),
+                "AI prompt missing routine event '{}'. Full prompt:\n{}", event, prompt);
+        }
+
+        // ── Step 6: Verify the HTML skeleton has all 17 rows ──
+        // Count <tr> in the skeleton — should have 1 header + 17 data rows = 18 total.
+        let skeleton_trs = prompt.matches("<tr>").count();
+        // The skeleton should show header row + one row per time slot.
+        assert!(skeleton_trs >= 18,
+            "Skeleton should have ≥18 <tr> tags (1 header + 17 slots), got {}. Prompt:\n{}", skeleton_trs, prompt);
+
+        // ── Step 7: Verify skeleton pre-fills routine events ──
+        assert!(prompt.contains("<strong>Soft Start Breakfast</strong>"),
+            "Skeleton should pre-fill Soft Start Breakfast");
+        assert!(prompt.contains("<strong>TK Lunch</strong>"),
+            "Skeleton should pre-fill TK Lunch");
+        assert!(prompt.contains("<strong>Dismissal</strong>"),
+            "Skeleton should pre-fill Dismissal");
+
+        // Both Recess events should appear in Daily Routine Events section.
+        let recess_count = prompt.matches("**Recess** at").count();
+        assert_eq!(recess_count, 2,
+            "Should have 2 Recess entries (11:00 AM and 1:45 PM) in Daily Routine Events");
+
+        // ── Step 8: Verify color scheme in prompt ──
+        assert!(prompt.contains("#9900ff"), "Prompt missing purple header color #9900ff");
+        assert!(prompt.contains("background-color"), "Prompt should mention background-color styling");
+
+        // ── Step 9: Verify critical instructions are present ──
+        assert!(prompt.contains("DO NOT SHORTEN THE SCHEDULE"),
+            "Missing critical 'do not shorten' instruction");
+        assert!(prompt.contains("17 time slot rows"),
+            "Should mention exactly 17 time slot rows. Prompt:\n{}", prompt);
+        assert!(prompt.contains("RECURRING EVENTS ARE MANDATORY"),
+            "Missing mandatory recurring events reminder");
+        assert!(prompt.contains("TEXT CONTRAST"),
+            "Missing text contrast instruction");
+
+        // ── Step 10: Verify the prompt does NOT contain truncation ──
+        assert!(!prompt.contains("continue for all"),
+            "Prompt should NOT truncate the skeleton");
     }
 }

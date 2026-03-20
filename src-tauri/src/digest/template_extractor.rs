@@ -891,7 +891,7 @@ fn extract_recurring_elements(tables: &[ParsedTable]) -> RecurringElements {
             // Transposed: days in rows, time columns. Activity cells are at
             // row[day_row][time_col], skipping the first column (day label).
             for row in table.rows.iter().skip(1) {
-                for (i, cell) in row.cells.iter().enumerate().skip(1) {
+                for (_i, cell) in row.cells.iter().enumerate().skip(1) {
                     let text = cell.text.trim().to_string();
                     if text.is_empty() || is_time_like(&text) {
                         continue;
@@ -1001,7 +1001,8 @@ fn extract_daily_routine(tables: &[ParsedTable]) -> Vec<DailyRoutineEvent> {
                     .map(|c| c.text.trim().to_string())
                     .filter(|t| is_time_like(t));
 
-                let mut activity_days: HashMap<String, (String, Vec<String>)> = HashMap::new();
+                // Map: lowercase activity → (display_name, days, bg_color)
+                let mut activity_days: HashMap<String, (String, Vec<String>, Option<String>)> = HashMap::new();
                 for &(col_idx, ref day_label) in &day_col_pairs {
                     if let Some(cell) = row.cells.get(col_idx) {
                         let activity = cell
@@ -1015,20 +1016,27 @@ fn extract_daily_routine(tables: &[ParsedTable]) -> Vec<DailyRoutineEvent> {
                             let key = activity.to_lowercase();
                             let entry = activity_days
                                 .entry(key)
-                                .or_insert_with(|| (activity.clone(), Vec::new()));
+                                .or_insert_with(|| (activity.clone(), Vec::new(), cell.bg_color.clone()));
                             entry.1.push(day_label.clone());
                         }
                     }
                 }
 
-                for (_key, (display_name, days)) in &activity_days {
+                for (_key, (display_name, days, bg_color)) in &activity_days {
                     if days.len() >= threshold {
-                        let dedup_key = display_name.to_lowercase();
+                        // Dedup by name+time_slot so the same activity at different times
+                        // is captured separately (e.g. "Recess" at 11:00 AM and 1:45 PM).
+                        let dedup_key = format!(
+                            "{}@{}",
+                            display_name.to_lowercase(),
+                            time_slot.as_deref().unwrap_or("")
+                        );
                         if seen_keys.insert(dedup_key) {
                             routine_events.push(DailyRoutineEvent {
                                 name: display_name.clone(),
                                 time_slot: time_slot.clone(),
                                 days: days.clone(),
+                                bg_color: bg_color.clone(),
                             });
                         }
                     }
@@ -1055,7 +1063,7 @@ fn extract_daily_routine(tables: &[ParsedTable]) -> Vec<DailyRoutineEvent> {
                     .map(|c| c.text.trim().to_string())
                     .filter(|t| is_time_like(t));
 
-                let mut activity_days: HashMap<String, (String, Vec<String>)> = HashMap::new();
+                let mut activity_days: HashMap<String, (String, Vec<String>, Option<String>)> = HashMap::new();
                 for &(row_idx, ref day_label) in &day_row_pairs {
                     if let Some(cell) =
                         table.rows.get(row_idx).and_then(|r| r.cells.get(time_col_idx))
@@ -1071,20 +1079,25 @@ fn extract_daily_routine(tables: &[ParsedTable]) -> Vec<DailyRoutineEvent> {
                             let key = activity.to_lowercase();
                             let entry = activity_days
                                 .entry(key)
-                                .or_insert_with(|| (activity.clone(), Vec::new()));
+                                .or_insert_with(|| (activity.clone(), Vec::new(), cell.bg_color.clone()));
                             entry.1.push(day_label.clone());
                         }
                     }
                 }
 
-                for (_key, (display_name, days)) in &activity_days {
+                for (_key, (display_name, days, bg_color)) in &activity_days {
                     if days.len() >= threshold {
-                        let dedup_key = display_name.to_lowercase();
+                        let dedup_key = format!(
+                            "{}@{}",
+                            display_name.to_lowercase(),
+                            time_slot.as_deref().unwrap_or("")
+                        );
                         if seen_keys.insert(dedup_key) {
                             routine_events.push(DailyRoutineEvent {
                                 name: display_name.clone(),
                                 time_slot: time_slot.clone(),
                                 days: days.clone(),
+                                bg_color: bg_color.clone(),
                             });
                         }
                     }
@@ -1336,6 +1349,7 @@ mod tests {
                 name: "Lunch".to_string(),
                 time_slot: Some("12:00-12:30".to_string()),
                 days: vec!["Monday".to_string(), "Tuesday".to_string(), "Wednesday".to_string(), "Thursday".to_string(), "Friday".to_string()],
+                bg_color: None,
             }],
         };
 
@@ -1567,9 +1581,18 @@ mod tests {
         assert!(routine_names.contains(&"Pack Up"), "Missing Pack Up: {:?}", routine_names);
         assert!(routine_names.contains(&"Dismissal"), "Missing Dismissal: {:?}", routine_names);
 
-        // Recess appears at two different times — should appear once (deduplicated by name).
+        // Recess appears at two different times — both should be captured as separate events
+        // since they represent distinct time slots in the daily routine.
         let recess_count = template.daily_routine.iter().filter(|e| e.name == "Recess").count();
-        assert_eq!(recess_count, 1, "Recess should be deduplicated to 1 entry");
+        assert_eq!(recess_count, 2, "Recess at two different time slots should produce 2 entries");
+        let recess_times: Vec<&Option<String>> = template.daily_routine.iter()
+            .filter(|e| e.name == "Recess")
+            .map(|e| &e.time_slot)
+            .collect();
+        assert!(recess_times.contains(&&Some("10:00-10:15".to_string())),
+            "Missing Recess at 10:00-10:15: {:?}", recess_times);
+        assert!(recess_times.contains(&&Some("12:15-12:30".to_string())),
+            "Missing Recess at 12:15-12:30: {:?}", recess_times);
 
         // Academic subjects appearing in ≥40% of days are also detected as recurring.
         // Math Workshop appears 4/5 = 80%, Reading Block 5/5 = 100%, Writing 5/5 = 100%.

@@ -178,6 +178,10 @@ pub struct DailyRoutineEvent {
     /// Which days of the week this event occurs on (e.g., ["Monday", "Tuesday", "Wednesday"]).
     #[serde(default)]
     pub days: Vec<String>,
+    /// Background color associated with this event's cells (e.g., "#ffff00").
+    /// Extracted from the most common cell background-color at this time slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bg_color: Option<String>,
 }
 
 // ── Tags ─────────────────────────────────────────────────────
