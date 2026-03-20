@@ -7,7 +7,9 @@ pub mod provider;
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
-use crate::database::{Database, TeachingTemplateSchema};
+use crate::database::{
+    CalendarException, Database, EventOccurrence, RecurringEvent, TeachingTemplateSchema,
+};
 use crate::errors::ChalkError;
 use crate::events;
 use crate::rag::embeddings::EmbeddingClient;
@@ -282,6 +284,230 @@ fn get_template_json(db: &Database) -> Option<String> {
         Ok(template) => Some(template.template_json),
         Err(_) => None,
     }
+}
+
+// ── Schedule Intelligence ────────────────────────────────────
+
+/// All the schedule data needed to build schedule-aware prompts.
+struct ScheduleContext {
+    /// Each recurring event paired with its time occurrences.
+    events: Vec<(RecurringEvent, Vec<EventOccurrence>)>,
+    /// Calendar exceptions (holidays, half days) for the target week.
+    exceptions: Vec<CalendarException>,
+}
+
+/// Day-of-week index (0 = Monday … 4 = Friday) to name.
+fn day_name(dow: i32) -> &'static str {
+    match dow {
+        0 => "MONDAY",
+        1 => "TUESDAY",
+        2 => "WEDNESDAY",
+        3 => "THURSDAY",
+        4 => "FRIDAY",
+        _ => "UNKNOWN",
+    }
+}
+
+/// Fetch schedule context for the week containing `date_str` (YYYY-MM-DD).
+fn get_schedule_context(db: &Database, date_str: &str) -> Option<ScheduleContext> {
+    use chrono::Datelike;
+    let events = db.list_events_with_occurrences().ok()?;
+    if events.is_empty() {
+        return None;
+    }
+
+    // Compute the Monday–Friday range for the week containing date_str.
+    let date = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d").ok()?;
+    let weekday = date.weekday().num_days_from_monday(); // Mon=0
+    let monday = date - chrono::Duration::days(weekday as i64);
+    let friday = monday + chrono::Duration::days(4);
+    let mon_str = monday.format("%Y-%m-%d").to_string();
+    let fri_str = friday.format("%Y-%m-%d").to_string();
+
+    let exceptions = db
+        .get_school_calendar()
+        .ok()
+        .and_then(|cal| {
+            db.list_calendar_exceptions_in_range(&cal.id, &mon_str, &fri_str)
+                .ok()
+        })
+        .unwrap_or_default();
+
+    Some(ScheduleContext { events, exceptions })
+}
+
+/// Format the schedule context into AI prompt instructions.
+///
+/// Produces a per-day schedule block that tells the AI exactly which events
+/// are fixed, which are teaching slots, and where specials fall.
+fn format_schedule_instructions(ctx: &ScheduleContext) -> String {
+    use std::collections::HashMap;
+
+    let mut out = String::new();
+    out.push_str("\n\n## Weekly Schedule — FOLLOW THIS EXACTLY\n\n");
+    out.push_str(
+        "The teacher's recurring weekly schedule is listed below, day by day. \
+         Events marked [FIXED] should be reproduced as-is. Events marked [TEACHING SLOT] \
+         are where you generate lesson content. Events marked [SPECIAL] are day-specific \
+         activities (PE, Art, Music, etc.) — reproduce as-is.\n\n",
+    );
+
+    // Build a name→RecurringEvent lookup for relationship resolution.
+    let event_by_id: HashMap<&str, &RecurringEvent> = ctx
+        .events
+        .iter()
+        .map(|(ev, _)| (ev.id.as_str(), ev))
+        .collect();
+
+    // Build per-day list: day_of_week → Vec<(start, end, event)>
+    let mut day_events: HashMap<i32, Vec<(&str, &str, &RecurringEvent)>> = HashMap::new();
+    for (ev, occs) in &ctx.events {
+        for occ in occs {
+            day_events
+                .entry(occ.day_of_week)
+                .or_default()
+                .push((&occ.start_time, &occ.end_time, ev));
+        }
+    }
+
+    // Build exception lookup: day_of_week (0-4) → CalendarException
+    use chrono::Datelike;
+    let exception_by_dow: HashMap<i32, &CalendarException> = ctx
+        .exceptions
+        .iter()
+        .filter_map(|ex| {
+            let d = chrono::NaiveDate::parse_from_str(&ex.date, "%Y-%m-%d").ok()?;
+            let dow = d.weekday().num_days_from_monday() as i32;
+            Some((dow, ex))
+        })
+        .collect();
+
+    // Collect events that have details_vary_daily for the reminder.
+    let vary_daily_names: Vec<&str> = ctx
+        .events
+        .iter()
+        .filter(|(ev, _)| ev.details_vary_daily)
+        .map(|(ev, _)| ev.name.as_str())
+        .collect();
+
+    // Collect linked event pairs for relationships section.
+    let mut relationships: Vec<(&str, &str)> = Vec::new();
+    for (ev, _) in &ctx.events {
+        if let Some(ref target_id) = ev.linked_to {
+            if let Some(target) = event_by_id.get(target_id.as_str()) {
+                relationships.push((&ev.name, &target.name));
+            }
+        }
+    }
+
+    for dow in 0..5 {
+        let day = day_name(dow);
+
+        // Check for calendar exceptions.
+        if let Some(ex) = exception_by_dow.get(&dow) {
+            match ex.exception_type.as_str() {
+                "no_school" => {
+                    let label = if ex.label.is_empty() {
+                        "No School"
+                    } else {
+                        &ex.label
+                    };
+                    out.push_str(&format!("{day}:\n- **{label}** — No School\n\n"));
+                    continue;
+                }
+                "half_day" | "early_release" => {
+                    let label = if ex.label.is_empty() {
+                        &ex.exception_type
+                    } else {
+                        &ex.label
+                    };
+                    out.push_str(&format!(
+                        "{day}: ⚠️ {label} — truncated schedule\n"
+                    ));
+                    // Fall through to show events; the AI should truncate at
+                    // the early dismissal. We still list the events so the AI
+                    // knows what normally happens and can decide what fits.
+                }
+                _ => {}
+            }
+        } else {
+            out.push_str(&format!("{day}:\n"));
+        }
+
+        let mut slots = day_events.get(&dow).cloned().unwrap_or_default();
+        // Sort by start_time.
+        slots.sort_by(|a, b| a.0.cmp(b.0));
+
+        if slots.is_empty() {
+            out.push_str("- (no events scheduled)\n");
+        }
+
+        for (start, end, ev) in &slots {
+            let tag = match ev.event_type.as_str() {
+                "fixed" => "[FIXED - reproduce as-is]",
+                "special" => "[SPECIAL - reproduce as-is]",
+                "teaching_slot" => "[TEACHING SLOT - generate lesson content]",
+                _ => "",
+            };
+
+            // Check for linked event relationship.
+            let link_note = if let Some(ref target_id) = ev.linked_to {
+                if let Some(target) = event_by_id.get(target_id.as_str()) {
+                    format!(" → {} [LINKED - intro describes {} activities]", target.name, target.name)
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+
+            out.push_str(&format!(
+                "- {start}-{end}: {}{link_note} {tag}\n",
+                ev.name
+            ));
+        }
+        out.push('\n');
+    }
+
+    // Event relationships section.
+    if !relationships.is_empty() {
+        out.push_str("### Event Relationships\n");
+        for (intro, main) in &relationships {
+            out.push_str(&format!(
+                "- **{intro}** precedes **{main}** — describe what will happen in the {main} session\n"
+            ));
+        }
+        out.push('\n');
+    }
+
+    // Daily variation mandate for events with details_vary_daily.
+    if !vary_daily_names.is_empty() {
+        out.push_str("### Content That Must Vary Daily\n");
+        out.push_str(
+            "The following events MUST have **different** content each day of the week:\n\n",
+        );
+        for name in &vary_daily_names {
+            out.push_str(&format!("- **{name}**\n"));
+        }
+        out.push_str(
+            "\nDo NOT repeat the same activities, materials, or focus across multiple days \
+             for these events. Each day should feel distinct.\n\n",
+        );
+    }
+
+    // General variation reminder.
+    out.push_str("### Daily Variation — CRITICAL\n\n");
+    out.push_str(
+        "Each day MUST have **different** lesson content in teaching slots. Only [FIXED] and \
+         [SPECIAL] events repeat identically. All [TEACHING SLOT] content must vary day to day.\n\n",
+    );
+
+    out.push_str(
+        "**Per-Day Specials:** When a special is scheduled on a given day, surrounding time \
+         slots shift accordingly. Adapt the schedule per day based on which specials are present.\n\n",
+    );
+
+    out
 }
 
 // ── LTP Context ─────────────────────────────────────────────
@@ -1048,10 +1274,18 @@ fn build_messages(
     active_plan: Option<(&str, &str)>, // (title, content)
     teaching_template: Option<&str>,   // serialized template JSON
     ltp_context: Option<&crate::database::LtpContext>,
+    schedule_context: Option<&ScheduleContext>,
 ) -> Vec<CompletionMessage> {
     let mut messages = Vec::new();
 
     let mut system_content = SYSTEM_PROMPT.to_string();
+
+    // Inject schedule context if available — tells the AI about the teacher's
+    // actual recurring weekly schedule (from the new RecurringEvent data).
+    // When present, this supersedes the old template-based recurring events.
+    if let Some(sched) = schedule_context {
+        system_content.push_str(&format_schedule_instructions(sched));
+    }
 
     // Inject teaching template if available — tells the AI about the teacher's
     // preferred table structure, color scheme, time slots, and recurring elements.
@@ -1125,8 +1359,9 @@ async fn generate_response(
     active_plan: Option<(&str, &str)>,
     teaching_template: Option<&str>,
     ltp_context: Option<&crate::database::LtpContext>,
+    schedule_context: Option<&ScheduleContext>,
 ) -> Result<String, ChalkError> {
-    let messages = build_messages(history, user_message, rag_context, active_plan, teaching_template, ltp_context);
+    let messages = build_messages(history, user_message, rag_context, active_plan, teaching_template, ltp_context, schedule_context);
     provider.complete(&messages, 16384, 0.7).await
 }
 
@@ -1141,8 +1376,9 @@ async fn generate_response_stream(
     active_plan: Option<(&str, &str)>,
     teaching_template: Option<&str>,
     ltp_context: Option<&crate::database::LtpContext>,
+    schedule_context: Option<&ScheduleContext>,
 ) -> Result<String, ChalkError> {
-    let messages = build_messages(history, user_message, rag_context, active_plan, teaching_template, ltp_context);
+    let messages = build_messages(history, user_message, rag_context, active_plan, teaching_template, ltp_context, schedule_context);
     let conv_id = conversation_id.to_string();
     let app_handle = app.clone();
 
@@ -1250,6 +1486,9 @@ pub async fn send_chat_message(
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     let ltp_context = get_ltp_context(db, &today).unwrap_or(None);
 
+    // Fetch schedule context (RecurringEvent data) for the current week.
+    let schedule_context = get_schedule_context(db, &today);
+
     // Create provider and generate AI response.
     let ai_provider = create_provider_from_settings(&api_key, &base_url, &model, "openai")
         .map_err(|e| e.message)?;
@@ -1262,6 +1501,7 @@ pub async fn send_chat_message(
             active_plan,
             template_json.as_deref(),
             ltp_context.as_ref(),
+            schedule_context.as_ref(),
         )
             .await
             .map_err(|e| e.message)?;
@@ -1375,6 +1615,9 @@ pub async fn send_chat_message_stream(
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     let ltp_context = get_ltp_context(db, &today).unwrap_or(None);
 
+    // Fetch schedule context (RecurringEvent data) for the current week.
+    let schedule_context = get_schedule_context(db, &today);
+
     // Create provider before spawning so we get early config errors.
     let ai_provider = create_provider_from_settings(&api_key, &base_url, &model, "openai")
         .map_err(|e| e.message)?;
@@ -1404,6 +1647,7 @@ pub async fn send_chat_message_stream(
             active_plan,
             template_json.as_deref(),
             ltp_context.as_ref(),
+            schedule_context.as_ref(),
         )
         .await
         {
@@ -1777,7 +2021,7 @@ mod tests {
     #[test]
     fn test_build_messages_without_context() {
         let history: Vec<ChatMessage> = vec![];
-        let messages = build_messages(&history, "Hello", "", None, None, None);
+        let messages = build_messages(&history, "Hello", "", None, None, None, None);
 
         assert_eq!(messages.len(), 2); // system + user
         assert_eq!(messages[0].role, "system");
@@ -1790,7 +2034,7 @@ mod tests {
     fn test_build_messages_with_rag_context() {
         let history: Vec<ChatMessage> = vec![];
         let rag_ctx = "Relevant plan: Photosynthesis Lab";
-        let messages = build_messages(&history, "Help me", rag_ctx, None, None, None);
+        let messages = build_messages(&history, "Help me", rag_ctx, None, None, None, None);
 
         assert_eq!(messages.len(), 2);
         assert!(messages[0].content.contains(SYSTEM_PROMPT));
@@ -1817,7 +2061,7 @@ mod tests {
                 created_at: "2024-01-01".into(),
             },
         ];
-        let messages = build_messages(&history, "New question", "", None, None, None);
+        let messages = build_messages(&history, "New question", "", None, None, None, None);
 
         // system + 2 history + user = 4
         assert_eq!(messages.len(), 4);
@@ -1840,7 +2084,7 @@ mod tests {
             })
             .collect();
 
-        let messages = build_messages(&history, "Final", "", None, None, None);
+        let messages = build_messages(&history, "Final", "", None, None, None, None);
         // system + 20 history + user = 22
         assert_eq!(messages.len(), 22);
         // First history message should be index 5 (25-20=5).
@@ -1867,7 +2111,7 @@ mod tests {
                 created_at: "2024-01-01".into(),
             },
         ];
-        let messages = build_messages(&history, "Hi", "", None, None, None);
+        let messages = build_messages(&history, "Hi", "", None, None, None, None);
 
         // system + 1 user from history (system skipped) + user = 3
         assert_eq!(messages.len(), 3);
@@ -1878,7 +2122,7 @@ mod tests {
     fn test_build_messages_with_active_plan() {
         let history: Vec<ChatMessage> = vec![];
         let plan = Some(("Photosynthesis Lab", "Students will learn about..."));
-        let messages = build_messages(&history, "Help me improve this", "", plan, None, None);
+        let messages = build_messages(&history, "Help me improve this", "", plan, None, None, None);
 
         assert_eq!(messages.len(), 2);
         assert!(messages[0].content.contains("CURRENT LESSON PLAN"));
@@ -1890,7 +2134,7 @@ mod tests {
     fn test_build_messages_with_empty_plan() {
         let history: Vec<ChatMessage> = vec![];
         let plan = Some(("New Plan", ""));
-        let messages = build_messages(&history, "Help me", "", plan, None, None);
+        let messages = build_messages(&history, "Help me", "", plan, None, None, None);
 
         assert_eq!(messages.len(), 2);
         assert!(messages[0].content.contains("currently empty"));
@@ -1901,7 +2145,7 @@ mod tests {
     fn test_build_messages_with_plan_and_rag() {
         let history: Vec<ChatMessage> = vec![];
         let plan = Some(("My Plan", "Some content here"));
-        let messages = build_messages(&history, "Help", "Related: old plan data", plan, None, None);
+        let messages = build_messages(&history, "Help", "Related: old plan data", plan, None, None, None);
 
         assert_eq!(messages.len(), 2);
         assert!(messages[0].content.contains("CURRENT LESSON PLAN"));
@@ -1913,7 +2157,7 @@ mod tests {
     fn test_build_messages_with_teaching_template() {
         let history: Vec<ChatMessage> = vec![];
         let template = r##"{"color_scheme":{"mappings":[{"color":"#FFD700","category":"Math","frequency":5}]},"table_structure":{"layout_type":"schedule_grid","columns":["Time","Monday","Tuesday"],"row_categories":["Morning","Afternoon"],"column_count":3},"time_slots":["8:00-9:00","9:00-10:00"],"content_patterns":{"cell_content_types":["activity"],"has_links":false,"has_rich_formatting":true},"recurring_elements":{"subjects":["Math","Reading"],"activities":["Circle Time","Centers"]}}"##;
-        let messages = build_messages(&history, "Make a plan", "", None, Some(template), None);
+        let messages = build_messages(&history, "Make a plan", "", None, Some(template), None, None);
 
         assert_eq!(messages.len(), 2);
         assert!(messages[0].content.contains("Teacher's Lesson Plan Template"));
@@ -1935,7 +2179,7 @@ mod tests {
         let history: Vec<ChatMessage> = vec![];
         let template = r#"{"color_scheme":{"mappings":[]},"table_structure":{"layout_type":"schedule_grid","columns":["Time","Mon"],"row_categories":[],"column_count":2},"time_slots":[],"content_patterns":{"cell_content_types":[],"has_links":false,"has_rich_formatting":false},"recurring_elements":{"subjects":[],"activities":[]}}"#;
         let plan = Some(("My Plan", "Some content"));
-        let messages = build_messages(&history, "Help", "", plan, Some(template), None);
+        let messages = build_messages(&history, "Help", "", plan, Some(template), None, None);
 
         assert_eq!(messages.len(), 2);
         // Template section appears before plan section.
@@ -2488,10 +2732,182 @@ mod tests {
             event_relationships: vec![],
         };
 
-        let messages = build_messages(&history, "Plan a lesson", "", None, None, Some(&ltp_ctx));
+        let messages = build_messages(&history, "Plan a lesson", "", None, None, Some(&ltp_ctx), None);
         assert_eq!(messages.len(), 2);
         assert!(messages[0].content.contains("LONG-TERM PLAN CONTEXT"));
         assert!(messages[0].content.contains("Math: Shapes"));
         assert!(messages[0].content.contains("Unit 3"));
+    }
+
+    // ── format_schedule_instructions tests ──────────────────────
+
+    fn make_event(id: &str, name: &str, event_type: &str) -> RecurringEvent {
+        RecurringEvent {
+            id: id.to_string(),
+            name: name.to_string(),
+            event_type: event_type.to_string(),
+            linked_to: None,
+            details_vary_daily: false,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    fn make_occ(event_id: &str, dow: i32, start: &str, end: &str) -> EventOccurrence {
+        EventOccurrence {
+            id: String::new(),
+            event_id: event_id.to_string(),
+            day_of_week: dow,
+            start_time: start.to_string(),
+            end_time: end.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_format_schedule_basic() {
+        let ctx = ScheduleContext {
+            events: vec![
+                (
+                    make_event("1", "Breakfast", "fixed"),
+                    vec![
+                        make_occ("1", 0, "8:15", "9:00"),
+                        make_occ("1", 1, "8:15", "9:00"),
+                    ],
+                ),
+                (
+                    make_event("2", "Math Block", "teaching_slot"),
+                    vec![
+                        make_occ("2", 0, "9:30", "10:30"),
+                    ],
+                ),
+            ],
+            exceptions: vec![],
+        };
+
+        let result = format_schedule_instructions(&ctx);
+        assert!(result.contains("MONDAY:"));
+        assert!(result.contains("TUESDAY:"));
+        assert!(result.contains("8:15-9:00: Breakfast"));
+        assert!(result.contains("[FIXED - reproduce as-is]"));
+        assert!(result.contains("9:30-10:30: Math Block"));
+        assert!(result.contains("[TEACHING SLOT - generate lesson content]"));
+    }
+
+    #[test]
+    fn test_format_schedule_with_special() {
+        let ctx = ScheduleContext {
+            events: vec![(
+                make_event("1", "PE", "special"),
+                vec![make_occ("1", 0, "10:00", "10:50")],
+            )],
+            exceptions: vec![],
+        };
+
+        let result = format_schedule_instructions(&ctx);
+        assert!(result.contains("10:00-10:50: PE"));
+        assert!(result.contains("[SPECIAL - reproduce as-is]"));
+        // Tuesday should have no PE
+        assert!(result.contains("TUESDAY:\n- (no events scheduled)"));
+    }
+
+    #[test]
+    fn test_format_schedule_holiday_skips_day() {
+        let ctx = ScheduleContext {
+            events: vec![(
+                make_event("1", "Breakfast", "fixed"),
+                vec![make_occ("1", 0, "8:15", "9:00")],
+            )],
+            exceptions: vec![CalendarException {
+                id: String::new(),
+                calendar_id: String::new(),
+                // Monday = 2026-03-16 (a Monday)
+                date: "2026-03-16".to_string(),
+                exception_type: "no_school".to_string(),
+                label: "Spring Break".to_string(),
+            }],
+        };
+
+        let result = format_schedule_instructions(&ctx);
+        assert!(result.contains("MONDAY:\n- **Spring Break** — No School"));
+        // Should NOT show Breakfast on Monday
+        assert!(!result.contains("MONDAY:\n- 8:15"));
+    }
+
+    #[test]
+    fn test_format_schedule_half_day() {
+        let ctx = ScheduleContext {
+            events: vec![(
+                make_event("1", "Breakfast", "fixed"),
+                vec![make_occ("1", 2, "8:15", "9:00")], // Wednesday
+            )],
+            exceptions: vec![CalendarException {
+                id: String::new(),
+                calendar_id: String::new(),
+                // Wednesday = 2026-03-18
+                date: "2026-03-18".to_string(),
+                exception_type: "half_day".to_string(),
+                label: "Parent Conferences".to_string(),
+            }],
+        };
+
+        let result = format_schedule_instructions(&ctx);
+        assert!(result.contains("Parent Conferences"));
+        assert!(result.contains("truncated schedule"));
+        // Events still shown so AI can decide what fits
+        assert!(result.contains("8:15-9:00: Breakfast"));
+    }
+
+    #[test]
+    fn test_format_schedule_linked_events() {
+        let mut intro = make_event("1", "New Center Intro", "fixed");
+        intro.linked_to = Some("2".to_string());
+
+        let centers = make_event("2", "Centers", "teaching_slot");
+
+        let ctx = ScheduleContext {
+            events: vec![
+                (intro, vec![make_occ("1", 0, "11:30", "11:45")]),
+                (centers, vec![make_occ("2", 0, "11:45", "12:30")]),
+            ],
+            exceptions: vec![],
+        };
+
+        let result = format_schedule_instructions(&ctx);
+        assert!(result.contains("New Center Intro → Centers [LINKED"));
+        assert!(result.contains("**New Center Intro** precedes **Centers**"));
+    }
+
+    #[test]
+    fn test_format_schedule_vary_daily() {
+        let mut ev = make_event("1", "Centers", "teaching_slot");
+        ev.details_vary_daily = true;
+
+        let ctx = ScheduleContext {
+            events: vec![(ev, vec![make_occ("1", 0, "11:00", "12:00")])],
+            exceptions: vec![],
+        };
+
+        let result = format_schedule_instructions(&ctx);
+        assert!(result.contains("Content That Must Vary Daily"));
+        assert!(result.contains("**Centers**"));
+        assert!(result.contains("different"));
+    }
+
+    #[test]
+    fn test_build_messages_with_schedule_context() {
+        let history: Vec<ChatMessage> = vec![];
+        let ctx = ScheduleContext {
+            events: vec![(
+                make_event("1", "Lunch", "fixed"),
+                vec![make_occ("1", 0, "12:00", "12:30")],
+            )],
+            exceptions: vec![],
+        };
+
+        let messages = build_messages(&history, "Plan my week", "", None, None, None, Some(&ctx));
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0].content.contains("Weekly Schedule"));
+        assert!(messages[0].content.contains("Lunch"));
+        assert!(messages[0].content.contains("[FIXED - reproduce as-is]"));
     }
 }

@@ -1640,6 +1640,92 @@ impl Database {
         })
     }
 
+    /// Fetch all recurring events together with their occurrences in a single
+    /// query, ordered by day-of-week then start time.  Returns a vec of
+    /// `(RecurringEvent, Vec<EventOccurrence>)`.
+    pub fn list_events_with_occurrences(
+        &self,
+    ) -> Result<Vec<(RecurringEvent, Vec<EventOccurrence>)>> {
+        self.with_conn(|conn| {
+            // 1. Fetch all recurring events.
+            let mut evt_stmt = conn.prepare(
+                "SELECT id, name, event_type, linked_to, details_vary_daily, created_at, updated_at
+                 FROM recurring_events ORDER BY name",
+            )?;
+            let events: Vec<RecurringEvent> = evt_stmt
+                .query_map([], |row| {
+                    Ok(RecurringEvent {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        event_type: row.get(2)?,
+                        linked_to: row.get(3)?,
+                        details_vary_daily: row.get(4)?,
+                        created_at: row.get(5)?,
+                        updated_at: row.get(6)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+
+            // 2. Fetch ALL occurrences in one query and group by event_id.
+            let mut occ_stmt = conn.prepare(
+                "SELECT id, event_id, day_of_week, start_time, end_time
+                 FROM event_occurrences ORDER BY day_of_week, start_time",
+            )?;
+            let all_occs: Vec<EventOccurrence> = occ_stmt
+                .query_map([], |row| {
+                    Ok(EventOccurrence {
+                        id: row.get(0)?,
+                        event_id: row.get(1)?,
+                        day_of_week: row.get(2)?,
+                        start_time: row.get(3)?,
+                        end_time: row.get(4)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+
+            let mut occ_map: std::collections::HashMap<String, Vec<EventOccurrence>> =
+                std::collections::HashMap::new();
+            for occ in all_occs {
+                occ_map.entry(occ.event_id.clone()).or_default().push(occ);
+            }
+
+            Ok(events
+                .into_iter()
+                .map(|ev| {
+                    let occs = occ_map.remove(&ev.id).unwrap_or_default();
+                    (ev, occs)
+                })
+                .collect())
+        })
+    }
+
+    /// List calendar exceptions whose date falls within [start, end] (inclusive).
+    pub fn list_calendar_exceptions_in_range(
+        &self,
+        calendar_id: &str,
+        start_date: &str,
+        end_date: &str,
+    ) -> Result<Vec<CalendarException>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, calendar_id, date, exception_type, label
+                 FROM calendar_exceptions
+                 WHERE calendar_id = ?1 AND date >= ?2 AND date <= ?3
+                 ORDER BY date",
+            )?;
+            let rows = stmt.query_map(params![calendar_id, start_date, end_date], |row| {
+                Ok(CalendarException {
+                    id: row.get(0)?,
+                    calendar_id: row.get(1)?,
+                    date: row.get(2)?,
+                    exception_type: row.get(3)?,
+                    label: row.get(4)?,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
     // ── School Calendar ───────────────────────────────────────
 
     pub fn get_school_calendar(&self) -> Result<SchoolCalendar> {
