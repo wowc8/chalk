@@ -10,6 +10,7 @@
 //! If the run is cancelled or errors out, the transaction rolls back so
 //! previously imported data stays untouched.
 
+pub mod ltp_parser;
 pub mod parser;
 pub mod template_extractor;
 

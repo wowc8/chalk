@@ -475,7 +475,7 @@ mod tests {
 
         // Reapply all.
         run_all(&conn).unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 9);
+        assert_eq!(current_version(&conn).unwrap(), 10);
 
         // Verify tables exist after reapply.
         let table_count: i32 = conn
