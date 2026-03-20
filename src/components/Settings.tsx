@@ -186,6 +186,9 @@ export function Settings({
           )}
         </motion.section>
 
+        {/* Import HTML File Section */}
+        <ImportHtmlSection addToast={addToast} />
+
         {/* AI Configuration Section */}
         <AiSettingsSection />
 
@@ -707,6 +710,107 @@ function ConnectionCard({
         )}
       </div>
     </motion.div>
+  );
+}
+
+// ── Import HTML File Section ──────────────────────────────────────
+
+interface ImportResult {
+  file_name: string;
+  method: string;
+  time_slots: number;
+  daily_routine_events: number;
+  colors: number;
+  lessons_extracted: number;
+  ref_docs_created: number;
+}
+
+function ImportHtmlSection({
+  addToast,
+}: {
+  addToast: (msg: string, type: "success" | "error") => void;
+}) {
+  const [importing, setImporting] = useState(false);
+  const [lastResult, setLastResult] = useState<ImportResult | null>(null);
+
+  const handleImport = async () => {
+    try {
+      const path = await open({
+        multiple: false,
+        filters: [{ name: "HTML Files", extensions: ["html", "htm"] }],
+      });
+      if (!path) return;
+      setImporting(true);
+      const result = await invoke<ImportResult>("import_html_file", { path });
+      setLastResult(result);
+      addToast(
+        `Imported "${result.file_name}" — ${result.time_slots} time slots, ${result.daily_routine_events} routine events`,
+        "success"
+      );
+    } catch (e) {
+      addToast(`Import failed: ${e}`, "error");
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  return (
+    <motion.section
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ delay: 0.12 }}
+      className="mb-8"
+    >
+      <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">
+        Import Template
+      </h2>
+
+      <div className="bg-bat-charcoal/50 rounded-lg border border-gray-800 p-4 space-y-3">
+        <p className="text-xs text-gray-500">
+          Import a lesson plan template from a local HTML file. The file will be
+          analyzed to extract your schedule structure, time slots, colors, and
+          recurring events.
+        </p>
+
+        <motion.button
+          whileHover={{ scale: 1.02 }}
+          whileTap={{ scale: 0.98 }}
+          disabled={importing}
+          onClick={handleImport}
+          className="px-4 py-2 bg-bat-purple/10 border border-bat-purple/30 rounded-lg text-bat-purple text-sm hover:bg-bat-purple/20 transition-colors disabled:opacity-50 flex items-center gap-2"
+        >
+          {importing ? (
+            <>
+              <motion.span
+                animate={{ rotate: 360 }}
+                transition={{
+                  duration: 1,
+                  repeat: Infinity,
+                  ease: "linear",
+                }}
+                className="inline-block w-3.5 h-3.5 border-2 border-bat-purple border-t-transparent rounded-full"
+              />
+              Importing...
+            </>
+          ) : (
+            <>
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+              </svg>
+              Import HTML File
+            </>
+          )}
+        </motion.button>
+
+        {lastResult && (
+          <div className="text-xs text-gray-400 space-y-0.5 pt-1 border-t border-gray-800/50">
+            <p className="text-gray-300 font-medium">{lastResult.file_name}</p>
+            <p>Detection: {lastResult.method} | {lastResult.time_slots} time slots | {lastResult.colors} colors</p>
+            <p>{lastResult.daily_routine_events} routine events | {lastResult.lessons_extracted} lessons extracted</p>
+          </div>
+        )}
+      </div>
+    </motion.section>
   );
 }
 
