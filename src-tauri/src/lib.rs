@@ -172,14 +172,91 @@ fn extract_schedule_from_imports(
         }
     }
 
+    // ── Parse time slots and detect duration-like values ──────────────
+    // Some LTP tables use relative offsets (e.g. "0:10-0:30") rather than
+    // clock times.  Detect this and fall back to sensible school-day defaults.
+
+    struct ParsedRoutine {
+        start: String,
+        end: String,
+    }
+
+    let parsed_times: Vec<ParsedRoutine> = schema
+        .daily_routine
+        .iter()
+        .map(|routine| {
+            if let Some(ref slot) = routine.time_slot {
+                let (s, e) = parse_time_range(slot).unwrap_or_default();
+                ParsedRoutine { start: s, end: e }
+            } else {
+                ParsedRoutine {
+                    start: String::new(),
+                    end: String::new(),
+                }
+            }
+        })
+        .collect();
+
+    // Check whether the extracted times look like real school-day clock times.
+    // A valid school time has hour ≥ 6 (6 AM) and hour ≤ 18 (6 PM).
+    fn is_school_hour(time: &str) -> bool {
+        if time.is_empty() {
+            return false;
+        }
+        if let Some(hour_str) = time.split(':').next() {
+            if let Ok(h) = hour_str.parse::<u32>() {
+                return (6..=18).contains(&h);
+            }
+        }
+        false
+    }
+
+    let valid_count = parsed_times
+        .iter()
+        .filter(|p| is_school_hour(&p.start))
+        .count();
+    let use_defaults = parsed_times.is_empty() || valid_count == 0;
+
+    // When times are missing or are durations, assign sequential defaults
+    // starting at 8:00 AM with 30-minute blocks.
+    let default_times: Vec<(String, String)> = if use_defaults {
+        let mut times = Vec::new();
+        let mut current_minutes: u32 = 8 * 60; // 8:00 AM
+        for _ in 0..schema.daily_routine.len() {
+            let start_h = current_minutes / 60;
+            let start_m = current_minutes % 60;
+            let end_minutes = current_minutes + 30;
+            let end_h = end_minutes / 60;
+            let end_m = end_minutes % 60;
+            times.push((
+                format!("{:02}:{:02}", start_h, start_m),
+                format!("{:02}:{:02}", end_h, end_m),
+            ));
+            current_minutes = end_minutes;
+        }
+        times
+    } else {
+        Vec::new()
+    };
+
     let mut draft_events: Vec<serde_json::Value> = Vec::new();
 
     for (idx, routine) in schema.daily_routine.iter().enumerate() {
-        // Parse time slot
-        let (start_time, end_time) = if let Some(ref slot) = routine.time_slot {
-            parse_time_range(slot).unwrap_or_else(|| ("".to_string(), "".to_string()))
+        // Use parsed time if valid, otherwise fall back to defaults
+        let (start_time, end_time) = if use_defaults {
+            default_times
+                .get(idx)
+                .cloned()
+                .unwrap_or_else(|| ("".to_string(), "".to_string()))
         } else {
-            ("".to_string(), "".to_string())
+            let p = &parsed_times[idx];
+            if is_school_hour(&p.start) {
+                (p.start.clone(), p.end.clone())
+            } else {
+                // Individual event missing a valid time — leave blank so the
+                // user can fill it in manually.
+                ("".to_string(), "".to_string())
+            }
         };
 
         // Convert day names to day indices

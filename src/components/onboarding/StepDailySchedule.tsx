@@ -5,6 +5,18 @@ import {
   type DraftEvent,
 } from "../../types/schedule";
 
+/** Convert "HH:MM" (24-h) to "H:MM AM/PM" for display. */
+function formatTime(t: string): string {
+  if (!t) return "\u2014";
+  const [hStr, mStr] = t.split(":");
+  const h = parseInt(hStr, 10);
+  const m = mStr ?? "00";
+  if (isNaN(h)) return t;
+  const period = h >= 12 ? "PM" : "AM";
+  const h12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
+  return `${h12}:${m} ${period}`;
+}
+
 type EditMode = "confirm" | "chat" | "document" | "manual" | null;
 
 interface ManualRow {
@@ -155,10 +167,10 @@ export function StepDailySchedule({
                     {row.name || <span className="text-chalk-muted italic">Unnamed</span>}
                   </span>
                   <span className="text-sm text-chalk-dust">
-                    {row.start_time || "\u2014"}
+                    {formatTime(row.start_time)}
                   </span>
                   <span className="text-sm text-chalk-dust">
-                    {row.end_time || "\u2014"}
+                    {formatTime(row.end_time)}
                   </span>
                 </div>
               ))}
