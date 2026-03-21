@@ -239,7 +239,23 @@ fn extract_schedule_from_imports(
         Vec::new()
     };
 
-    let mut draft_events: Vec<serde_json::Value> = Vec::new();
+    // ── Build draft events with deduplication ─────────────────
+    // Deduplicate by (lowercase name, start_time) so that multiple LTP
+    // mentions of the same activity at the same time are merged into a
+    // single event with the union of their day occurrences.
+    use std::collections::HashMap;
+
+    struct MergedEvent {
+        name: String,
+        event_type: &'static str,
+        start_time: String,
+        end_time: String,
+        days: std::collections::BTreeSet<i32>,
+    }
+
+    let mut merged: HashMap<String, MergedEvent> = HashMap::new();
+    // Preserve insertion order for stable output.
+    let mut insertion_order: Vec<String> = Vec::new();
 
     for (idx, routine) in schema.daily_routine.iter().enumerate() {
         // Use parsed time if valid, otherwise fall back to defaults
@@ -253,46 +269,75 @@ fn extract_schedule_from_imports(
             if is_school_hour(&p.start) {
                 (p.start.clone(), p.end.clone())
             } else {
-                // Individual event missing a valid time — leave blank so the
-                // user can fill it in manually.
                 ("".to_string(), "".to_string())
             }
         };
 
-        // Convert day names to day indices
+        // Convert day names to day indices.
+        // Only default to Mon-Fri for truly "Fixed" events (breakfast, lunch,
+        // recess, dismissal). Variable/day-specific events with no days get
+        // an empty set so the user can assign them in the review step.
         let day_indices: Vec<i32> = if routine.days.is_empty() {
-            // If no specific days, assume Mon-Fri
-            vec![0, 1, 2, 3, 4]
+            match routine.event_type {
+                database::RoutineEventType::Fixed => vec![0, 1, 2, 3, 4],
+                _ => Vec::new(),
+            }
         } else {
             routine.days.iter().filter_map(|d| day_name_to_index(d)).collect()
         };
 
-        // Map RoutineEventType to event_type string
         let event_type = match routine.event_type {
             database::RoutineEventType::Fixed => "fixed",
             database::RoutineEventType::Variable => "teaching_slot",
             database::RoutineEventType::DaySpecific => "special",
         };
 
-        let occurrences: Vec<serde_json::Value> = day_indices
-            .iter()
-            .map(|&day| {
-                serde_json::json!({
-                    "day_of_week": day,
-                    "start_time": start_time,
-                    "end_time": end_time,
-                })
-            })
-            .collect();
+        // Dedup key: lowercase name + start time
+        let dedup_key = format!("{}@{}", routine.name.to_lowercase(), start_time);
 
-        draft_events.push(serde_json::json!({
-            "id": format!("extracted-{}", idx),
-            "name": routine.name,
-            "event_type": event_type,
-            "occurrences": occurrences,
-            "source": "ltp",
-        }));
+        if let Some(existing) = merged.get_mut(&dedup_key) {
+            // Merge days into the existing event
+            for d in &day_indices {
+                existing.days.insert(*d);
+            }
+        } else {
+            insertion_order.push(dedup_key.clone());
+            merged.insert(dedup_key, MergedEvent {
+                name: routine.name.clone(),
+                event_type,
+                start_time,
+                end_time,
+                days: day_indices.into_iter().collect(),
+            });
+        }
     }
+
+    let draft_events: Vec<serde_json::Value> = insertion_order
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, key)| {
+            let ev = merged.get(key)?;
+            let occurrences: Vec<serde_json::Value> = ev
+                .days
+                .iter()
+                .map(|&day| {
+                    serde_json::json!({
+                        "day_of_week": day,
+                        "start_time": ev.start_time,
+                        "end_time": ev.end_time,
+                    })
+                })
+                .collect();
+
+            Some(serde_json::json!({
+                "id": format!("extracted-{}", idx),
+                "name": ev.name,
+                "event_type": ev.event_type,
+                "occurrences": occurrences,
+                "source": "ltp",
+            }))
+        })
+        .collect();
 
     Ok(serde_json::json!(draft_events))
 }
